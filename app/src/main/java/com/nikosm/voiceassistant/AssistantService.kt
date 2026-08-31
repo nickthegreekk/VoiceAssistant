@@ -594,7 +594,11 @@ class AssistantService : Service() {
     }
 
     fun startRecording() {
-        requestAssistantFocus()
+        if (!requestAssistantFocus()) {
+            _state.value = AssistantState.IDLE
+            updateNotification("Ready to help")
+            return
+        }
         _voiceDuration.value = 0
         val file = File(cacheDir, "recording_${System.currentTimeMillis()}.m4a")
         val mr = MediaRecorder(this)
