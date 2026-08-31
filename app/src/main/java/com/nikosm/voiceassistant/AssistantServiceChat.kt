@@ -241,6 +241,11 @@ internal fun AssistantService.sendAudioToServer(file: File, currentPersona: Pers
                 android.util.Log.d("AssistantService", "Chat response discarded — superseded by a newer request (gen $generation)")
                 return@launch
             }
+            // A6: this flow's network call has finished. Clear the in-flight reference
+            // before applying (or discarding for a persona change) so currentCall never
+            // points at a completed call. Safe here because no newer request exists,
+            // so currentCall cannot belong to another flow.
+            currentCall = null
             if (!isChatContextCurrent(generation, personaName)) {
                 android.util.Log.d("AssistantService", "Chat response discarded — active persona changed (gen $generation)")
                 return@launch
@@ -520,6 +525,11 @@ internal fun AssistantService.sendTextMessageToServer(inputText: String, current
                 android.util.Log.d("AssistantService", "Chat response discarded — superseded by a newer request (gen $generation)")
                 return@launch
             }
+            // A6: this flow's network call has finished. Clear the in-flight reference
+            // before applying (or discarding for a persona change) so currentCall never
+            // points at a completed call. Safe here because no newer request exists,
+            // so currentCall cannot belong to another flow.
+            currentCall = null
             if (!isChatContextCurrent(generation, personaName)) {
                 android.util.Log.d("AssistantService", "Chat response discarded — active persona changed (gen $generation)")
                 return@launch
@@ -665,20 +675,30 @@ private fun AssistantService.performCloudChat(text: String, persona: Persona, us
 
                 if (apiSetting.apiKey.isBlank() && apiSetting.icon != "C") throw Exception("API Key for ${apiSetting.name} is missing")
                 val request = buildCloudRequest(apiSetting, persona, text, currentTurnInHistory)
-                getDynamicClient(persona).newCall(request).execute().use { response ->
-                    val bodyStr = response.body.string()
-                    if (!response.isSuccessful) {
-                        val detail = try { JSONObject(bodyStr).optJSONObject("error")?.optString("message") } catch (e: Exception) { null }
-                        throw Exception("Error ${response.code}: ${detail ?: bodyStr.take(200)}")
+                // A6: track the call so the Stop button can cancel cloud requests too
+                // (previously execute() was called on an untracked Call).
+                val call = getDynamicClient(persona).newCall(request)
+                currentCall = call
+                try {
+                    call.execute().use { response ->
+                        val bodyStr = response.body.string()
+                        if (!response.isSuccessful) {
+                            val detail = try { JSONObject(bodyStr).optJSONObject("error")?.optString("message") } catch (e: Exception) { null }
+                            throw Exception("Error ${response.code}: ${detail ?: bodyStr.take(200)}")
+                        }
+                        val (responseText, reasonText, usage) = parseCloudResponse(apiSetting, persona, bodyStr)
+                        withContext(Dispatchers.Main) {
+                            val currentUsage = _sessionUsage.value
+                            _sessionUsage.value = UsageInfo(currentUsage.promptTokens + usage.promptTokens, currentUsage.completionTokens + usage.completionTokens, currentUsage.totalTokens + usage.totalTokens, currentUsage.cost + usage.cost)
+                            _totalCost.value += usage.cost
+                            saveSettings()
+                        }
+                        responseText to reasonText
                     }
-                    val (responseText, reasonText, usage) = parseCloudResponse(apiSetting, persona, bodyStr)
-                    withContext(Dispatchers.Main) {
-                        val currentUsage = _sessionUsage.value
-                        _sessionUsage.value = UsageInfo(currentUsage.promptTokens + usage.promptTokens, currentUsage.completionTokens + usage.completionTokens, currentUsage.totalTokens + usage.totalTokens, currentUsage.cost + usage.cost)
-                        _totalCost.value += usage.cost
-                        saveSettings()
-                    }
-                    responseText to reasonText
+                } finally {
+                    // A6: clear the in-flight reference on success AND failure — but only
+                    // if it's still this flow's call (a newer request may have replaced it).
+                    if (currentCall === call) currentCall = null
                 }
             }
             val responseTimeMs = System.currentTimeMillis() - startTime
@@ -828,14 +848,24 @@ private suspend fun AssistantService.performDirectOllamaChat(baseUrl: String, mo
         }
     }
 
-    getDynamicClient(persona).newCall(requestBuilder.build()).execute().use { response ->
-        if (!response.isSuccessful) throw Exception("Ollama error: ${response.code}")
-        val body = response.body.string()
-        val message = JSONObject(body).getJSONObject("message")
-        val rText = message.getString("content")
-        val reasoning = if (persona.enableThinking && message.has("thinking")) message.getString("thinking").ifBlank { null } else null
+    // A6: track direct-Ollama calls so the Stop button cancels them too (previously
+    // execute() was called on an untracked Call, so direct-Ollama never cancelled).
+    val call = getDynamicClient(persona).newCall(requestBuilder.build())
+    currentCall = call
+    try {
+        call.execute().use { response ->
+            if (!response.isSuccessful) throw Exception("Ollama error: ${response.code}")
+            val body = response.body.string()
+            val message = JSONObject(body).getJSONObject("message")
+            val rText = message.getString("content")
+            val reasoning = if (persona.enableThinking && message.has("thinking")) message.getString("thinking").ifBlank { null } else null
 
-        return Triple(rText, reasoning, null)
+            return Triple(rText, reasoning, null)
+        }
+    } finally {
+        // A6: clear the in-flight reference on success AND failure — but only if it's
+        // still this flow's call (a newer request may have replaced currentCall).
+        if (currentCall === call) currentCall = null
     }
 }
 
