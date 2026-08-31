@@ -27,6 +27,10 @@ internal fun AssistantService.sendAudioToServer(file: File, currentPersona: Pers
     }
     serviceScope.launch {
         val startTime = System.currentTimeMillis()
+        // A2/B1: capture the request identity (generation + persona). The response is
+        // applied only if both are still current when it arrives.
+        val generation = nextChatRequestSeq()
+        val personaName = currentPersona.name
         _state.value = AssistantState.THINKING
         updateNotification("Thinking...")
 
@@ -37,12 +41,20 @@ internal fun AssistantService.sendAudioToServer(file: File, currentPersona: Pers
                 try {
                     val transcribedText = transcribeWithGateway(file, currentPersona)
                         ?: throw Exception("Could not transcribe audio. Check Gateway connection.")
-                    performCloudChat(transcribedText, currentPersona, useDeviceVoice, startTime, currentTurnInHistory = false)
+                    performCloudChat(transcribedText, currentPersona, useDeviceVoice, startTime, currentTurnInHistory = false, generation = generation)
                 } catch (e: Exception) {
-                    android.util.Log.e("AssistantService", "Cloud voice chat failed", e)
-                    _messages.value = _messages.value + ChatMessage("assistant", "Error: ${e.message}", isError = true)
-                    _state.value = AssistantState.IDLE
-                    updateNotification("Ready to help")
+                    if (!isChatRequestCurrent(generation)) {
+                        android.util.Log.d("AssistantService", "Voice chat request superseded by a newer request — discarding failure: ${e.message}")
+                    } else {
+                        android.util.Log.e("AssistantService", "Cloud voice chat failed", e)
+                        if (isChatContextCurrent(generation, personaName)) {
+                            _messages.value = _messages.value + ChatMessage("assistant", "Error: ${e.message}", isError = true)
+                        } else {
+                            android.util.Log.d("AssistantService", "Persona changed during request — discarding failure message: ${e.message}")
+                        }
+                        _state.value = AssistantState.IDLE
+                        updateNotification("Ready to help")
+                    }
                 }
             }
             return@launch
@@ -185,6 +197,15 @@ internal fun AssistantService.sendAudioToServer(file: File, currentPersona: Pers
                 }
                 throw lastEx ?: Exception("All connection attempts failed")
             }
+            // A2/B1: apply the response only if the context is unchanged.
+            if (!isChatRequestCurrent(generation)) {
+                android.util.Log.d("AssistantService", "Chat response discarded — superseded by a newer request (gen $generation)")
+                return@launch
+            }
+            if (!isChatContextCurrent(generation, personaName)) {
+                android.util.Log.d("AssistantService", "Chat response discarded — active persona changed (gen $generation)")
+                return@launch
+            }
             val (uText, rText, reasoning, bytes) = responseData as List<Any?>
             val responseTimeMs = System.currentTimeMillis() - startTime
             val audioPath = if (bytes != null && !useDeviceVoice) {
@@ -204,11 +225,19 @@ internal fun AssistantService.sendAudioToServer(file: File, currentPersona: Pers
                 playResponse(currentPersona, file = File(audioPath))
             }
         } catch (e: Exception) {
-            android.util.Log.e("AssistantService", "Chat failed", e)
-            _messages.value = _messages.value + ChatMessage("assistant", "Error: ${e.message ?: "Unknown error"}", isError = true)
-            currentCall = null
+            if (!isChatRequestCurrent(generation)) {
+                android.util.Log.d("AssistantService", "Chat request superseded by a newer request — discarding failure: ${e.message}")
+            } else {
+                android.util.Log.e("AssistantService", "Chat failed", e)
+                if (isChatContextCurrent(generation, personaName)) {
+                    _messages.value = _messages.value + ChatMessage("assistant", "Error: ${e.message ?: "Unknown error"}", isError = true)
+                } else {
+                    android.util.Log.d("AssistantService", "Persona changed during request — discarding failure message: ${e.message}")
+                }
+                currentCall = null
+            }
         } finally {
-            if (_state.value == AssistantState.THINKING) {
+            if (_state.value == AssistantState.THINKING && isChatRequestCurrent(generation)) {
                 _state.value = AssistantState.IDLE
                 updateNotification("Ready to help")
             }
@@ -230,8 +259,13 @@ internal fun AssistantService.sendTextMessageToServer(inputText: String, current
 
     val useDeviceVoice = currentPersona.voiceMode != VoiceMode.GATEWAY
 
+    // A2/B1: capture the request identity (generation + persona) — this flow appended
+    // the user turn already, so the response applies only if both are still current.
+    val generation = nextChatRequestSeq()
+    val personaName = currentPersona.name
+
     if (currentPersona.isCloud && isCloudModel(currentPersona.model)) {
-        performCloudChat(inputText, currentPersona, useDeviceVoice, startTime, currentTurnInHistory = true)
+        performCloudChat(inputText, currentPersona, useDeviceVoice, startTime, currentTurnInHistory = true, generation = generation)
         return
     }
     serviceScope.launch {
@@ -426,6 +460,15 @@ internal fun AssistantService.sendTextMessageToServer(inputText: String, current
                 }
                 throw lastEx ?: Exception("All connection attempts failed")
             }
+            // A2/B1: apply the response only if the context is unchanged.
+            if (!isChatRequestCurrent(generation)) {
+                android.util.Log.d("AssistantService", "Chat response discarded — superseded by a newer request (gen $generation)")
+                return@launch
+            }
+            if (!isChatContextCurrent(generation, personaName)) {
+                android.util.Log.d("AssistantService", "Chat response discarded — active persona changed (gen $generation)")
+                return@launch
+            }
             val (rText, reasoning, bytes) = responseData as Triple<String, String?, ByteArray?>
             val responseTimeMs = System.currentTimeMillis() - startTime
             val audioPath = if (bytes != null && !useDeviceVoice) {
@@ -443,11 +486,19 @@ internal fun AssistantService.sendTextMessageToServer(inputText: String, current
                 playResponse(currentPersona, file = File(audioPath))
             }
         } catch (e: Exception) {
-            android.util.Log.e("AssistantService", "Chat failed", e)
-            _messages.value = _messages.value + ChatMessage("assistant", "Error: ${e.message ?: "Unknown error"}", isError = true)
-            currentCall = null
+            if (!isChatRequestCurrent(generation)) {
+                android.util.Log.d("AssistantService", "Chat request superseded by a newer request — discarding failure: ${e.message}")
+            } else {
+                android.util.Log.e("AssistantService", "Chat failed", e)
+                if (isChatContextCurrent(generation, personaName)) {
+                    _messages.value = _messages.value + ChatMessage("assistant", "Error: ${e.message ?: "Unknown error"}", isError = true)
+                } else {
+                    android.util.Log.d("AssistantService", "Persona changed during request — discarding failure message: ${e.message}")
+                }
+                currentCall = null
+            }
         } finally {
-            if (_state.value == AssistantState.THINKING) {
+            if (_state.value == AssistantState.THINKING && isChatRequestCurrent(generation)) {
                 _state.value = AssistantState.IDLE
                 updateNotification("Ready to help")
             }
@@ -544,7 +595,7 @@ private fun AssistantService.isCloudModel(model: String): Boolean {
            _customCloudApis.value.any { it.name == providerName }
 }
 
-private fun AssistantService.performCloudChat(text: String, persona: Persona, useDeviceVoice: Boolean = false, startTime: Long, currentTurnInHistory: Boolean) {
+private fun AssistantService.performCloudChat(text: String, persona: Persona, useDeviceVoice: Boolean = false, startTime: Long, currentTurnInHistory: Boolean, generation: Long) {
     serviceScope.launch {
         _state.value = AssistantState.THINKING
         updateNotification("Thinking (Cloud)...")
@@ -576,6 +627,15 @@ private fun AssistantService.performCloudChat(text: String, persona: Persona, us
                 }
             }
             val responseTimeMs = System.currentTimeMillis() - startTime
+            // A2/B1: apply only if this is still the newest request for this persona.
+            if (!isChatRequestCurrent(generation)) {
+                android.util.Log.d("AssistantService", "Cloud response discarded — superseded by a newer request (gen $generation)")
+                return@launch
+            }
+            if (!isChatContextCurrent(generation, persona.name)) {
+                android.util.Log.d("AssistantService", "Cloud response discarded — active persona changed (gen $generation)")
+                return@launch
+            }
             if (useDeviceVoice) {
                 _messages.value = _messages.value + ChatMessage("assistant", responseData.first, responseData.second, responseTimeMs = responseTimeMs)
                 saveSettings()
@@ -599,9 +659,17 @@ private fun AssistantService.performCloudChat(text: String, persona: Persona, us
                 saveSettings()
             }
         } catch (e: Exception) {
-            _messages.value = _messages.value + ChatMessage("assistant", "Error: ${e.message}", isError = true)
+            if (!isChatRequestCurrent(generation)) {
+                android.util.Log.d("AssistantService", "Cloud chat request superseded — discarding failure: ${e.message}")
+            } else {
+                if (isChatContextCurrent(generation, persona.name)) {
+                    _messages.value = _messages.value + ChatMessage("assistant", "Error: ${e.message}", isError = true)
+                } else {
+                    android.util.Log.d("AssistantService", "Persona changed during cloud request — discarding failure message: ${e.message}")
+                }
+            }
         } finally {
-            if (_state.value == AssistantState.THINKING) {
+            if (_state.value == AssistantState.THINKING && isChatRequestCurrent(generation)) {
                 _state.value = AssistantState.IDLE
                 updateNotification("Ready to help")
             }

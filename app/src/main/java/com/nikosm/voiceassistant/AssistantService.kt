@@ -25,6 +25,8 @@ import androidx.annotation.RequiresPermission
 import androidx.compose.ui.graphics.Color
 import androidx.core.app.NotificationCompat
 import kotlinx.coroutines.*
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import okhttp3.*
@@ -58,6 +60,18 @@ class AssistantService : Service() {
     val messages = _messages.asStateFlow()
 
     private var currentPersonaName: String? = null
+
+    // A2/B1: monotonically increasing chat request sequence. Bumped every time a new
+    // chat request starts; a response may only be APPLIED if it belongs to the most
+    // recent request (isChatRequestCurrent) AND the active persona is unchanged
+    // (isChatContextCurrent). State ownership (catch handling / finally resets)
+    // follows the sequence only, so a persona switch mid-request still cleans up
+    // state without polluting the new persona's history.
+    private var chatRequestSeq: Long = 0
+    internal fun nextChatRequestSeq(): Long = ++chatRequestSeq
+    internal fun isChatRequestCurrent(seq: Long): Boolean = seq == chatRequestSeq
+    internal fun isChatContextCurrent(seq: Long, personaName: String): Boolean =
+        seq == chatRequestSeq && currentPersonaName == personaName
 
     val _sessionUsage = MutableStateFlow(UsageInfo())
     val sessionUsage = _sessionUsage.asStateFlow()
@@ -328,7 +342,25 @@ class AssistantService : Service() {
         }
     }
 
+    // C1: settings/history persistence is debounced and written on Dispatchers.IO.
+    // saveSettings() is called on every message append (plus ~30 settings mutators),
+    // so rapid calls coalesce into a single disk write SAVE_DEBOUNCE_MS after the
+    // last call. The deferred write re-reads the StateFlows at write time, so it
+    // always persists the LATEST state (never a stale snapshot). The mutex
+    // serializes overlapping writers, and onDestroy() flushes synchronously so a
+    // pending debounce window can never lose state on teardown.
+    private val saveMutex = Mutex()
+    private var saveSettingsJob: Job? = null
+
     fun saveSettings() {
+        saveSettingsJob?.cancel()
+        saveSettingsJob = serviceScope.launch(Dispatchers.IO) {
+            delay(SAVE_DEBOUNCE_MS)
+            saveMutex.withLock { persistSettings() }
+        }
+    }
+
+    private fun persistSettings() {
         settingsManager.saveServerBases(_serverBases.value)
         settingsManager.saveCloudApis(_cloudApis.value)
         settingsManager.saveCustomCloudApis(_customCloudApis.value)
@@ -568,6 +600,11 @@ class AssistantService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
+        // C1: final synchronous flush — if the service is torn down inside the debounce
+        // window, the pending state must reach disk before anything is cancelled.
+        // Serialized against an in-flight debounced write via the same mutex.
+        saveSettingsJob?.cancel()
+        runBlocking { saveMutex.withLock { persistSettings() } }
         serviceScope.cancel()
         stopAudio()
         tts.stop()
@@ -849,6 +886,7 @@ class AssistantService : Service() {
     companion object {
         private const val CHANNEL_ID = "assistant_service_channel"
         private const val NOTIFICATION_ID = 1
+        private const val SAVE_DEBOUNCE_MS = 400L
     }
 
     @RequiresPermission(Manifest.permission.RECORD_AUDIO)
