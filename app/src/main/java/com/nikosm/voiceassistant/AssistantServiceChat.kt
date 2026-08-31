@@ -37,7 +37,7 @@ internal fun AssistantService.sendAudioToServer(file: File, currentPersona: Pers
                 try {
                     val transcribedText = transcribeWithGateway(file, currentPersona)
                         ?: throw Exception("Could not transcribe audio. Check Gateway connection.")
-                    performCloudChat(transcribedText, currentPersona, useDeviceVoice, startTime)
+                    performCloudChat(transcribedText, currentPersona, useDeviceVoice, startTime, currentTurnInHistory = false)
                 } catch (e: Exception) {
                     android.util.Log.e("AssistantService", "Cloud voice chat failed", e)
                     _messages.value = _messages.value + ChatMessage("assistant", "Error: ${e.message}", isError = true)
@@ -72,7 +72,7 @@ internal fun AssistantService.sendAudioToServer(file: File, currentPersona: Pers
                              ?: throw Exception("Could not transcribe audio. Check Gateway connection.")
 
                          // 2. Chat with Ollama
-                         val directRes = performDirectOllamaChat(ollamaBase, actualModel, transcribedText, currentPersona)
+                         val directRes = performDirectOllamaChat(ollamaBase, actualModel, transcribedText, currentPersona, currentTurnInHistory = false)
 
                          // 3. Handle Voice via Gateway if needed
                          var audioBytes: ByteArray? = null
@@ -231,7 +231,7 @@ internal fun AssistantService.sendTextMessageToServer(inputText: String, current
     val useDeviceVoice = currentPersona.voiceMode != VoiceMode.GATEWAY
 
     if (currentPersona.isCloud && isCloudModel(currentPersona.model)) {
-        performCloudChat(inputText, currentPersona, useDeviceVoice, startTime)
+        performCloudChat(inputText, currentPersona, useDeviceVoice, startTime, currentTurnInHistory = true)
         return
     }
     serviceScope.launch {
@@ -256,7 +256,7 @@ internal fun AssistantService.sendTextMessageToServer(inputText: String, current
                 if (displayServer != null) {
                      val ollamaBase = _ollamaBaseUrls.value.find { it.name == displayServer }?.url
                      if (ollamaBase != null) {
-                         val directRes = performDirectOllamaChat(ollamaBase, actualModel, inputText, currentPersona)
+                         val directRes = performDirectOllamaChat(ollamaBase, actualModel, inputText, currentPersona, currentTurnInHistory = true)
 
                          // If it's a gateway voice mode, we need to fetch audio separately
                          if (currentPersona.voiceMode == VoiceMode.GATEWAY) {
@@ -544,7 +544,7 @@ private fun AssistantService.isCloudModel(model: String): Boolean {
            _customCloudApis.value.any { it.name == providerName }
 }
 
-private fun AssistantService.performCloudChat(text: String, persona: Persona, useDeviceVoice: Boolean = false, startTime: Long) {
+private fun AssistantService.performCloudChat(text: String, persona: Persona, useDeviceVoice: Boolean = false, startTime: Long, currentTurnInHistory: Boolean) {
     serviceScope.launch {
         _state.value = AssistantState.THINKING
         updateNotification("Thinking (Cloud)...")
@@ -558,7 +558,7 @@ private fun AssistantService.performCloudChat(text: String, persona: Persona, us
                     ?: throw Exception("No config for provider '$providerName'")
 
                 if (apiSetting.apiKey.isBlank() && apiSetting.icon != "C") throw Exception("API Key for ${apiSetting.name} is missing")
-                val request = buildCloudRequest(apiSetting, persona, text)
+                val request = buildCloudRequest(apiSetting, persona, text, currentTurnInHistory)
                 getDynamicClient(persona).newCall(request).execute().use { response ->
                     val bodyStr = response.body.string()
                     if (!response.isSuccessful) {
@@ -609,7 +609,7 @@ private fun AssistantService.performCloudChat(text: String, persona: Persona, us
     }
 }
 
-private suspend fun AssistantService.performDirectOllamaChat(baseUrl: String, model: String, text: String, persona: Persona): Triple<String, String?, ByteArray?> {
+private suspend fun AssistantService.performDirectOllamaChat(baseUrl: String, model: String, text: String, persona: Persona, currentTurnInHistory: Boolean): Triple<String, String?, ByteArray?> {
     // Resolve backend URL: fallback if empty or mistakenly pointing to a gateway (8880)
     val stripped = baseUrl.trim()
     val resolvedBackend = if (stripped.isBlank() || stripped.contains(":8880")) {
@@ -653,13 +653,16 @@ private suspend fun AssistantService.performDirectOllamaChat(baseUrl: String, mo
         val reservedOutput = persona.maxTokens.coerceAtLeast(1024)
         val budget = maxOf(512, contextWindow - reservedOutput - estimateTokens(finalSystemPrompt) - estimateTokens(text))
 
+        // A1: positional slice — the caller says whether the current user turn is
+        // already the last entry in _messages (text flow appends it before the
+        // request; the voice flow does not). No text-content matching.
         val allNonError = _messages.value.filter { !it.isError }
-        val historyToTrim = if (allNonError.isNotEmpty() && allNonError.last().text == text) allNonError.dropLast(1) else allNonError
+        val historySource = if (currentTurnInHistory && allNonError.isNotEmpty()) allNonError.dropLast(1) else allNonError
 
         var usedTokens = 0
         val history = mutableListOf<ChatMessage>()
-        for (i in historyToTrim.indices.reversed()) {
-            val msg = historyToTrim[i]
+        for (i in historySource.indices.reversed()) {
+            val msg = historySource[i]
             val tokens = estimateTokens(msg.text)
             if (usedTokens + tokens > budget) break
             history.add(0, msg)
@@ -672,10 +675,9 @@ private suspend fun AssistantService.performDirectOllamaChat(baseUrl: String, mo
             msgsArray.put(JSONObject().put("role", msg.role).put("content", msg.text))
         }
 
-        // Add current user message if not already in history
-        if (history.none { it.text == text }) {
-            msgsArray.put(JSONObject().put("role", "user").put("content", text))
-        }
+        // A1: the current user turn is ALWAYS appended — repeated inputs must reach
+        // the model as new turns even when identical text exists earlier in history.
+        msgsArray.put(JSONObject().put("role", "user").put("content", text))
     }
 
     json.put("messages", msgsArray)
@@ -713,7 +715,7 @@ private suspend fun AssistantService.performDirectOllamaChat(baseUrl: String, mo
     }
 }
 
-private suspend fun AssistantService.buildCloudRequest(api: CloudApiSetting, persona: Persona, text: String): Request {
+private suspend fun AssistantService.buildCloudRequest(api: CloudApiSetting, persona: Persona, text: String, currentTurnInHistory: Boolean): Request {
     val mediaType = "application/json; charset=utf-8".toMediaType()
     val json = JSONObject()
     
@@ -735,19 +737,21 @@ private suspend fun AssistantService.buildCloudRequest(api: CloudApiSetting, per
     val reservedOutput = persona.maxTokens.coerceAtLeast(1024)
     val budget = maxOf(512, contextWindow - reservedOutput - estimateTokens(finalSystemPrompt) - estimateTokens(text))
     
+    // A1: positional slice — the caller says whether the current user turn is already
+    // the last entry in _messages (text flow appends it; voice flow does not). No
+    // text-content matching is used to decide what to drop.
     val allNonError = _messages.value.filter { !it.isError }
-    val historyToTrim = if (allNonError.isNotEmpty() && allNonError.last().text == text) allNonError.dropLast(1) else allNonError
+    val historySource = if (currentTurnInHistory && allNonError.isNotEmpty()) allNonError.dropLast(1) else allNonError
 
     var usedTokens = 0
-    val trimmedHistory = mutableListOf<ChatMessage>()
-    for (i in historyToTrim.indices.reversed()) {
-        val msg = historyToTrim[i]
+    val history = mutableListOf<ChatMessage>()
+    for (i in historySource.indices.reversed()) {
+        val msg = historySource[i]
         val tokens = estimateTokens(msg.text)
         if (usedTokens + tokens > budget) break
-        trimmedHistory.add(0, msg)
+        history.add(0, msg)
         usedTokens += tokens
     }
-    val history = trimmedHistory
     
     android.util.Log.d("AssistantService", "Cloud Budget: history=${history.size}, used=$usedTokens, budget=$budget")
 
@@ -758,22 +762,46 @@ private suspend fun AssistantService.buildCloudRequest(api: CloudApiSetting, per
         "A" -> {
             json.put("model", actualModel).put("max_tokens", persona.maxTokens).put("system", finalSystemPrompt)
             val msgArray = org.json.JSONArray()
-            // Anthropic requires the conversation to start with 'user' and strictly alternate roles.
+            // Anthropic requires the conversation to start with 'user' and strictly
+            // alternate roles. A1: same-role turns are MERGED (never silently
+            // skipped), and the current user turn is always appended below.
             var lastRole = ""
-            history.dropWhile { it.role != "user" }.forEach { msg ->
-                if (msg.role != lastRole && msg.text.isNotBlank()) {
-                    msgArray.put(JSONObject().put("role", msg.role).put("content", msg.text))
-                    lastRole = msg.role
+            fun appendAnthropicTurn(role: String, turnText: String) {
+                if (turnText.isBlank()) return
+                if (role == lastRole && msgArray.length() > 0) {
+                    val prev = msgArray.getJSONObject(msgArray.length() - 1)
+                    prev.put("content", prev.getString("content") + "\n\n" + turnText)
+                } else {
+                    msgArray.put(JSONObject().put("role", role).put("content", turnText))
+                    lastRole = role
                 }
             }
-            if (msgArray.length() == 0 || lastRole != "user") msgArray.put(JSONObject().put("role", "user").put("content", text))
+            history.dropWhile { it.role != "user" }.forEach { msg -> appendAnthropicTurn(msg.role, msg.text) }
+            // A1: the current user turn always reaches the model.
+            appendAnthropicTurn("user", text)
             json.put("messages", msgArray)
             Request.Builder().url("$baseUrl/v1/messages").header("x-api-key", api.apiKey).header("anthropic-version", "2023-06-01").header("content-type", "application/json").post(json.toString().toRequestBody(mediaType)).build()
         }
         "G" -> {
             val contents = org.json.JSONArray()
-            history.forEach { contents.put(JSONObject().put("role", if (it.role == "assistant") "model" else "user").put("parts", org.json.JSONArray().put(JSONObject().put("text", it.text)))) }
-            if (history.none { it.text == text }) contents.put(JSONObject().put("role", "user").put("parts", org.json.JSONArray().put(JSONObject().put("text", text))))
+            // Gemini requires user/model alternation too. A1: same-role turns are
+            // merged as extra parts (never skipped), and the current user turn is
+            // always appended below.
+            fun appendGeminiTurn(role: String, turnText: String) {
+                if (turnText.isBlank()) return
+                val geminiRole = if (role == "assistant") "model" else "user"
+                if (contents.length() > 0) {
+                    val last = contents.getJSONObject(contents.length() - 1)
+                    if (last.getString("role") == geminiRole) {
+                        last.getJSONArray("parts").put(JSONObject().put("text", turnText))
+                        return
+                    }
+                }
+                contents.put(JSONObject().put("role", geminiRole).put("parts", org.json.JSONArray().put(JSONObject().put("text", turnText))))
+            }
+            history.forEach { appendGeminiTurn(it.role, it.text) }
+            // A1: the current user turn always reaches the model.
+            appendGeminiTurn("user", text)
             json.put("contents", contents)
 
             val genConfig = JSONObject()
@@ -790,7 +818,8 @@ private suspend fun AssistantService.buildCloudRequest(api: CloudApiSetting, per
             json.put("model", actualModel).put("max_tokens", persona.maxTokens)
             val msgs = org.json.JSONArray().put(JSONObject().put("role", "system").put("content", finalSystemPrompt))
             history.forEach { msgs.put(JSONObject().put("role", it.role).put("content", it.text)) }
-            if (history.none { it.text == text }) msgs.put(JSONObject().put("role", "user").put("content", text))
+            // A1: the current user turn is ALWAYS appended — no text-matching dedup.
+            msgs.put(JSONObject().put("role", "user").put("content", text))
             json.put("messages", msgs)
             val url = if (baseUrl.endsWith("/chat/completions")) baseUrl else "$baseUrl/chat/completions"
             Request.Builder().url(url).header("Authorization", "Bearer ${api.apiKey}").post(json.toString().toRequestBody(mediaType)).build()
