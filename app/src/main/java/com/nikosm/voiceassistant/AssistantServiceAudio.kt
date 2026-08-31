@@ -15,6 +15,10 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 
+// A3: monotonically increasing utterance counter — two calls can never share an ID
+// (a time-based ID could collide for two calls in the same millisecond).
+private var ttsUtteranceCounter: Long = 0
+
 fun AssistantService.toggleEarpieceMode() {
     val before = earpieceMode.value
     _earpieceMode.value = !earpieceMode.value
@@ -117,8 +121,14 @@ fun AssistantService.speakTextOnDevice(text: String) {
     
     tts.setOnUtteranceProgressListener(object : android.speech.tts.UtteranceProgressListener() {
         override fun onStart(utteranceId: String?) {}
-        override fun onDone(utteranceId: String?) {
+        // A3: only the most recently issued utterance may clean up. The binder-thread
+        // check filters stale callbacks; the Main-thread re-check covers a newer
+        // speakTextOnDevice() call that started while this cleanup was queued.
+        override fun onDone(id: String?) {
+            if (id == null || id != currentUtteranceId) return
             serviceScope.launch(Dispatchers.Main) {
+                if (id != currentUtteranceId) return@launch
+                currentUtteranceId = null
                 _state.value = AssistantState.IDLE
                 updateNotification("Ready to help")
                 audioFocusRequest?.let { req -> audioManager.abandonAudioFocusRequest(req) }
@@ -127,12 +137,29 @@ fun AssistantService.speakTextOnDevice(text: String) {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) audioManager.clearCommunicationDevice()
             }
         }
-        override fun onError(utteranceId: String?) {
-            onDone(utteranceId)
+        override fun onError(id: String?) {
+            // A3: same ID gate as onDone — a stale error callback must not clean up.
+            onDone(id)
         }
     })
     
-    tts.speak(text, android.speech.tts.TextToSpeech.QUEUE_FLUSH, params, "assistant_msg")
+    // A3: unique ID per call (an incrementing counter can never collide, unlike a
+    // time-based ID within the same millisecond).
+    val utteranceId = "assistant_msg_${++ttsUtteranceCounter}"
+    currentUtteranceId = utteranceId
+    // A4: if the engine rejects the call (returns ERROR), no utterance is queued and
+    // neither onDone nor onError will ever fire — clean up immediately instead of
+    // staying stuck in SPEAKING with nothing to clear it.
+    val speakResult = tts.speak(text, android.speech.tts.TextToSpeech.QUEUE_FLUSH, params, utteranceId)
+    if (speakResult == android.speech.tts.TextToSpeech.ERROR) {
+        currentUtteranceId = null
+        _state.value = AssistantState.IDLE
+        updateNotification("Ready to help")
+        audioFocusRequest?.let { req -> audioManager.abandonAudioFocusRequest(req) }
+        audioFocusRequest = null
+        audioManager.mode = AudioManager.MODE_NORMAL
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) audioManager.clearCommunicationDevice()
+    }
 }
 
 internal fun AssistantService.speakWithEspeak(text: String, persona: Persona) {
