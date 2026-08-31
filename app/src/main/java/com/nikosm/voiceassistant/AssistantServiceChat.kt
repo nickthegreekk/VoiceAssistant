@@ -53,6 +53,22 @@ private fun AssistantService.readAttachmentCapped(uri: Uri): ByteArray {
 private fun isUserCancellation(e: Throwable): Boolean =
     e is java.io.IOException && (e.message == "Cancelled" || e.message == "Canceled")
 
+// A3: a failed server becomes eligible for retry after a cooldown (e.g. 60 s) instead
+// of being excluded until a manual refresh. Server name -> epoch ms of when the next
+// attempt is allowed. Held in a plain (non-reactive) field because the retry pool only
+// needs the most recent mark; UI display/logic are unaffected.
+private val serverFailCooldownUntilMillis = mutableMapOf<String, Long>()
+
+// A3: returns true if the server is currently OK to try. A server is allowed back once
+// FAILED_COOLDOWN_MS has elapsed since it was marked failed, and a status that isn't a
+// "failed" exclusion (null, "Online", or a non-failed string) is always tryable.
+internal fun AssistantService.isServerHealthyForRetry(name: String): Boolean {
+    if (_serverStatus.value[name]?.lowercase()?.contains("failed") != true) return true
+    return (serverFailCooldownUntilMillis[name] ?: 0L) < System.currentTimeMillis()
+}
+
+private const val FAILED_COOLDOWN_MS = 60_000L // 60 seconds
+
 internal fun AssistantService.sendAudioToServer(file: File, currentPersona: Persona) {
     if (currentPersona.model.isBlank()) {
         _messages.value = _messages.value + ChatMessage("assistant", "Please choose a model for this persona in its settings.", isError = true)
@@ -165,10 +181,9 @@ internal fun AssistantService.sendAudioToServer(file: File, currentPersona: Pers
                 } else null
 
                 val gwsToTry: List<ServerConfig> = if (currentPersona.allowGatewayFailover) {
-                    val workingGateways = allGateways.filter {
-                        val status = statusMap[it.name]
-                        status == null || !status.lowercase().contains("failed")
-                    }
+                    // A3: only gateways currently healthy (or past a failure cooldown) are
+                    // eligible for failover.
+                    val workingGateways = allGateways.filter { isServerHealthyForRetry(it.name) }
                     buildList {
                         preferredGateway?.let { add(it) }
                         addAll(workingGateways.filter { it != preferredGateway })
@@ -237,10 +252,22 @@ internal fun AssistantService.sendAudioToServer(file: File, currentPersona: Pers
                     } catch (e: Exception) {
                         if (call.isCanceled()) throw java.io.IOException("Cancelled")
 
-                        // Mark server as failed in background so we don't try it again soon
+                        // A3: mark failed (with cooldown). A 4xx means the server responded,
+                        // so it's reachable — worth keeping its message visible, but the
+                        // cooldown is the thing that actually gates re-entry to the pool.
+                        val failureLabel = if (e is okhttp3.internal.http2.StreamResetException || (e.message?.contains("HTTP ") == true || e.message?.contains("Server error:") == true)) {
+                            e.message?.take(30)
+                        } else if (e is java.net.ConnectException || e is java.net.SocketTimeoutException || e is java.net.UnknownHostException) {
+                            "connection/timeout"
+                        } else {
+                            e.message?.take(30)
+                        }
                         withContext(Dispatchers.Main) {
                             val statusMap = _serverStatus.value.toMutableMap()
-                            _serverBases.value.find { it.url == base }?.let { statusMap[it.name] = "failed: ${e.message?.take(30)}..." }
+                            _serverBases.value.find { it.url == base }?.let { cfg ->
+                                statusMap[cfg.name] = "failed: $failureLabel"
+                                serverFailCooldownUntilMillis[cfg.name] = System.currentTimeMillis() + FAILED_COOLDOWN_MS
+                            }
                             _serverStatus.value = statusMap
                         }
 
@@ -404,10 +431,9 @@ internal fun AssistantService.sendTextMessageToServer(inputText: String, current
                 } else null
 
                 val gwsToTry: List<ServerConfig> = if (currentPersona.allowGatewayFailover) {
-                    val workingGateways = allGateways.filter {
-                        val status = statusMap[it.name]
-                        status == null || !status.lowercase().contains("failed")
-                    }
+                    // A3: only gateways currently healthy (or past a failure cooldown) are
+                    // eligible for failover.
+                    val workingGateways = allGateways.filter { isServerHealthyForRetry(it.name) }
                     buildList {
                         preferredGateway?.let { add(it) }
                         addAll(workingGateways.filter { it != preferredGateway })
@@ -523,12 +549,22 @@ internal fun AssistantService.sendTextMessageToServer(inputText: String, current
                     } catch (e: Exception) {
                         if (call.isCanceled()) throw java.io.IOException("Cancelled")
 
-                        // Mark server as failed
+                        // A3: mark failed (with cooldown).
+                        val failureLabel = if (e is okhttp3.internal.http2.StreamResetException || (e.message?.contains("HTTP ") == true || e.message?.contains("Server error:") == true)) {
+                            e.message?.take(30)
+                        } else if (e is java.net.ConnectException || e is java.net.SocketTimeoutException || e is java.net.UnknownHostException) {
+                            "connection/timeout"
+                        } else {
+                            e.message?.take(30)
+                        }
                         withContext(Dispatchers.Main) {
                             val statusMap = _serverStatus.value.toMutableMap()
                             val matched = _serverBases.value.find { it.url == base } ?:
                                           _ollamaBaseUrls.value.find { it.name == base || it.url == base }
-                            matched?.let { statusMap[it.name] = "failed: ${e.message?.take(30)}..." }
+                            matched?.let { cfg ->
+                                statusMap[cfg.name] = "failed: $failureLabel"
+                                serverFailCooldownUntilMillis[cfg.name] = System.currentTimeMillis() + FAILED_COOLDOWN_MS
+                            }
                             _serverStatus.value = statusMap
                         }
 
