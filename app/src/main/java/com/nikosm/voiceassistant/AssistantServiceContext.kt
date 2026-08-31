@@ -14,7 +14,8 @@ internal suspend fun AssistantService.fetchWebSearchContext(query: String): Stri
     if (searxngUrl.isNullOrBlank()) return ""
     if (!searxngUrl.startsWith("http")) searxngUrl = "http://$searxngUrl"
     
-    android.util.Log.d("AssistantService", "Performing web search for: $query via $searxngUrl")
+    // S4: logs the search query (and the private SearXNG URL) — debug only.
+    if (BuildConfig.DEBUG) android.util.Log.d("AssistantService", "Performing web search for: $query via $searxngUrl")
     return try {
         withContext(Dispatchers.IO) {
             val url = "${searxngUrl.trimEnd('/')}/search?q=${URLEncoder.encode(query, "UTF-8")}&format=json"

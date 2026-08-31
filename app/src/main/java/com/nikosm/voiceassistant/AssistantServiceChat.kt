@@ -713,7 +713,8 @@ private suspend fun AssistantService.performDirectOllamaChat(baseUrl: String, mo
         }
 
         // Add system prompt first
-        android.util.Log.d("AssistantService", "DEBUG SYSTEM PROMPT: $finalSystemPrompt")
+        // S4: contains the full system prompt (plus injected search/news context) — debug only.
+        if (BuildConfig.DEBUG) android.util.Log.d("AssistantService", "DEBUG SYSTEM PROMPT: $finalSystemPrompt")
         msgsArray.put(JSONObject().put("role", "system").put("content", finalSystemPrompt))
 
         // Budget-aware history selection
@@ -880,7 +881,14 @@ private suspend fun AssistantService.buildCloudRequest(api: CloudApiSetting, per
             val sysInst = JSONObject().put("parts", org.json.JSONArray().put(JSONObject().put("text", finalSystemPrompt)))
             json.put("system_instruction", sysInst)
 
-            Request.Builder().url("$baseUrl/v1beta/models/$actualModel:generateContent?key=${api.apiKey}").post(json.toString().toRequestBody(mediaType)).build()
+            // S3: pass the key via the x-goog-api-key header (per Google's docs:
+            // "-H \"x-goog-api-key: YOUR_API_KEY\"") instead of the URL query string, so
+            // it can't leak into proxy/server logs or exception messages embedding the URL.
+            Request.Builder()
+                .url("$baseUrl/v1beta/models/$actualModel:generateContent")
+                .header("x-goog-api-key", api.apiKey)
+                .post(json.toString().toRequestBody(mediaType))
+                .build()
         }
         else -> {
             json.put("model", actualModel).put("max_tokens", persona.maxTokens)
@@ -896,7 +904,8 @@ private suspend fun AssistantService.buildCloudRequest(api: CloudApiSetting, per
 }
 
 private fun AssistantService.parseCloudResponse(api: CloudApiSetting, persona: Persona, body: String): Triple<String, String?, UsageInfo> {
-    android.util.Log.d("UsageTracking", "Parsing response from ${api.name}: ${body.take(500)}")
+    // S4: logs the first 500 chars of the model response (conversation content) — debug only.
+    if (BuildConfig.DEBUG) android.util.Log.d("UsageTracking", "Parsing response from ${api.name}: ${body.take(500)}")
     val json = JSONObject(body)
     var text = ""; var reasoning: String? = null; var pTokens = 0; var cTokens = 0
     when (api.icon) {
