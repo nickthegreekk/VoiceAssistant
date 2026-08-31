@@ -170,6 +170,11 @@ class AssistantService : Service() {
     var currentPlayer: MediaPlayer? = null
     var currentCall: Call? = null
     var currentAudioTrack: AudioTrack? = null
+    // A3: utterance ID issued by the most recent speakTextOnDevice() call. TTS
+    // onDone/onError callbacks only run their cleanup when their delivered ID still
+    // matches this, so a stale callback from an older utterance can't cut off a
+    // newer one that is still speaking.
+    var currentUtteranceId: String? = null
 
     fun toggleSilence() {
         _silenced.value = !_silenced.value
