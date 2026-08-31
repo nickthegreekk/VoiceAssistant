@@ -50,6 +50,7 @@ android {
     }
     buildFeatures {
         compose = true
+        buildConfig = true // S4: BuildConfig.DEBUG gates conversation-content logging
     }
 }
 
