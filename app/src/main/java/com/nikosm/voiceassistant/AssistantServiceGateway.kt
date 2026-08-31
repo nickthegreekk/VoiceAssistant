@@ -5,6 +5,9 @@ import android.media.AudioManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import com.google.android.gms.tasks.Tasks
+import com.google.mlkit.nl.languageid.LanguageIdentification
+import com.google.mlkit.nl.languageid.LanguageIdentificationOptions
 import okhttp3.Credentials
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
@@ -13,6 +16,83 @@ import org.json.JSONObject
 import java.io.File
 import java.security.cert.X509Certificate
 import okhttp3.RequestBody.Companion.asRequestBody
+
+// ---------------------------------------------------------------------------
+// On-device language detection for gateway TTS routing. Uses ML Kit's BUNDLED
+// language-id model (ships in the APK, no network / Play Services dependency).
+// ---------------------------------------------------------------------------
+private val gatewayLanguageIdClient by lazy {
+    LanguageIdentification.getClient(
+        LanguageIdentificationOptions.Builder()
+            .setConfidenceThreshold(0.5f) // ML Kit default, stated explicitly for clarity
+            .build()
+    )
+}
+
+// BCP-47 code -> the app's internal language name. The values are the exact
+// TRANSLATION_LANGUAGES entries (Models.kt) — the same name strings the gateway's
+// LANG_CONFIG / UNSUPPORTED_TTS_LANGUAGES tables are keyed by.
+private val bcp47ToLanguageName = mapOf(
+    "en" to "English",
+    "zh" to "Chinese",  // ML Kit may report region-qualified "zh-CN"/"zh-TW"; base-subtag lookup handles it
+    "es" to "Spanish",
+    "fr" to "French",
+    "de" to "German",
+    "ja" to "Japanese",
+    "pt" to "Portuguese",
+    "ru" to "Russian",
+    "it" to "Italian",
+    "ko" to "Korean",
+    "he" to "Hebrew",
+    "iw" to "Hebrew",   // legacy ISO 639-1 code for Hebrew, some runtimes still emit it
+    "el" to "Greek",
+    "nl" to "Dutch",
+    "tr" to "Turkish",
+    "ar" to "Arabic",
+    "hi" to "Hindi"
+)
+
+private fun mapBcp47ToLanguageName(code: String): String? {
+    bcp47ToLanguageName[code]?.let { return it }
+    // Region-qualified codes ("pt-BR", "zh-CN") resolve via the base subtag.
+    return bcp47ToLanguageName[code.substringBefore('-').lowercase()]
+}
+
+/**
+ * Detects the language of an LLM response on-device and maps it to the internal
+ * language name the gateway expects.
+ *
+ * Fallback rules:
+ *  - "und" (undetermined, e.g. text too short/ambiguous) -> "English" (per spec).
+ *  - detection failure (exception) -> "English".
+ *  - detected but unmapped code -> raw BCP-47 code passed through, so the gateway's
+ *    UNSUPPORTED_TTS_LANGUAGES mechanism treats it as text-only instead of using a
+ *    wrong voice.
+ */
+internal suspend fun detectGatewayResponseLanguage(text: String): String {
+    return try {
+        withContext(Dispatchers.IO) {
+            val code = Tasks.await(gatewayLanguageIdClient.identifyLanguage(text))
+            val mapped = mapBcp47ToLanguageName(code)
+            // TODO(temporary debug logging — remove once TTS language routing is verified on-device)
+            android.util.Log.d("AssistantService", "DEBUG: TTS language detection: len=${text.length} bcp47='$code' mapped='${mapped ?: "none"}'")
+            when {
+                mapped != null -> mapped
+                code == "und" -> {
+                    android.util.Log.d("AssistantService", "DEBUG: TTS language undetermined — falling back to 'English'")
+                    "English"
+                }
+                else -> {
+                    android.util.Log.d("AssistantService", "DEBUG: TTS language '$code' has no internal mapping — passing raw code to gateway (expect UNSUPPORTED_TTS_LANGUAGES text-only fallback)")
+                    code
+                }
+            }
+        }
+    } catch (e: Exception) {
+        android.util.Log.w("AssistantService", "DEBUG: TTS language detection failed — falling back to 'English'", e)
+        "English"
+    }
+}
 
 internal fun AssistantService.testGatewayVoice(text: String, url: String, language: String, engine: String, kokoroVoice: String) {
     val gw = _serverBases.value.find { it.url == url } ?: ServerConfig("Test", url)
@@ -74,7 +154,16 @@ internal suspend fun AssistantService.synthesizeWithGateway(text: String, person
     if (url.isBlank()) return null
     
     val gw = _serverBases.value.find { it.url == url } ?: ServerConfig("Gateway", url)
-    val language = persona.targetLanguage
+    // Non-Translator personas keep targetLanguage at its "English" default no matter
+    // what language the model actually replied in, so the gateway would apply an
+    // English voice to foreign text. Detect the response language on-device instead.
+    // Translator personas translate TO persona.targetLanguage, so their explicit
+    // value is authoritative and stays untouched.
+    val language = if (persona.isTranslator) {
+        persona.targetLanguage
+    } else {
+        detectGatewayResponseLanguage(text)
+    }
     
     return try {
         withContext(Dispatchers.IO) {

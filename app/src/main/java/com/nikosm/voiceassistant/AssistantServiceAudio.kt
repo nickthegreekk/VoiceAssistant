@@ -189,7 +189,13 @@ internal fun AssistantService.speakWithEspeak(text: String, persona: Persona) {
             "portuguese" -> "pt"
             else -> "en"
         }
-        engine.setVoice(voiceName)
+        // A6: if the voice switch fails, eSpeak keeps whatever voice was previously
+        // active (wrong language/accent). There is no user-facing feedback mechanism
+        // for this, so synthesis still proceeds — but the failure is now visible in
+        // logs instead of being completely silent.
+        if (!engine.setVoice(voiceName)) {
+            android.util.Log.w("AssistantService", "Failed to set eSpeak voice to '$voiceName', falling back to current voice")
+        }
         val samples = engine.synthesize(text)
         
         withContext(Dispatchers.Main) {
