@@ -1,0 +1,884 @@
+package com.nikosm.voiceassistant
+
+import android.Manifest
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.app.Service
+import android.content.Intent
+import android.media.AudioAttributes
+import android.media.AudioDeviceInfo
+import android.media.AudioFormat
+import android.media.AudioFocusRequest
+import android.media.AudioManager
+import android.media.AudioTrack
+import android.media.MediaPlayer
+import android.media.MediaRecorder
+import android.net.Uri
+import android.os.Binder
+import android.os.Build
+import android.os.IBinder
+import android.speech.tts.TextToSpeech
+import android.util.Base64
+import androidx.annotation.RequiresPermission
+import androidx.compose.ui.graphics.Color
+import androidx.core.app.NotificationCompat
+import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import okhttp3.*
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.asRequestBody
+import okhttp3.RequestBody.Companion.toRequestBody
+import okio.BufferedSink
+import org.json.JSONObject
+import java.io.File
+import java.io.IOException
+import java.security.SecureRandom
+import java.security.cert.X509Certificate
+import java.util.concurrent.TimeUnit
+import javax.net.ssl.SSLContext
+import javax.net.ssl.TrustManager
+import javax.net.ssl.X509TrustManager
+
+private var vadDetector: VADDetector? = null
+private var vadRecorder: VADAudioRecorder? = null
+
+class AssistantService : Service() {
+
+    private val binder = AssistantBinder()
+    val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    lateinit var settingsManager: SettingsManager
+
+    val _state = MutableStateFlow(AssistantState.IDLE)
+    val assistantState = _state.asStateFlow()
+
+    val _messages = MutableStateFlow<List<ChatMessage>>(emptyList())
+    val messages = _messages.asStateFlow()
+
+    private var currentPersonaName: String? = null
+
+    val _sessionUsage = MutableStateFlow(UsageInfo())
+    val sessionUsage = _sessionUsage.asStateFlow()
+
+    val _totalCost = MutableStateFlow(0.0)
+    val totalCost = _totalCost.asStateFlow()
+
+    val _voiceDuration = MutableStateFlow(0)
+    val voiceDuration = _voiceDuration.asStateFlow()
+
+    val _lastWorkingBase = MutableStateFlow<String?>(null)
+    val lastWorkingBase = _lastWorkingBase.asStateFlow()
+
+    val _earpieceMode = MutableStateFlow(false)
+    val earpieceMode = _earpieceMode.asStateFlow()
+
+    val _silenced = MutableStateFlow(false)
+    val silenced = _silenced.asStateFlow()
+
+    val _micMuted = MutableStateFlow(false)
+    val micMuted = _micMuted.asStateFlow()
+
+    internal val _serverBases = MutableStateFlow<List<ServerConfig>>(emptyList())
+    val serverBases = _serverBases.asStateFlow()
+
+    internal val _cloudApis = MutableStateFlow<List<CloudApiSetting>>(emptyList())
+    val cloudApis = _cloudApis.asStateFlow()
+
+    internal val _customCloudApis = MutableStateFlow<List<CloudApiSetting>>(emptyList())
+    val customCloudApis = _customCloudApis.asStateFlow()
+
+    internal val _ollamaBaseUrls = MutableStateFlow<List<ServerConfig>>(emptyList())
+    val ollamaBaseUrls = _ollamaBaseUrls.asStateFlow()
+
+    private val _manualModels = MutableStateFlow<List<String>>(emptyList())
+    val manualModels = _manualModels.asStateFlow()
+
+    internal val _fetchedLocalModels = MutableStateFlow<Map<String, List<String>>>(emptyMap())
+    val fetchedLocalModels = _fetchedLocalModels.asStateFlow()
+
+    internal val _fetchedCloudModels = MutableStateFlow<Map<String, List<String>>>(emptyMap())
+    val fetchedCloudModels = _fetchedCloudModels.asStateFlow()
+
+    internal val _serverStatus = MutableStateFlow<Map<String, String>>(emptyMap())
+    val serverStatus = _serverStatus.asStateFlow()
+
+    internal val _availableModels = MutableStateFlow<List<String>>(emptyList())
+    val availableModels = _availableModels.asStateFlow()
+
+    private val _personas = MutableStateFlow<List<Persona>>(emptyList())
+    val personas = _personas.asStateFlow()
+
+    private val _favoriteModels = MutableStateFlow<List<String>>(emptyList())
+    val favoriteModels = _favoriteModels.asStateFlow()
+
+    internal val _isLoadingModels = MutableStateFlow(false)
+    val isLoadingModels = _isLoadingModels.asStateFlow()
+
+    val _lastPriceSyncTimestamp = MutableStateFlow(0L)
+    val lastPriceSyncTimestamp = _lastPriceSyncTimestamp.asStateFlow()
+
+    internal val _pendingCertApproval = MutableStateFlow<CertApprovalRequest?>(null)
+    val pendingCertApproval = _pendingCertApproval.asStateFlow()
+
+    private val _handsFreeMode = MutableStateFlow(false)
+    val handsFreeMode = _handsFreeMode.asStateFlow()
+
+    lateinit var tts: TextToSpeech
+    var ttsReady = false
+    private var _espeakEngine: EspeakEngine? = null
+    val espeakEngine: EspeakEngine?
+        get() {
+            if (_espeakEngine == null) {
+                try {
+                    _espeakEngine = EspeakEngine(this)
+                } catch (e: Throwable) {
+                    android.util.Log.e("AssistantService", "Failed to init eSpeak NG: ${e.message}")
+                }
+            }
+            return _espeakEngine
+        }
+
+    lateinit var audioManager: AudioManager
+    var audioFocusRequest: AudioFocusRequest? = null
+    private var pausedByFocusLoss = false
+
+    val audioFocusChangeListener = AudioManager.OnAudioFocusChangeListener { focusChange ->
+        when (focusChange) {
+            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT,
+            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK,
+            AudioManager.AUDIOFOCUS_LOSS -> {
+                if (currentPlayer?.isPlaying == true) {
+                    currentPlayer?.pause()
+                    pausedByFocusLoss = true
+                    _state.value = AssistantState.IDLE
+                }
+            }
+            AudioManager.AUDIOFOCUS_GAIN -> {
+                if (pausedByFocusLoss) {
+                    currentPlayer?.start()
+                    pausedByFocusLoss = false
+                    _state.value = AssistantState.SPEAKING
+                }
+            }
+        }
+    }
+
+    private var recorder: MediaRecorder? = null
+    private var outputFile: File? = null
+    var currentPlayer: MediaPlayer? = null
+    var currentCall: Call? = null
+    var currentAudioTrack: AudioTrack? = null
+
+    fun toggleSilence() {
+        _silenced.value = !_silenced.value
+        currentPlayer?.setVolume(if (_silenced.value) 0f else 1f, if (_silenced.value) 0f else 1f)
+    }
+
+    fun toggleMicMute() {
+        _micMuted.value = !_micMuted.value
+        vadRecorder?.muted = _micMuted.value
+    }
+
+    internal val client: OkHttpClient by lazy { createUnsafeOkHttpClient() }
+    internal val publicClient: OkHttpClient by lazy { OkHttpClient.Builder().build() }
+    internal val standardClient: OkHttpClient by lazy {
+        OkHttpClient.Builder()
+            .connectTimeout(15, TimeUnit.SECONDS)
+            .readTimeout(120, TimeUnit.SECONDS)
+            .writeTimeout(120, TimeUnit.SECONDS)
+            .retryOnConnectionFailure(true)
+            .build()
+    }
+    internal val fastClient: OkHttpClient by lazy {
+        client.newBuilder()
+            .connectTimeout(15, TimeUnit.SECONDS)
+            .readTimeout(120, TimeUnit.SECONDS)
+            .build() 
+    }
+
+    internal fun getDynamicClient(persona: Persona, useStandard: Boolean = persona.isCloud): OkHttpClient {
+        // Scale read timeout with maxTokens to accommodate slow hardware on long responses
+        // Floor of 120s, scales up for budgets above 1200 tokens
+        val timeout = maxOf(120L, persona.maxTokens / 10L)
+        val baseClient = if (useStandard) standardClient else client
+        return baseClient.newBuilder()
+            .readTimeout(timeout, TimeUnit.SECONDS)
+            .build()
+    }
+
+    inner class AssistantBinder : Binder() {
+        fun getService(): AssistantService = this@AssistantService
+    }
+
+    override fun onBind(intent: Intent?): IBinder = binder
+
+    override fun onCreate() {
+        super.onCreate()
+        settingsManager = SettingsManager(this)
+        audioManager = getSystemService(AUDIO_SERVICE) as AudioManager
+        
+        tts = TextToSpeech(this) { status ->
+            if (status == TextToSpeech.SUCCESS) {
+                ttsReady = true
+                tts.language = java.util.Locale.US
+            }
+        }
+
+        loadSettings()
+        createNotificationChannel()
+        syncOpenRouterPricing()
+
+        serviceScope.launch {
+            assistantState.collect { state ->
+                if (state == AssistantState.IDLE) {
+                    vadRecorder?.resume()
+                }
+            }
+        }
+
+        // Periodic Health Check
+        serviceScope.launch(Dispatchers.IO) {
+            while (isActive) {
+                _ollamaBaseUrls.value.forEach { checkServerHealth(it, isGateway = false) }
+                _serverBases.value.forEach { checkServerHealth(it, isGateway = true) }
+                delay(30000) // Every 30 seconds
+            }
+        }
+    }
+
+    fun forceCheckHealth(target: ServerConfig, isGateway: Boolean) {
+        serviceScope.launch(Dispatchers.IO) {
+            checkServerHealth(target, isGateway)
+        }
+    }
+
+    private suspend fun checkServerHealth(target: ServerConfig, isGateway: Boolean) {
+        val credential = if (isGateway && !target.username.isNullOrBlank()) {
+            Credentials.basic(target.username, target.password ?: "")
+        } else null
+        
+        val url = if (isGateway) {
+            target.url.trimEnd('/') + "/"
+        } else {
+            var base = target.url.trim().removeSuffix("/")
+            if (base.endsWith("/v1")) base = base.removeSuffix("/v1")
+            if (base.endsWith("/api")) base = base.removeSuffix("/api")
+            "$base/api/tags"
+        }
+        
+        try {
+            val requestBuilder = Request.Builder().url(url)
+            credential?.let { requestBuilder.header("Authorization", it) }
+            
+            fastClient.newCall(requestBuilder.build()).execute().use { response ->
+                val statusMap = _serverStatus.value.toMutableMap()
+                if (response.isSuccessful || response.code == 401) {
+                    statusMap[target.name] = "Online"
+                } else {
+                    statusMap[target.name] = "failed: ${response.code}"
+                }
+                _serverStatus.value = statusMap
+            }
+        } catch (e: Exception) {
+            val statusMap = _serverStatus.value.toMutableMap()
+            statusMap[target.name] = "failed: offline"
+            _serverStatus.value = statusMap
+        }
+    }
+
+    private fun loadSettings() {
+        settingsManager.getServerBases()?.let { _serverBases.value = it }
+        val loadedCloud = settingsManager.getCloudApis() ?: emptyList()
+        // Migration: Move "OpenAI-Compatible" (icon "C") to custom list if found in fixed list
+        _cloudApis.value = loadedCloud.filter { it.icon != "C" }
+        val customFromFixed = loadedCloud.filter { it.icon == "C" }
+        val allCustom = (settingsManager.getCustomCloudApis() ?: emptyList()) + customFromFixed
+        _customCloudApis.value = allCustom
+        
+        val loadedPersonas = settingsManager.getPersonas() ?: emptyList()
+        _personas.value = loadedPersonas
+        
+        // If we have personas, initialize the first one as current if not already set
+        if (currentPersonaName == null && loadedPersonas.isNotEmpty()) {
+            switchPersona(loadedPersonas[0])
+        }
+
+        settingsManager.getMessages()?.let {
+            // Optional: Migrate global messages to the first persona if it has no history?
+            // For now, just keep per-persona logic clean.
+        }
+
+        _ollamaBaseUrls.value = settingsManager.getOllamaBases() ?: emptyList()
+        _totalCost.value = settingsManager.getTotalCost()
+        _favoriteModels.value = settingsManager.getFavoriteModels() ?: emptyList()
+        _lastPriceSyncTimestamp.value = settingsManager.getLastPriceSyncTimestamp()
+
+        // Fetch models for all enabled cloud providers
+        (_cloudApis.value + allCustom).forEach { api ->
+            if (api.apiKey.isNotBlank() || api.icon == "C") {
+                fetchCloudModels(api)
+            }
+        }
+    }
+
+    fun saveSettings() {
+        settingsManager.saveServerBases(_serverBases.value)
+        settingsManager.saveCloudApis(_cloudApis.value)
+        settingsManager.saveCustomCloudApis(_customCloudApis.value)
+        settingsManager.savePersonas(_personas.value)
+        currentPersonaName?.let { name ->
+            settingsManager.savePersonaMessages(name, _messages.value)
+        }
+        settingsManager.saveOllamaBases(_ollamaBaseUrls.value)
+        settingsManager.saveTotalCost(_totalCost.value)
+        settingsManager.saveFavoriteModels(_favoriteModels.value)
+    }
+
+    fun addServerBase(name: String, url: String, username: String? = null, password: String? = null) {
+        if (_serverBases.value.none { it.url == url }) {
+            _serverBases.value = _serverBases.value + ServerConfig(name, url, username, password)
+            saveSettings()
+            fetchModels()
+        }
+    }
+
+    fun removeServerBase(config: ServerConfig) {
+        _serverBases.value = _serverBases.value - config
+        saveSettings()
+    }
+
+    fun updateServerBase(oldConfig: ServerConfig, newName: String, newUrl: String, newUsername: String? = null, newPassword: String? = null) {
+        val current = _serverBases.value.toMutableList()
+        val idx = current.indexOf(oldConfig)
+        if (idx != -1) {
+            current[idx] = ServerConfig(newName, newUrl, newUsername, newPassword)
+            _serverBases.value = current
+            saveSettings()
+            fetchModels(current[idx])
+        }
+    }
+
+    fun toggleFavoriteModel(model: String) {
+        if (_favoriteModels.value.contains(model)) {
+            _favoriteModels.value = _favoriteModels.value - model
+        } else {
+            _favoriteModels.value = _favoriteModels.value + model
+        }
+        saveSettings()
+    }
+
+    fun addOllamaBase(name: String, url: String, username: String? = null, password: String? = null) {
+        if (_ollamaBaseUrls.value.none { it.url == url }) {
+            _ollamaBaseUrls.value = _ollamaBaseUrls.value + ServerConfig(name, url, username, password)
+            saveSettings()
+            fetchModels()
+        }
+    }
+
+    fun removeOllamaBase(config: ServerConfig) {
+        _ollamaBaseUrls.value = _ollamaBaseUrls.value - config
+        saveSettings()
+    }
+
+    fun moveServerUp(config: ServerConfig, isOllama: Boolean) {
+        val list = if (isOllama) _ollamaBaseUrls.value.toMutableList() else _serverBases.value.toMutableList()
+        val idx = list.indexOf(config)
+        if (idx > 0) {
+            val temp = list[idx]
+            list[idx] = list[idx - 1]
+            list[idx - 1] = temp
+            if (isOllama) _ollamaBaseUrls.value = list else _serverBases.value = list
+            saveSettings()
+        }
+    }
+
+    fun moveServerDown(config: ServerConfig, isOllama: Boolean) {
+        val list = if (isOllama) _ollamaBaseUrls.value.toMutableList() else _serverBases.value.toMutableList()
+        val idx = list.indexOf(config)
+        if (idx != -1 && idx < list.size - 1) {
+            val temp = list[idx]
+            list[idx] = list[idx + 1]
+            list[idx + 1] = temp
+            if (isOllama) _ollamaBaseUrls.value = list else _serverBases.value = list
+            saveSettings()
+        }
+    }
+
+    fun updateOllamaBase(oldConfig: ServerConfig, newName: String, newUrl: String, newUsername: String? = null, newPassword: String? = null) {
+        val current = _ollamaBaseUrls.value.toMutableList()
+        val idx = current.indexOf(oldConfig)
+        if (idx != -1) {
+            current[idx] = ServerConfig(newName, newUrl, newUsername, newPassword)
+            _ollamaBaseUrls.value = current
+            saveSettings()
+            fetchModels(current[idx])
+        }
+    }
+
+    fun updateCloudApi(index: Int, api: CloudApiSetting) {
+        val current = _cloudApis.value.toMutableList()
+        if (index in current.indices) {
+            current[index] = api
+        } else {
+            current.add(api)
+        }
+        _cloudApis.value = current
+        saveSettings()
+    }
+
+    fun moveCloudApiUp(api: CloudApiSetting) {
+        val list = _cloudApis.value.toMutableList()
+        val idx = list.indexOf(api)
+        if (idx > 0) {
+            val temp = list[idx]
+            list[idx] = list[idx - 1]
+            list[idx - 1] = temp
+            _cloudApis.value = list
+            saveSettings()
+        }
+    }
+
+    fun moveCloudApiDown(api: CloudApiSetting) {
+        val list = _cloudApis.value.toMutableList()
+        val idx = list.indexOf(api)
+        if (idx != -1 && idx < list.size - 1) {
+            val temp = list[idx]
+            list[idx] = list[idx + 1]
+            list[idx + 1] = temp
+            _cloudApis.value = list
+            saveSettings()
+        }
+    }
+
+    fun addCustomCloudApi(name: String, url: String, apiKey: String) {
+        val newApi = CloudApiSetting(name, url, apiKey, "C", Color(0xFF808080), isEditableUrl = true)
+        _customCloudApis.value = _customCloudApis.value + newApi
+        saveSettings()
+        fetchCloudModels(newApi)
+    }
+
+    fun removeCustomCloudApi(api: CloudApiSetting) {
+        _customCloudApis.value = _customCloudApis.value - api
+        saveSettings()
+    }
+
+    fun updateCustomCloudApi(oldApi: CloudApiSetting, newApi: CloudApiSetting) {
+        val current = _customCloudApis.value.toMutableList()
+        val idx = current.indexOf(oldApi)
+        if (idx != -1) {
+            current[idx] = newApi
+            _customCloudApis.value = current
+            saveSettings()
+            fetchCloudModels(newApi)
+        }
+    }
+
+    fun moveCustomCloudApiUp(api: CloudApiSetting) {
+        val list = _customCloudApis.value.toMutableList()
+        val idx = list.indexOf(api)
+        if (idx > 0) {
+            val temp = list[idx]
+            list[idx] = list[idx - 1]
+            list[idx - 1] = temp
+            _customCloudApis.value = list
+            saveSettings()
+        }
+    }
+
+    fun moveCustomCloudApiDown(api: CloudApiSetting) {
+        val list = _customCloudApis.value.toMutableList()
+        val idx = list.indexOf(api)
+        if (idx != -1 && idx < list.size - 1) {
+            val temp = list[idx]
+            list[idx] = list[idx + 1]
+            list[idx + 1] = temp
+            _customCloudApis.value = list
+            saveSettings()
+        }
+    }
+
+    fun addPersona(persona: Persona) {
+        _personas.value = _personas.value + persona
+        saveSettings()
+    }
+
+    fun updatePersona(index: Int, persona: Persona) {
+        val current = _personas.value.toMutableList()
+        if (index in current.indices) {
+            current[index] = persona
+            _personas.value = current
+            saveSettings()
+        }
+    }
+
+    fun removePersona(index: Int) {
+        val current = _personas.value.toMutableList()
+        if (index in current.indices) {
+            current.removeAt(index)
+            _personas.value = current
+            saveSettings()
+        }
+    }
+
+    fun addManualModel(model: String) {
+        if (!_manualModels.value.contains(model)) {
+            _manualModels.value = _manualModels.value + model
+            saveSettings()
+        }
+    }
+
+    fun removeManualModel(model: String) {
+        _manualModels.value = _manualModels.value - model
+        saveSettings()
+    }
+
+    fun resetTotalCost() {
+        _totalCost.value = 0.0
+        _sessionUsage.value = UsageInfo()
+        saveSettings()
+    }
+
+    fun isFirstRun(): Boolean = settingsManager.isFirstRun()
+    fun setFirstRunComplete() = settingsManager.setFirstRunComplete()
+
+    fun getSearxngUrl(): String? = settingsManager.getSearxngUrl()
+    fun saveSearxngUrl(url: String) = settingsManager.saveSearxngUrl(url)
+
+    fun getUserLocation(): String? = settingsManager.getUserLocation()
+    fun saveUserLocation(location: String) = settingsManager.saveUserLocation(location)
+
+    fun exportBackup(): String = settingsManager.exportBackup()
+    fun importBackup(json: String): Boolean {
+        val success = settingsManager.importBackup(json)
+        if (success) loadSettings()
+        return success
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        startForeground(NOTIFICATION_ID, createNotification("Ready to help"))
+        return START_STICKY
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        serviceScope.cancel()
+        stopAudio()
+        tts.stop()
+        tts.shutdown()
+        vadRecorder?.stop()
+        vadDetector?.close()
+    }
+
+    private fun createNotificationChannel() {
+        val channel = NotificationChannel(CHANNEL_ID, "Assistant Service Channel", NotificationManager.IMPORTANCE_LOW)
+        val manager = getSystemService(NotificationManager::class.java)
+        manager.createNotificationChannel(channel)
+    }
+
+    private fun createNotification(content: String): Notification {
+        val pendingIntent = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
+        return NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle("Voice Assistant")
+            .setContentText(content)
+            .setSmallIcon(R.drawable.ic_launcher_foreground)
+            .setContentIntent(pendingIntent)
+            .setOngoing(true)
+            .build()
+    }
+
+    internal fun updateNotification(content: String) {
+        val manager = getSystemService(NotificationManager::class.java)
+        manager.notify(NOTIFICATION_ID, createNotification(content))
+    }
+
+    fun startRecording() {
+        requestAssistantFocus()
+        _voiceDuration.value = 0
+        val file = File(cacheDir, "recording_${System.currentTimeMillis()}.m4a")
+        val mr = MediaRecorder(this)
+        mr.setAudioSource(MediaRecorder.AudioSource.MIC)
+        mr.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
+        mr.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+        mr.setOutputFile(file.absolutePath)
+        mr.prepare()
+        mr.start()
+        recorder = mr
+        outputFile = file
+        _state.value = AssistantState.LISTENING
+        updateNotification("Listening...")
+    }
+
+    fun stopRecording(currentPersona: Persona) {
+        try {
+            recorder?.apply { 
+                stop()
+                release() 
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("AssistantService", "Recorder stop failed", e)
+        } finally {
+            recorder = null
+        }
+        outputFile?.let { sendAudioToServer(it, currentPersona) }
+    }
+
+    fun testAudio(text: String, mode: VoiceMode, backendUrl: String, targetLanguage: String, isTranslator: Boolean, engine: String = "kokoro", kokoroVoice: String = "af_heart") {
+        when (mode) {
+            VoiceMode.NONE -> {
+                _state.value = AssistantState.IDLE
+                updateNotification("Ready to help")
+            }
+            VoiceMode.SYSTEM_TTS -> speakTextOnDevice(text)
+            VoiceMode.BUNDLED_ESPEAK -> {
+                val dummy = Persona("test", Color.Gray, "", "", isTranslator = isTranslator, targetLanguage = targetLanguage)
+                speakWithEspeak(text, dummy)
+            }
+            VoiceMode.GATEWAY -> {
+                testGatewayVoice(text, backendUrl, targetLanguage, engine, kokoroVoice)
+            }
+        }
+    }
+
+    fun switchPersona(persona: Persona) {
+        // Save current persona history before switching
+        currentPersonaName?.let { oldName ->
+            settingsManager.savePersonaMessages(oldName, _messages.value)
+        }
+        
+        currentPersonaName = persona.name
+        _messages.value = settingsManager.getPersonaMessages(persona.name) ?: emptyList()
+    }
+
+    fun clearMessages() { 
+        _messages.value = emptyList()
+        currentPersonaName?.let { settingsManager.savePersonaMessages(it, emptyList()) }
+        saveSettings() 
+    }
+    fun removeMessagesFrom(index: Int) { _messages.value = _messages.value.take(index); saveSettings() }
+    
+    fun updateMessage(index: Int, newText: String) {
+        val current = _messages.value.toMutableList()
+        if (index in current.indices) {
+            current[index] = current[index].copy(text = newText)
+            _messages.value = current
+            saveSettings()
+        }
+    }
+
+    fun deleteMessage(index: Int) {
+        val current = _messages.value.toMutableList()
+        if (index in current.indices) {
+            current.removeAt(index)
+            _messages.value = current
+            saveSettings()
+        }
+    }
+
+
+    fun fetchCloudModels(api: CloudApiSetting) {
+        if (api.apiKey.isBlank() && api.icon != "C") return
+        _isLoadingModels.value = true
+        val baseUrl = api.baseUrl.trim().removeSuffix("/")
+        serviceScope.launch(Dispatchers.IO) {
+            val statusMap = _serverStatus.value.toMutableMap()
+            statusMap.remove(api.name)
+            try {
+                val models = when (api.icon) {
+                    "G" -> { // Google
+                        val url = "https://generativelanguage.googleapis.com/v1beta/models?key=${api.apiKey}"
+                        standardClient.newCall(Request.Builder().url(url).build()).execute().use { response ->
+                            if (!response.isSuccessful) {
+                                statusMap[api.name] = "Google API Error: ${response.code}"
+                                return@use emptyList<String>()
+                            }
+                            val json = JSONObject(response.body.string())
+                            val array = json.getJSONArray("models")
+                            val rawModels = mutableListOf<JSONObject>()
+                            for (i in 0 until array.length()) {
+                                rawModels.add(array.getJSONObject(i))
+                            }
+
+                            rawModels.filter { j ->
+                                val methods = j.optJSONArray("supportedGenerationMethods")?.let { arr ->
+                                    List(arr.length()) { i -> arr.getString(i) }
+                                } ?: emptyList()
+                                methods.contains("generateContent") && j.getString("name").contains("gemini", ignoreCase = true)
+                            }
+                            .sortedByDescending { j ->
+                                val name = j.getString("name").substringAfter("models/")
+                                val versionMatch = Regex("""\d+\.\d+""").find(name)
+                                versionMatch?.value?.toDoubleOrNull() ?: 0.0
+                            }
+                            .take(3)
+                            .map { "[${api.name}] ${it.getString("name").substringAfter("models/")}" }
+                        }
+                    }
+                    "A" -> { // Anthropic
+                        val url = "$baseUrl/v1/models"
+                        val request = Request.Builder()
+                            .url(url)
+                            .header("x-api-key", api.apiKey)
+                            .header("anthropic-version", "2023-06-01")
+                            .build()
+                        standardClient.newCall(request).execute().use { response ->
+                            if (!response.isSuccessful) {
+                                statusMap[api.name] = "Anthropic Error: ${response.code}"
+                                return@use emptyList<String>()
+                            }
+                            val json = JSONObject(response.body.string())
+                            val array = json.getJSONArray("data")
+                            val rawModels = mutableListOf<JSONObject>()
+                            for (i in 0 until array.length()) {
+                                rawModels.add(array.getJSONObject(i))
+                            }
+
+                            rawModels.sortedByDescending { it.optString("created_at", "") }
+                                .take(3)
+                                .map { "[${api.name}] ${it.getString("id")}" }
+                        }
+                    }
+                    else -> { // OpenAI, DeepSeek, Custom
+                        val url = if (baseUrl.endsWith("/models")) baseUrl else "$baseUrl/models"
+                        standardClient.newCall(Request.Builder().url(url).header("Authorization", "Bearer ${api.apiKey}").build()).execute().use { response ->
+                            if (!response.isSuccessful) {
+                                statusMap[api.name] = when(response.code) {
+                                    401 -> "Invalid API Key"
+                                    429 -> "Rate limit exceeded"
+                                    else -> "Fetch failed: ${response.code}"
+                                }
+                                return@use emptyList<String>()
+                            }
+                            val json = JSONObject(response.body.string())
+                            val array = json.getJSONArray("data")
+                            val rawModels = mutableListOf<JSONObject>()
+                            for (i in 0 until array.length()) {
+                                rawModels.add(array.getJSONObject(i))
+                            }
+
+                            val filtered = if (api.icon == "C" || api.icon == "D") {
+                                rawModels.map { "[${api.name}] ${it.getString("id")}" }
+                            } else {
+                                // OpenAI specific filtering
+                                rawModels.filter { j ->
+                                    val id = j.getString("id").lowercase()
+                                    val isChat = id.startsWith("gpt-") || id.startsWith("o1") || id.startsWith("o3") || id.startsWith("o4")
+                                    val isNonChat = id.contains("whisper") || id.contains("tts") || id.contains("embedding") || id.contains("dall-e") || id.contains("moderation")
+                                    isChat && !isNonChat
+                                }
+                                .sortedByDescending { it.optLong("created", 0) }
+                                .take(3)
+                                .map { "[${api.name}] ${it.getString("id")}" }
+                            }
+                            filtered
+                        }
+                    }
+                }
+                withContext(Dispatchers.Main) {
+                    val current = _fetchedCloudModels.value.toMutableMap()
+                    current[api.name] = models
+                    _fetchedCloudModels.value = current
+                    _serverStatus.value = statusMap
+                }
+            } catch (e: Exception) {
+                statusMap[api.name] = e.message ?: "Cloud fetch failed"
+                withContext(Dispatchers.Main) { _serverStatus.value = statusMap }
+            } finally {
+                _isLoadingModels.value = false
+            }
+        }
+    }
+
+
+    private fun createUnsafeOkHttpClient(): OkHttpClient {
+        val pinnedTrustManager = object : javax.net.ssl.X509ExtendedTrustManager() {
+            override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?, socket: java.net.Socket?) {}
+            override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?, socket: java.net.Socket?) {
+                val host = (socket as? javax.net.ssl.SSLSocket)?.handshakeSession?.peerHost ?: "unknown"
+                verify(chain, host)
+            }
+            override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?, engine: javax.net.ssl.SSLEngine?) {}
+            override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?, engine: javax.net.ssl.SSLEngine?) {
+                val host = engine?.peerHost ?: "unknown"
+                verify(chain, host)
+            }
+            override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
+            override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {
+                verify(chain, "unknown")
+            }
+            override fun getAcceptedIssuers(): Array<X509Certificate> = arrayOf()
+
+            private fun verify(chain: Array<out X509Certificate>?, host: String) {
+                if (chain == null || chain.isEmpty()) return
+                val cert = chain[0]
+                val fingerprint = sha256Fingerprint(cert)
+                val trusted = settingsManager.getTrustedCertificates()
+                val stored = trusted[host]
+
+                if (stored == null || stored != fingerprint) {
+                    _pendingCertApproval.value = CertApprovalRequest(host, fingerprint, cert)
+                    throw javax.net.ssl.SSLHandshakeException(if (stored == null) "New self-signed cert" else "Cert changed!")
+                }
+            }
+        }
+
+        val sslContext = SSLContext.getInstance("TLS")
+        sslContext.init(null, arrayOf(pinnedTrustManager), SecureRandom())
+        
+        return OkHttpClient.Builder()
+            .sslSocketFactory(sslContext.socketFactory, pinnedTrustManager)
+            .hostnameVerifier { _, _ -> true }
+            .connectTimeout(15, TimeUnit.SECONDS)
+            .readTimeout(120, TimeUnit.SECONDS)
+            .writeTimeout(120, TimeUnit.SECONDS)
+            .retryOnConnectionFailure(true)
+            .build()
+    }
+
+
+    companion object {
+        private const val CHANNEL_ID = "assistant_service_channel"
+        private const val NOTIFICATION_ID = 1
+    }
+
+    @RequiresPermission(Manifest.permission.RECORD_AUDIO)
+    fun startVadListening() {
+        if (_serverBases.value.isEmpty()) {
+            updateNotification("No server configured")
+            return
+        }
+
+        if (vadDetector == null) {
+            vadDetector = VADDetector(this)
+        }
+
+        val persona = personas.value.firstOrNull() ?: DEFAULT_PERSONAS[0]
+
+        if (vadRecorder == null) {
+            vadRecorder = VADAudioRecorder(
+                detector = vadDetector!!,
+                cacheDir = cacheDir,
+                scope = serviceScope,
+                onSpeechStart = {
+                    _state.value = AssistantState.LISTENING
+                    updateNotification("Listening (VAD)...")
+                },
+                onSpeechEnd = { file ->
+                    sendAudioToServer(file, persona)
+                }
+            )
+        }
+        vadRecorder?.muted = _micMuted.value
+        vadRecorder?.start()
+        _handsFreeMode.value = true
+    }
+
+    fun stopVadListening() {
+        vadRecorder?.stop()
+        vadRecorder = null
+        _handsFreeMode.value = false
+        _state.value = AssistantState.IDLE
+        updateNotification("Ready to help")
+    }
+}

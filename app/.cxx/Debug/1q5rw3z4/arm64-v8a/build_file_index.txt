@@ -1,0 +1,1 @@
+/mnt/SSD1TB/VoiceAssistant/app/src/main/cpp/CMakeLists.txt
