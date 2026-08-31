@@ -45,6 +45,14 @@ private fun AssistantService.readAttachmentCapped(uri: Uri): ByteArray {
     throw Exception("Could not open attachment: $uri")
 }
 
+// A5: a user-initiated stop (Stop button -> currentCall.cancel()) surfaces as an
+// IOException in every flow: the gateway loops detect call.isCanceled() and rethrow
+// IOException("Cancelled"), while the cloud and direct-Ollama calls let OkHttp's own
+// IOException("Canceled") propagate directly. Recognising the shapes lets us skip the
+// spurious "Error: Cancelled" bubble and just return to idle.
+private fun isUserCancellation(e: Throwable): Boolean =
+    e is java.io.IOException && (e.message == "Cancelled" || e.message == "Canceled")
+
 internal fun AssistantService.sendAudioToServer(file: File, currentPersona: Persona) {
     if (currentPersona.model.isBlank()) {
         _messages.value = _messages.value + ChatMessage("assistant", "Please choose a model for this persona in its settings.", isError = true)
@@ -72,6 +80,11 @@ internal fun AssistantService.sendAudioToServer(file: File, currentPersona: Pers
                 } catch (e: Exception) {
                     if (!isChatRequestCurrent(generation)) {
                         android.util.Log.d("AssistantService", "Voice chat request superseded by a newer request — discarding failure: ${e.message}")
+                    } else if (isUserCancellation(e)) {
+                        // A5: the user deliberately stopped this request — no error bubble.
+                        android.util.Log.d("AssistantService", "Voice chat request cancelled by user — no error bubble")
+                        _state.value = AssistantState.IDLE
+                        updateNotification("Ready to help")
                     } else {
                         android.util.Log.e("AssistantService", "Cloud voice chat failed", e)
                         if (isChatContextCurrent(generation, personaName)) {
@@ -271,6 +284,10 @@ internal fun AssistantService.sendAudioToServer(file: File, currentPersona: Pers
         } catch (e: Exception) {
             if (!isChatRequestCurrent(generation)) {
                 android.util.Log.d("AssistantService", "Chat request superseded by a newer request — discarding failure: ${e.message}")
+            } else if (isUserCancellation(e)) {
+                // A5: the user deliberately stopped this request — no error bubble.
+                android.util.Log.d("AssistantService", "Chat request cancelled by user — no error bubble")
+                currentCall = null
             } else {
                 android.util.Log.e("AssistantService", "Chat failed", e)
                 if (isChatContextCurrent(generation, personaName)) {
@@ -553,6 +570,10 @@ internal fun AssistantService.sendTextMessageToServer(inputText: String, current
         } catch (e: Exception) {
             if (!isChatRequestCurrent(generation)) {
                 android.util.Log.d("AssistantService", "Chat request superseded by a newer request — discarding failure: ${e.message}")
+            } else if (isUserCancellation(e)) {
+                // A5: the user deliberately stopped this request — no error bubble.
+                android.util.Log.d("AssistantService", "Chat request cancelled by user — no error bubble")
+                currentCall = null
             } else {
                 android.util.Log.e("AssistantService", "Chat failed", e)
                 if (isChatContextCurrent(generation, personaName)) {
@@ -736,6 +757,9 @@ private fun AssistantService.performCloudChat(text: String, persona: Persona, us
         } catch (e: Exception) {
             if (!isChatRequestCurrent(generation)) {
                 android.util.Log.d("AssistantService", "Cloud chat request superseded — discarding failure: ${e.message}")
+            } else if (isUserCancellation(e)) {
+                // A5: the user deliberately stopped this request — no error bubble.
+                android.util.Log.d("AssistantService", "Cloud chat request cancelled by user — no error bubble")
             } else {
                 if (isChatContextCurrent(generation, persona.name)) {
                     _messages.value = _messages.value + ChatMessage("assistant", "Error: ${e.message}", isError = true)
