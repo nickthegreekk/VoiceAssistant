@@ -60,6 +60,7 @@ data class Persona(
     val isTranslator: Boolean = false,
     val targetLanguage: String = "English",
     val backendUrl: String = "",
+    val allowGatewayFailover: Boolean = false, // S2: opt-in — when false, only backendUrl is ever contacted
     val voiceMode: VoiceMode = VoiceMode.SYSTEM_TTS,
     val voiceEngine: String = "kokoro",
     val kokoroVoice: String = "af_heart",

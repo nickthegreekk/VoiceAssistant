@@ -18,6 +18,33 @@ import org.json.JSONObject
 import java.io.File
 import java.util.concurrent.TimeUnit
 
+// S2: attachments are read fully into memory before upload — cap the size so an
+// oversized file fails cleanly with a clear error instead of risking an OOM crash.
+private const val MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024 // 25 MB
+
+private class AttachmentTooLargeException(message: String) : Exception(message)
+
+private fun AssistantService.readAttachmentCapped(uri: Uri): ByteArray {
+    contentResolver.openInputStream(uri)?.use { input ->
+        val out = java.io.ByteArrayOutputStream()
+        val chunk = ByteArray(64 * 1024)
+        var total = 0
+        while (true) {
+            val read = input.read(chunk)
+            if (read < 0) break
+            total += read
+            if (total > MAX_ATTACHMENT_BYTES) {
+                throw AttachmentTooLargeException(
+                    "Attachment exceeds the ${MAX_ATTACHMENT_BYTES / (1024 * 1024)} MB size limit."
+                )
+            }
+            out.write(chunk, 0, read)
+        }
+        return out.toByteArray()
+    }
+    throw Exception("Could not open attachment: $uri")
+}
+
 internal fun AssistantService.sendAudioToServer(file: File, currentPersona: Persona) {
     if (currentPersona.model.isBlank()) {
         _messages.value = _messages.value + ChatMessage("assistant", "Please choose a model for this persona in its settings.", isError = true)
@@ -118,20 +145,32 @@ internal fun AssistantService.sendAudioToServer(file: File, currentPersona: Pers
                 val statusMap = _serverStatus.value
                 val allGateways = _serverBases.value
 
-                // If useDeviceVoice is true, we still need a gateway for STT.
-                // We'll try to find any working gateway.
+                // S2: data (audio/transcripts) is only sent to the persona's configured
+                // backend unless the persona explicitly opts into gateway failover.
                 val preferredGateway = if (currentPersona.backendUrl.isNotBlank()) {
                     allGateways.find { it.name == displayServer || it.url == currentPersona.backendUrl }
                 } else null
 
-                val workingGateways = allGateways.filter {
-                    val status = statusMap[it.name]
-                    status == null || !status.lowercase().contains("failed")
+                val gwsToTry: List<ServerConfig> = if (currentPersona.allowGatewayFailover) {
+                    val workingGateways = allGateways.filter {
+                        val status = statusMap[it.name]
+                        status == null || !status.lowercase().contains("failed")
+                    }
+                    buildList {
+                        preferredGateway?.let { add(it) }
+                        addAll(workingGateways.filter { it != preferredGateway })
+                    }
+                } else {
+                    when {
+                        preferredGateway != null -> listOf(preferredGateway)
+                        currentPersona.backendUrl.isBlank() -> throw Exception(
+                            "No gateway is configured for persona '${currentPersona.name}'. Set a Backend URL in its persona settings, or enable 'Allow Gateway Failover'."
+                        )
+                        else -> throw Exception(
+                            "Gateway '${currentPersona.backendUrl}' for persona '${currentPersona.name}' is not in the configured gateway list. Check Settings, or enable 'Allow Gateway Failover'."
+                        )
+                    }
                 }
-
-                val gwsToTry = mutableListOf<ServerConfig>()
-                preferredGateway?.let { gwsToTry.add(it) }
-                gwsToTry.addAll(workingGateways.filter { it != preferredGateway })
 
                 if (gwsToTry.isEmpty()) {
                     throw Exception("No working gateways available for voice processing.")
@@ -319,12 +358,13 @@ internal fun AssistantService.sendTextMessageToServer(inputText: String, current
 
                 attachments.forEachIndexed { index, uri ->
                     try {
-                        contentResolver.openInputStream(uri)?.use { input ->
-                            val bytes = input.readBytes()
-                            val mimeType = contentResolver.getType(uri) ?: "application/octet-stream"
-                            val fileName = "file_$index"
-                            requestBuilder.addFormDataPart("files", fileName, bytes.toRequestBody(mimeType.toMediaType()))
-                        }
+                        val bytes = readAttachmentCapped(uri)
+                        val mimeType = contentResolver.getType(uri) ?: "application/octet-stream"
+                        val fileName = "file_$index"
+                        requestBuilder.addFormDataPart("files", fileName, bytes.toRequestBody(mimeType.toMediaType()))
+                    } catch (e: AttachmentTooLargeException) {
+                        // S2: fail the whole request cleanly — oversized files are never skipped silently.
+                        throw e
                     } catch (e: Exception) {
                         android.util.Log.e("VoiceAssistant", "Failed to read attachment: $uri", e)
                     }
@@ -335,18 +375,32 @@ internal fun AssistantService.sendTextMessageToServer(inputText: String, current
                 val statusMap = _serverStatus.value
                 val allGateways = _serverBases.value
 
+                // S2: data (prompts/attachments) is only sent to the persona's configured
+                // backend unless the persona explicitly opts into gateway failover.
                 val preferredGateway = if (currentPersona.backendUrl.isNotBlank()) {
                     allGateways.find { it.name == displayServer || it.url == currentPersona.backendUrl }
                 } else null
 
-                val workingGateways = allGateways.filter {
-                    val status = statusMap[it.name]
-                    status == null || !status.lowercase().contains("failed")
+                val gwsToTry: List<ServerConfig> = if (currentPersona.allowGatewayFailover) {
+                    val workingGateways = allGateways.filter {
+                        val status = statusMap[it.name]
+                        status == null || !status.lowercase().contains("failed")
+                    }
+                    buildList {
+                        preferredGateway?.let { add(it) }
+                        addAll(workingGateways.filter { it != preferredGateway })
+                    }
+                } else {
+                    when {
+                        preferredGateway != null -> listOf(preferredGateway)
+                        currentPersona.backendUrl.isBlank() -> throw Exception(
+                            "No gateway is configured for persona '${currentPersona.name}'. Set a Backend URL in its persona settings, or enable 'Allow Gateway Failover'."
+                        )
+                        else -> throw Exception(
+                            "Gateway '${currentPersona.backendUrl}' for persona '${currentPersona.name}' is not in the configured gateway list. Check Settings, or enable 'Allow Gateway Failover'."
+                        )
+                    }
                 }
-
-                val gwsToTry = mutableListOf<ServerConfig>()
-                preferredGateway?.let { gwsToTry.add(it) }
-                gwsToTry.addAll(workingGateways.filter { it != preferredGateway })
 
                 if (gwsToTry.isEmpty()) {
                     throw Exception("No working servers available. Check your connection in Settings.")
@@ -385,12 +439,13 @@ internal fun AssistantService.sendTextMessageToServer(inputText: String, current
                             // Re-add attachments
                             attachments.forEachIndexed { index, uri ->
                                 try {
-                                    contentResolver.openInputStream(uri)?.use { input ->
-                                        val bytes = input.readBytes()
-                                        val mimeType = contentResolver.getType(uri) ?: "application/octet-stream"
-                                        val fileName = "file_$index"
-                                        addFormDataPart("files", fileName, bytes.toRequestBody(mimeType.toMediaType()))
-                                    }
+                                    val bytes = readAttachmentCapped(uri)
+                                    val mimeType = contentResolver.getType(uri) ?: "application/octet-stream"
+                                    val fileName = "file_$index"
+                                    addFormDataPart("files", fileName, bytes.toRequestBody(mimeType.toMediaType()))
+                                } catch (e: AttachmentTooLargeException) {
+                                    // S2: fail the whole request cleanly — oversized files are never skipped silently.
+                                    throw e
                                 } catch (e: Exception) {
                                     android.util.Log.e("VoiceAssistant", "Failed to read attachment: $uri", e)
                                 }
