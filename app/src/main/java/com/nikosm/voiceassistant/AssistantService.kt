@@ -586,6 +586,14 @@ class AssistantService : Service() {
     fun getUserLocation(): String? = settingsManager.getUserLocation()
     fun saveUserLocation(location: String) = settingsManager.saveUserLocation(location)
 
+    fun getRagServerUrl(): String? = settingsManager.getRagServerUrl()
+    fun saveRagServerUrl(url: String) = settingsManager.saveRagServerUrl(url)
+
+    fun getRagUsername(): String? = settingsManager.getRagUsername()
+    fun saveRagUsername(username: String) = settingsManager.saveRagUsername(username)
+    fun getRagPassword(): String? = settingsManager.getRagPassword()
+    fun saveRagPassword(password: String) = settingsManager.saveRagPassword(password)
+
     fun exportBackup(): String = settingsManager.exportBackup()
     fun importBackup(json: String): Boolean {
         val success = settingsManager.importBackup(json)

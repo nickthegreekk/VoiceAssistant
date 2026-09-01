@@ -54,7 +54,7 @@ private val plaintextExtensions = setOf(
     "properties", "csv", "tsv", "ts", "tsx", "jsx", "dockerfile", "makefile", "gitignore"
 )
 
-private fun AssistantService.isPlainTextAttachment(uri: Uri): Boolean {
+internal fun AssistantService.isPlainTextAttachment(uri: Uri): Boolean {
     val mime = contentResolver.getType(uri)
     if (mime != null && mime in plaintextMimeTypes) return true
     val ext = uri.path?.substringAfterLast(".", "")?.lowercase() ?: ""
@@ -64,7 +64,7 @@ private fun AssistantService.isPlainTextAttachment(uri: Uri): Boolean {
 // Reads an attachment as strict UTF-8 text, capped at MAX_ATTACHMENT_BYTES. Fails
 // cleanly (with a clear message) for unsupported types, oversized files, or non-UTF-8
 // content, rather than sending garbage bytes to the model.
-private fun AssistantService.readAttachmentText(uri: Uri): String {
+internal fun AssistantService.readAttachmentText(uri: Uri): String {
     if (!isPlainTextAttachment(uri)) {
         throw AttachmentException(
             "'$uri' is not a supported plain-text file. Only text files (.txt, .md, .json, .yaml, code, etc.) can be attached."

@@ -170,7 +170,10 @@ class SettingsManager(context: Context) {
             favoriteModels = getFavoriteModels() ?: emptyList(),
             trustedCerts = getTrustedCertificates(),
             searxngUrl = getSearxngUrl(),
-            userLocation = getUserLocation()
+            userLocation = getUserLocation(),
+            ragServerUrl = getRagServerUrl(),
+            ragUsername = getRagUsername(),
+            ragPassword = getRagPassword()
         )
         return json.encodeToString(backup)
     }
@@ -192,6 +195,9 @@ class SettingsManager(context: Context) {
             saveTrustedCertificates(backup.trustedCerts)
             backup.searxngUrl?.let { saveSearxngUrl(it) }
             backup.userLocation?.let { saveUserLocation(it) }
+            backup.ragServerUrl?.let { saveRagServerUrl(it) }
+            backup.ragUsername?.let { saveRagUsername(it) }
+            backup.ragPassword?.let { saveRagPassword(it) }
             true
         } catch (e: Exception) {
             // Try legacy import if new format fails
@@ -282,6 +288,30 @@ class SettingsManager(context: Context) {
         return prefs.getString("user_location", null)
     }
 
+    fun saveRagServerUrl(url: String) {
+        prefs.edit().putString("rag_server_url", url).apply()
+    }
+
+    fun getRagServerUrl(): String? {
+        return prefs.getString("rag_server_url", null)
+    }
+
+    fun saveRagUsername(username: String) {
+        prefs.edit().putString("rag_username", username).apply()
+    }
+
+    fun getRagUsername(): String? {
+        return prefs.getString("rag_username", null)
+    }
+
+    fun saveRagPassword(password: String) {
+        prefs.edit().putString("rag_password", password).apply()
+    }
+
+    fun getRagPassword(): String? {
+        return prefs.getString("rag_password", null)
+    }
+
     fun saveModelPricing(pricing: Map<String, ModelPricing>) {
         prefs.edit().putString("model_pricing_v1", json.encodeToString(pricing)).apply()
     }
@@ -313,5 +343,8 @@ data class BackupData(
     val favoriteModels: List<String>,
     val trustedCerts: Map<String, String>,
     val searxngUrl: String? = null,
-    val userLocation: String? = null
+    val userLocation: String? = null,
+    val ragServerUrl: String? = null,
+    val ragUsername: String? = null,
+    val ragPassword: String? = null
 )
