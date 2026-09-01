@@ -68,10 +68,6 @@ dependencies {
     implementation(libs.kotlinx.serialization.json)
     implementation("com.squareup.okhttp3:okhttp:5.5.0")
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.19.2")
-    // ML Kit Language Identification — BUNDLED variant (the com.google.mlkit group
-    // ships the model inside the APK; the com.google.android.gms variant downloads
-    // it on demand and needs Play Services).
-    implementation("com.google.mlkit:language-id:17.0.4")
     testImplementation(libs.junit)
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)

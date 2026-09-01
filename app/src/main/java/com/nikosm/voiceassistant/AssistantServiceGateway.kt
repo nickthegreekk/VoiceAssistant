@@ -5,9 +5,6 @@ import android.media.AudioManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import com.google.android.gms.tasks.Tasks
-import com.google.mlkit.nl.languageid.LanguageIdentification
-import com.google.mlkit.nl.languageid.LanguageIdentificationOptions
 import okhttp3.Credentials
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
@@ -18,76 +15,61 @@ import java.security.cert.X509Certificate
 import okhttp3.RequestBody.Companion.asRequestBody
 
 // ---------------------------------------------------------------------------
-// On-device language detection for gateway TTS routing. Uses ML Kit's BUNDLED
-// language-id model (ships in the APK, no network / Play Services dependency).
+// On-device language detection for gateway TTS routing. Zero-dependency
+// Unicode-script heuristic — replaces ML Kit language-id, a proprietary
+// dependency that reports telemetry to Firebase's logging backend roughly
+// every 15 minutes regardless of Play Services presence. Deliberately detects
+// only the non-Latin scripts that actually caused the original TTS-mislabeling
+// bug; Latin-script languages fall through to the "English" default by design.
 // ---------------------------------------------------------------------------
-private val gatewayLanguageIdClient by lazy {
-    LanguageIdentification.getClient(
-        LanguageIdentificationOptions.Builder()
-            .setConfidenceThreshold(0.5f) // ML Kit default, stated explicitly for clarity
-            .build()
-    )
-}
 
-// BCP-47 code -> the app's internal language name. The values are the exact
-// TRANSLATION_LANGUAGES entries (Models.kt) — the same name strings the gateway's
-// LANG_CONFIG / UNSUPPORTED_TTS_LANGUAGES tables are keyed by.
-private val bcp47ToLanguageName = mapOf(
-    "en" to "English",
-    "zh" to "Chinese",  // ML Kit may report region-qualified "zh-CN"/"zh-TW"; base-subtag lookup handles it
-    "es" to "Spanish",
-    "fr" to "French",
-    "de" to "German",
-    "ja" to "Japanese",
-    "pt" to "Portuguese",
-    "ru" to "Russian",
-    "it" to "Italian",
-    "ko" to "Korean",
-    "he" to "Hebrew",
-    "iw" to "Hebrew",   // legacy ISO 639-1 code for Hebrew, some runtimes still emit it
-    "el" to "Greek",
-    "nl" to "Dutch",
-    "tr" to "Turkish",
-    "ar" to "Arabic",
-    "hi" to "Hindi"
-)
-
-private fun mapBcp47ToLanguageName(code: String): String? {
-    bcp47ToLanguageName[code]?.let { return it }
-    // Region-qualified codes ("pt-BR", "zh-CN") resolve via the base subtag.
-    return bcp47ToLanguageName[code.substringBefore('-').lowercase()]
+/**
+ * Detects the dominant non-Latin script of [text] and returns the internal
+ * language name the gateway expects (the exact TRANSLATION_LANGUAGES entries
+ * the gateway's LANG_CONFIG / UNSUPPORTED_TTS_LANGUAGES tables are keyed by).
+ * Returns null when no non-Latin script is sufficiently present — Latin-script
+ * languages, undetermined text, and short/noise-only samples fall through to
+ * the caller's default.
+ */
+private fun detectScriptLanguage(text: String): String? {
+    val sample = text.take(200) // enough to judge dominant script
+    val scriptCounts = mutableMapOf<String, Int>()
+    for (ch in sample) {
+        val lang = when {
+            ch in '\u0370'..'\u03FF' -> "Greek"
+            ch in '\u0400'..'\u04FF' -> "Russian"
+            ch in '\u0590'..'\u05FF' -> "Hebrew"
+            ch in '\u0600'..'\u06FF' -> "Arabic"
+            ch in '\u4E00'..'\u9FFF' -> "Chinese"
+            ch in '\u3040'..'\u30FF' -> "Japanese"
+            ch in '\uAC00'..'\uD7AF' -> "Korean"
+            ch in '\u0900'..'\u097F' -> "Hindi" // Devanagari — Hindi is a LANG_CONFIG language; omitting it would fall through to the English default (the original bug class)
+            else -> null
+        }
+        if (lang != null) scriptCounts[lang] = (scriptCounts[lang] ?: 0) + 1
+    }
+    val dominant = scriptCounts.maxByOrNull { it.value }
+    // Require a real presence of non-Latin characters, not just noise/punctuation
+    return if (dominant != null && dominant.value >= 3) dominant.key else null
 }
 
 /**
- * Detects the language of an LLM response on-device and maps it to the internal
- * language name the gateway expects.
+ * Detects the language of an LLM response on-device for gateway TTS routing.
  *
- * Fallback rules:
- *  - "und" (undetermined, e.g. text too short/ambiguous) -> "English" (per spec).
+ * Fallback rules (same contract as the previous ML Kit version):
+ *  - no dominant non-Latin script (Latin-script languages, undetermined or
+ *    too-short text) -> "English" (per spec).
  *  - detection failure (exception) -> "English".
- *  - detected but unmapped code -> raw BCP-47 code passed through, so the gateway's
- *    UNSUPPORTED_TTS_LANGUAGES mechanism treats it as text-only instead of using a
- *    wrong voice.
+ * The old "unmapped BCP-47 passthrough" branch is gone by construction: the
+ * script heuristic only ever returns one of the seven supported non-Latin
+ * language names, so no unsupported code can reach the gateway from here.
  */
 internal suspend fun detectGatewayResponseLanguage(text: String): String {
     return try {
-        withContext(Dispatchers.IO) {
-            val code = Tasks.await(gatewayLanguageIdClient.identifyLanguage(text))
-            val mapped = mapBcp47ToLanguageName(code)
-            // TODO(temporary debug logging — remove once TTS language routing is verified on-device)
-            android.util.Log.d("AssistantService", "DEBUG: TTS language detection: len=${text.length} bcp47='$code' mapped='${mapped ?: "none"}'")
-            when {
-                mapped != null -> mapped
-                code == "und" -> {
-                    android.util.Log.d("AssistantService", "DEBUG: TTS language undetermined — falling back to 'English'")
-                    "English"
-                }
-                else -> {
-                    android.util.Log.d("AssistantService", "DEBUG: TTS language '$code' has no internal mapping — passing raw code to gateway (expect UNSUPPORTED_TTS_LANGUAGES text-only fallback)")
-                    code
-                }
-            }
-        }
+        val detected = detectScriptLanguage(text)
+        // TODO(temporary debug logging — remove once TTS language routing is verified on-device)
+        android.util.Log.d("AssistantService", "DEBUG: TTS language detection: len=${text.length} script='${detected ?: "none (Latin/undetermined)"}' -> '${detected ?: "English"}'")
+        detected ?: "English"
     } catch (e: Exception) {
         android.util.Log.w("AssistantService", "DEBUG: TTS language detection failed — falling back to 'English'", e)
         "English"
