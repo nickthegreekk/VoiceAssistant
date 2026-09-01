@@ -1228,10 +1228,9 @@ fun GeneralSettings(service: AssistantService, totalCost: Double, onDismiss: () 
                 )
             }
         }
-
         item {
-            var showClearConfirm by remember { mutableStateOf(false) }
             SettingsSectionHeader(title = "History", icon = Icons.Default.History)
+            var showClearConfirm by remember { mutableStateOf(false) }
             SettingsSection {
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(
@@ -1348,6 +1347,8 @@ fun SettingsSection(content: @Composable () -> Unit) {
 
 @Composable
 fun ServerSettings(service: AssistantService, gateways: List<ServerConfig>, ollama: List<ServerConfig>) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     var serverStatus by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
     LaunchedEffect(service) {
         service.serverStatus.collect { serverStatus = it }
@@ -1408,6 +1409,130 @@ fun ServerSettings(service: AssistantService, gateways: List<ServerConfig>, olla
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
                     modifier = Modifier.padding(top = 4.dp)
                 )
+            }
+        }
+        item {
+            SettingsSectionHeader(title = "Knowledge Base", icon = Icons.Default.Book)
+            SettingsSection {
+                var ragUrl by remember { mutableStateOf("") }
+                var ragUser by remember { mutableStateOf("") }
+                var ragPass by remember { mutableStateOf("") }
+                var docCount by remember { mutableStateOf<Int?>(null) }
+                var uploadStatus by remember { mutableStateOf<String>("") }
+
+                LaunchedEffect(service) {
+                    ragUrl = service.getRagServerUrl() ?: ""
+                    ragUser = service.getRagUsername() ?: ""
+                    ragPass = service.getRagPassword() ?: ""
+                }
+
+                OutlinedTextField(
+                    value = ragUrl,
+                    onValueChange = {
+                        ragUrl = it
+                        service.saveRagServerUrl(it)
+                        docCount = null
+                    },
+                    label = { Text("RAG Server URL") },
+                    placeholder = { Text("e.g. https://192.168.1.10:8882") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = ragUser,
+                        onValueChange = {
+                            ragUser = it
+                            service.saveRagUsername(it)
+                        },
+                        label = { Text("RAG Username") },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f)
+                    )
+                    OutlinedTextField(
+                        value = ragPass,
+                        onValueChange = {
+                            ragPass = it
+                            service.saveRagPassword(it)
+                        },
+                        label = { Text("RAG Password") },
+                        visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                        singleLine = true,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+                Text(
+                    "Local RAG microservice (HTTPS with self-signed cert — approve the trust prompt on first connection). Enter the service's own username/password above. Leave blank to disable.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
+                    modifier = Modifier.padding(top = 4.dp)
+                )
+
+                if (ragUrl.isNotBlank()) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = docCount?.let { "Documents in collection: $it" } ?: "Click refresh to check collection",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                        TextButton(onClick = {
+                            scope.launch {
+                                docCount = null
+                                when (val result = service.getKnowledgeCount(ragUrl)) {
+                                    is RagResult.Success -> docCount = result.value
+                                    is RagResult.Failure -> uploadStatus = "Error: ${result.exception.message}"
+                                }
+                            }
+                        }) {
+                            Text("Refresh")
+                        }
+                    }
+                }
+
+                val kbAttachmentLauncher = rememberLauncherForActivityResult(
+                    ActivityResultContracts.OpenMultipleDocuments()
+                ) { uris ->
+                    uris.forEach { uri ->
+                        val name = uri.path?.substringAfterLast("/", "document")?.substringAfterLast(".") ?: "document"
+                        scope.launch {
+                            try {
+                                val text = service.readAttachmentText(uri)
+                                uploadStatus = "Uploading $name..."
+                                when (val result = service.uploadKnowledgeDocument(text, name, ragUrl)) {
+                                    is RagResult.Success -> {
+                                        uploadStatus = "Uploaded $name"
+                                        docCount = null
+                                    }
+                                    is RagResult.Failure -> uploadStatus = "Failed: ${result.exception.message}"
+                                }
+                            } catch (e: Exception) {
+                                uploadStatus = "Failed: ${e.message}"
+                            }
+                        }
+                    }
+                }
+
+                OutlinedButton(
+                    onClick = { kbAttachmentLauncher.launch(arrayOf("*/*")) },
+                    enabled = ragUrl.isNotBlank(),
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.5f))
+                ) {
+                    Icon(Icons.Default.UploadFile, null)
+                    Spacer(Modifier.width(12.dp))
+                    Text("Add Document")
+                }
+
+                if (uploadStatus.isNotBlank()) {
+                    Text(
+                        uploadStatus,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (uploadStatus.startsWith("Failed") || uploadStatus.startsWith("Unsupported")) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.padding(top = 4.dp)
+                    )
+                }
             }
         }
     }

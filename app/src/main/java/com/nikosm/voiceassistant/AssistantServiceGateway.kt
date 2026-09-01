@@ -240,6 +240,82 @@ internal suspend fun AssistantService.transcribeWithGateway(file: File, persona:
     }
 }
 
+// ---------------------------------------------------------------------------
+// Local RAG microservice integration — upload documents and check collection
+// size. The service runs alongside the gateway (same network) and is secured
+// with a self-signed cert + HTTP Basic Auth, so these calls go through the
+// TOFU-pinning `client` (same category as gateway/TTS infrastructure — first
+// connection triggers the standard cert-approval prompt) and authenticate with
+// the RAG service's own dedicated credentials stored in settings.
+// ---------------------------------------------------------------------------
+internal sealed class RagResult<out T> {
+    data class Success<T>(val value: T) : RagResult<T>()
+    data class Failure(val exception: Exception) : RagResult<Nothing>()
+}
+
+// Builds a request to the RAG service: normalizes the stored URL (defaulting
+// to https:// — the service no longer accepts plain HTTP) and attaches the
+// RAG service's dedicated Basic-Auth credentials. Those live in their own
+// settings fields, decoupled from the gateway entries: the RAG server (:8882)
+// and the TTS gateway (:8880) are different endpoints even on the same host,
+// so URL-matching against _serverBases could never resolve the right creds.
+private fun AssistantService.buildRagRequestBuilder(ragServerUrl: String, path: String): Request.Builder {
+    val raw = ragServerUrl.trim()
+    val base = if (raw.startsWith("http")) raw.trimEnd('/') else "https://${raw.trimEnd('/')}"
+    val builder = Request.Builder().url(base + path)
+    val user = settingsManager.getRagUsername()
+    if (!user.isNullOrBlank()) {
+        builder.header("Authorization", Credentials.basic(user, settingsManager.getRagPassword() ?: ""))
+    }
+    return builder
+}
+
+internal suspend fun AssistantService.uploadKnowledgeDocument(
+    text: String,
+    sourceName: String,
+    ragServerUrl: String
+): RagResult<Unit> = withContext(Dispatchers.IO) {
+    val body = okhttp3.FormBody.Builder()
+        .add("text", text)
+        .add("source_name", sourceName)
+        .build()
+    val request = buildRagRequestBuilder(ragServerUrl, "/ingest").post(body).build()
+    try {
+        client.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) {
+                RagResult.Failure(Exception("RAG server returned HTTP ${response.code}: ${response.message}"))
+            } else {
+                RagResult.Success(Unit)
+            }
+        }
+    } catch (e: Exception) {
+        RagResult.Failure(Exception("Failed to upload document to RAG server: ${e.message}", e))
+    }
+}
+
+internal suspend fun AssistantService.getKnowledgeCount(
+    ragServerUrl: String
+): RagResult<Int> = withContext(Dispatchers.IO) {
+    val request = buildRagRequestBuilder(ragServerUrl, "/health").get().build()
+    try {
+        client.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) {
+                RagResult.Failure(Exception("RAG server health check failed: HTTP ${response.code}"))
+            } else {
+                val bodyStr = response.body.string()
+                val count = try {
+                    JSONObject(bodyStr).optInt("documents_in_collection", 0)
+                } catch (e: Exception) {
+                    bodyStr.toIntOrNull() ?: 0
+                }
+                RagResult.Success(count)
+            }
+        }
+    } catch (e: Exception) {
+        RagResult.Failure(Exception("Failed to query RAG server: ${e.message}", e))
+    }
+}
+
 fun AssistantService.approveCertificate(request: CertApprovalRequest) {
     val certs = settingsManager.getTrustedCertificates().toMutableMap()
     certs[request.host] = request.fingerprint
