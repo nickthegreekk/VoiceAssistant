@@ -10,7 +10,6 @@ import android.media.MediaPlayer
 import android.os.Build
 import androidx.compose.ui.graphics.Color
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -254,29 +253,45 @@ internal fun AssistantService.speakWithEspeak(text: String, persona: Persona) {
 
             currentAudioTrack = audioTrack
             audioTrack.play()
-            
+
+            // A7: genuine-completion detection via the playback-position marker —
+            // no sleep-based estimate. Marker position = total frames actually written
+            // (PCM16 mono = 2 bytes/frame) so onMarkerReached fires precisely when real
+            // playback finishes. The callback runs on AudioTrack's handler thread, so
+            // all state/focus work hops to Main via serviceScope.launch. The identity
+            // guard (currentAudioTrack == audioTrack) preserves the B1/A12 guarantees:
+            // a newer playback that released this track skips here, and a superseded
+            // track can't double-release. If stopAudio() releases the track before the
+            // marker fires, it simply never fires — no hanging coroutine.
+            val totalFrames = samples.size / 2
+            audioTrack.setNotificationMarkerPosition(totalFrames)
+            audioTrack.setPlaybackPositionUpdateListener(object : AudioTrack.OnPlaybackPositionUpdateListener {
+                override fun onMarkerReached(track: AudioTrack) {
+                    serviceScope.launch {
+                        if (currentAudioTrack == audioTrack && audioTrack.state == AudioTrack.STATE_INITIALIZED) {
+                            if (assistantState.value == AssistantState.SPEAKING) {
+                                _state.value = AssistantState.IDLE
+                                updateNotification("Ready to help")
+                                audioFocusRequest?.let { req -> audioManager.abandonAudioFocusRequest(req) }
+                                audioFocusRequest = null
+                                audioManager.mode = AudioManager.MODE_NORMAL
+                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) audioManager.clearCommunicationDevice()
+                            }
+                            audioTrack.stop()
+                            audioTrack.release()
+                            currentAudioTrack = null
+                        }
+                    }
+                }
+                override fun onPeriodicNotification(track: AudioTrack) {}
+            })
+
             withContext(Dispatchers.IO) {
                 audioTrack.write(samples, 0, samples.size, AudioTrack.WRITE_BLOCKING)
             }
-            
+
             val durationMs = (samples.size.toFloat() / sampleRate * 1000).toInt()
             _voiceDuration.value = durationMs
-
-            delay(durationMs.toLong() + 200)
-
-            if (currentAudioTrack == audioTrack && audioTrack.state == AudioTrack.STATE_INITIALIZED) {
-                if (assistantState.value == AssistantState.SPEAKING) {
-                    _state.value = AssistantState.IDLE
-                    updateNotification("Ready to help")
-                    audioFocusRequest?.let { req -> audioManager.abandonAudioFocusRequest(req) }
-                    audioFocusRequest = null
-                    audioManager.mode = AudioManager.MODE_NORMAL
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) audioManager.clearCommunicationDevice()
-                }
-                audioTrack.stop()
-                audioTrack.release()
-                currentAudioTrack = null
-            }
         }
     }
 }
