@@ -70,6 +70,7 @@ data class Persona(
     val topK: Int = 40,
     val repeatPenalty: Float = 1.1f,
     val maxTokens: Int = 2048,
+    val numCtx: Int = 8192,
     val enableThinking: Boolean = true,
     val webSearchEnabled: Boolean = false,
     val ragEnabled: Boolean = false

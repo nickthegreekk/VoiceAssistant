@@ -1117,12 +1117,21 @@ fun SettingsDialog(service: AssistantService?, onDismiss: () -> Unit, personaCol
                     }
                 }
 
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(16.dp),
-                    horizontalArrangement = Arrangement.End
-                ) {
-                    TextButton(onClick = onDismiss) {
-                        Text("Close", color = personaColor)
+                Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
+                    Text(
+                        text = "Settings are automatically saved.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
+                        modifier = Modifier.fillMaxWidth().padding(bottom = 4.dp),
+                        textAlign = TextAlign.Center
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.End
+                    ) {
+                        TextButton(onClick = onDismiss) {
+                            Text("Close", color = personaColor)
+                        }
                     }
                 }
             }
@@ -1967,6 +1976,7 @@ fun PersonaEditor(
     var topK by remember(persona) { mutableIntStateOf(persona.topK) }
     var repeatPenalty by remember(persona) { mutableFloatStateOf(persona.repeatPenalty) }
     var maxTokens by remember(persona) { mutableIntStateOf(persona.maxTokens) }
+    var numCtx by remember(persona) { mutableIntStateOf(persona.numCtx) }
     var enableThinking by remember(persona) { mutableStateOf(persona.enableThinking) }
     var webSearchEnabled by remember(persona) { mutableStateOf(persona.webSearchEnabled) }
     var ragEnabled by remember(persona) { mutableStateOf(persona.ragEnabled) }
@@ -2021,7 +2031,8 @@ fun PersonaEditor(
     }
 
     // Auto-save logic
-    LaunchedEffect(name, model, systemPrompt, themeColor, temp, topP, topK, repeatPenalty, maxTokens, enableThinking, webSearchEnabled, isTranslator, targetLanguage, voiceMode, voiceEngine, kokoroVoice, backendUrl) {
+    // TODO(temporary debug logging — confirm numCtx is in the key list)
+    LaunchedEffect(name, model, systemPrompt, themeColor, temp, topP, topK, repeatPenalty, maxTokens, numCtx, enableThinking, webSearchEnabled, isTranslator, targetLanguage, voiceMode, voiceEngine, kokoroVoice, backendUrl) {
         // Skip initial evaluation if needed? No, persona change will trigger it once, which is fine.
         delay(500)
         val trimmedModel = model.trim()
@@ -2052,6 +2063,7 @@ fun PersonaEditor(
             topK = topK,
             repeatPenalty = repeatPenalty,
             maxTokens = maxTokens,
+            numCtx = numCtx,
             enableThinking = enableThinking,
             webSearchEnabled = webSearchEnabled,
             ragEnabled = ragEnabled,
@@ -2062,6 +2074,8 @@ fun PersonaEditor(
             kokoroVoice = kokoroVoice,
             backendUrl = backendUrl
         )
+        // TODO(temporary debug logging — remove after confirming numCtx persistence)
+        android.util.Log.d("AssistantService", "DEBUG PersonaEditor save: numCtx=$numCtx, backendUrl=$backendUrl, maxTokens=$maxTokens")
         
         if (updated != persona) {
             onSave(updated)
@@ -2397,6 +2411,18 @@ fun PersonaEditor(
                         }
                     }
 
+                    Column {
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                            Text("Context Window Size", style = MaterialTheme.typography.labelSmall)
+                            Text(numCtx.toString(), style = MaterialTheme.typography.labelSmall)
+                        }
+                        Slider(value = numCtx.toFloat(), onValueChange = { numCtx = it.toInt() }, valueRange = 2048f..32768f)
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                            Text("Smaller (less VRAM / faster)", style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp), color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
+                            Text("Larger (more VRAM / memory-heavy)", style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp), color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
+                        }
+                    }
+
                     Spacer(Modifier.height(8.dp))
                     Column {
                         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
@@ -2454,16 +2480,6 @@ fun PersonaEditor(
                 }
                 Spacer(Modifier.height(16.dp))
             }
-        }
-
-        item {
-            Text(
-                text = "Settings are automatically saved.",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
-                modifier = Modifier.fillMaxWidth().padding(vertical = 16.dp),
-                textAlign = TextAlign.Center
-            )
         }
     }
 
