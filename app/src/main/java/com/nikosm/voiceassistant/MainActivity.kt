@@ -324,10 +324,30 @@ fun MainScreen(service: AssistantService?) {
                     textInput = textInput,
                     onTextInputChange = { textInput = it },
                     attachedFiles = attachedFiles,
-                    onAttachClick = { attachmentLauncher.launch(arrayOf("*/*")) },
+                    onAttachClick = { attachmentLauncher.launch(arrayOf(
+                        "text/plain", "text/markdown", "text/x-markdown",
+                        "application/json", "text/x-json",
+                        "application/yaml", "text/yaml", "text/x-yaml",
+                        "application/xml", "text/xml",
+                        "text/html",
+                        "text/css",
+                        "text/x-javascript", "application/javascript",
+                        "text/x-python", "text/x-python-script",
+                        "text/x-sh", "text/x-shellscript",
+                        "text/x-c", "text/x-csrc", "text/x-c++", "text/x-c++src",
+                        "text/x-java-source",
+                        "text/x-ruby", "text/x-sql", "text/x-csharp", "text/x-go-source", "text/x-rust"
+                    )) },
                     onRemoveAttachment = { attachedFiles = attachedFiles - it },
                     onSendClick = {
-                        service?.sendTextMessageToServer(textInput, currentPersona, attachedFiles)
+                        android.util.Log.d("AssistantService", "DEBUG onSendClick: attachedFiles.size=${attachedFiles.size} BEFORE snapshot")
+                        // Defensive copy: the composition's attachedFiles is a
+                        // state-backed mutable list. We snapshot it BEFORE clearing the
+                        // UI, so the synchronous `attachedFiles = emptyList()` below
+                        // can't leave the in-flight send reading an emptied list.
+                        val filesToSend = attachedFiles.toList()
+                        android.util.Log.d("AssistantService", "DEBUG onSendClick: filesToSend.size=${filesToSend.size} AFTER snapshot")
+                        service?.sendTextMessageToServer(textInput, currentPersona, filesToSend)
                         textInput = ""
                         attachedFiles = emptyList()
                     },

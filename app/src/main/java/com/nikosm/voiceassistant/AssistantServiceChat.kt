@@ -18,13 +18,58 @@ import org.json.JSONObject
 import java.io.File
 import java.util.concurrent.TimeUnit
 
-// S2: attachments are read fully into memory before upload — cap the size so an
-// oversized file fails cleanly with a clear error instead of risking an OOM crash.
+// ---- Plain-text attachment support ----
+// Files are read in-app, validated as plain text, and their content is injected into
+// the prompt text sent to the model — no multipart, no server-side extraction. This
+// works uniformly across Cloud, Direct-Ollama, and Gateway backends.
 private const val MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024 // 25 MB
+private const val ATTACHMENT_MB = MAX_ATTACHMENT_BYTES / (1024 * 1024)
 
-private class AttachmentTooLargeException(message: String) : Exception(message)
+private class AttachmentException(message: String) : Exception(message)
 
-private fun AssistantService.readAttachmentCapped(uri: Uri): ByteArray {
+private val plaintextMimeTypes = setOf(
+    "text/plain", "text/markdown", "text/x-markdown",
+    "application/json", "text/x-json",
+    "application/yaml", "text/yaml", "text/x-yaml",
+    "application/xml", "text/xml",
+    "text/html", "application/html",
+    "text/css",
+    "text/x-shellscript", "text/x-sh",
+    "text/x-python", "text/x-python-script",
+    "text/x-c", "text/x-csrc", "text/x-chdr", "text/x-c++", "text/x-c++src", "text/x-c++hdr",
+    "text/x-java-source",
+    "text/x-javascript", "application/javascript",
+    "text/x-ruby",
+    "text/x-sql",
+    "text/x-csharp",
+    "text/x-go-source",
+    "text/x-rust",
+    "text/x-php"
+)
+
+private val plaintextExtensions = setOf(
+    "txt", "md", "markdown", "json", "yaml", "yml", "xml", "html", "htm", "css",
+    "js", "py", "c", "h", "hpp", "cpp", "java", "kt", "rb", "sql", "cs", "go",
+    "rs", "php", "sh", "bash", "zsh", "log", "conf", "ini", "cfg", "toml", "env",
+    "properties", "csv", "tsv", "ts", "tsx", "jsx", "dockerfile", "makefile", "gitignore"
+)
+
+private fun AssistantService.isPlainTextAttachment(uri: Uri): Boolean {
+    val mime = contentResolver.getType(uri)
+    if (mime != null && mime in plaintextMimeTypes) return true
+    val ext = uri.path?.substringAfterLast(".", "")?.lowercase() ?: ""
+    return ext in plaintextExtensions
+}
+
+// Reads an attachment as strict UTF-8 text, capped at MAX_ATTACHMENT_BYTES. Fails
+// cleanly (with a clear message) for unsupported types, oversized files, or non-UTF-8
+// content, rather than sending garbage bytes to the model.
+private fun AssistantService.readAttachmentText(uri: Uri): String {
+    if (!isPlainTextAttachment(uri)) {
+        throw AttachmentException(
+            "'$uri' is not a supported plain-text file. Only text files (.txt, .md, .json, .yaml, code, etc.) can be attached."
+        )
+    }
     contentResolver.openInputStream(uri)?.use { input ->
         val out = java.io.ByteArrayOutputStream()
         val chunk = ByteArray(64 * 1024)
@@ -34,15 +79,56 @@ private fun AssistantService.readAttachmentCapped(uri: Uri): ByteArray {
             if (read < 0) break
             total += read
             if (total > MAX_ATTACHMENT_BYTES) {
-                throw AttachmentTooLargeException(
-                    "Attachment exceeds the ${MAX_ATTACHMENT_BYTES / (1024 * 1024)} MB size limit."
-                )
+                throw AttachmentException("Attachment exceeds the $ATTACHMENT_MB MB size limit.")
             }
             out.write(chunk, 0, read)
         }
-        return out.toByteArray()
+        val bytes = out.toByteArray()
+        if (!isValidUtf8(bytes)) {
+            throw AttachmentException("Attachment '$uri' is not valid UTF-8 text.")
+        }
+        return String(bytes, Charsets.UTF_8)
     }
-    throw Exception("Could not open attachment: $uri")
+    throw AttachmentException("Could not open attachment: $uri")
+}
+
+// Validates that `bytes` is well-formed UTF-8. Kotlin's lossy decoder silently
+// substitutes invalid bytes; a round-trip re-encode detects malformed input, since
+// only valid UTF-8 encodes back to identical bytes.
+private fun isValidUtf8(bytes: ByteArray): Boolean {
+    val decoded = try { String(bytes, Charsets.UTF_8) } catch (e: Exception) { return false }
+    val reEncoded = decoded.toByteArray(Charsets.UTF_8)
+    if (reEncoded.size != bytes.size) return false
+    for (i in 0 until bytes.size) {
+        if (reEncoded[i] != bytes[i]) return false
+    }
+    return true
+}
+
+// Builds the "--- Attached file: X ---" sections for every attachment, throwing
+// AttachmentException on the first unreadable / unsupported / oversized file.
+private suspend fun AssistantService.buildAttachmentSections(attachments: List<Uri>): String {
+    return withContext(Dispatchers.IO) {
+        buildString {
+            attachments.forEachIndexed { index, uri ->
+                val name = uri.lastPathSegment ?: "file_$index"
+                val content = readAttachmentText(uri)
+                append("--- Attached file: $name ---\n")
+                append(content)
+                append("\n--- End of $name ---\n\n")
+            }
+        }
+    }
+}
+
+// Returns the prompt text fed to the model: the user question plus injected attachment
+// content. This is the single mechanism that delivers extracted file text to all
+// backends. Empty attachments just pass the original text through.
+private suspend fun AssistantService.buildModelPrompt(text: String, attachments: List<Uri>): String {
+    android.util.Log.d("AssistantService", "DEBUG buildModelPrompt: attachments.size=${attachments.size}")
+    android.util.Log.d("AssistantService", "DEBUG buildModelPrompt: attachments.size=${attachments.size}")
+    if (attachments.isEmpty()) return text
+    return "$text\n\n${buildAttachmentSections(attachments)}"
 }
 
 // A5: a user-initiated stop (Stop button -> currentCall.cancel()) surfaces as an
@@ -337,7 +423,14 @@ internal fun AssistantService.sendTextMessageToServer(inputText: String, current
     if (inputText.isBlank() && attachments.isEmpty()) return
     val startTime = System.currentTimeMillis()
     _voiceDuration.value = 0
-    _messages.value = _messages.value + ChatMessage("user", if (attachments.isNotEmpty()) "$inputText [${attachments.size} files]" else inputText)
+    // A9: the display/history user message shows a concise filename list (not the full
+    // dumped content, which would clutter the transcript and every future turn's
+    // re-sent history). The full extracted text is what reaches the model via
+    // buildModelPrompt, in the current turn only.
+    _messages.value = _messages.value + ChatMessage("user",
+        if (attachments.isNotEmpty())
+            "$inputText\n\n(Attached: ${attachments.mapNotNull { it.lastPathSegment }.joinToString(", ")})"
+        else inputText)
     saveSettings()
 
     if (currentPersona.model.isBlank()) {
@@ -378,7 +471,7 @@ internal fun AssistantService.sendTextMessageToServer(inputText: String, current
                 if (displayServer != null) {
                      val ollamaBase = _ollamaBaseUrls.value.find { it.name == displayServer }?.url
                      if (ollamaBase != null) {
-                         val directRes = performDirectOllamaChat(ollamaBase, actualModel, inputText, currentPersona, currentTurnInHistory = true)
+                         val directRes = performDirectOllamaChat(ollamaBase, actualModel, inputText, currentPersona, attachments = attachments, currentTurnInHistory = true)
 
                          // If it's a gateway voice mode, we need to fetch audio separately
                          if (currentPersona.voiceMode == VoiceMode.GATEWAY) {
@@ -391,8 +484,9 @@ internal fun AssistantService.sendTextMessageToServer(inputText: String, current
                 }
 
                 val currentDateTime = getCurrentDateTimeString()
+                val modelText = buildModelPrompt(inputText, attachments)
                 val requestBuilder = MultipartBody.Builder().setType(MultipartBody.FORM).apply {
-                    addFormDataPart("text", "Current date and time: $currentDateTime\n\nQuestion: $inputText")
+                    addFormDataPart("text", "Current date and time: $currentDateTime\n\nQuestion: $modelText")
                     addFormDataPart("model", actualModel)
                     addFormDataPart("backend_url", bUrl)
                     addFormDataPart("temperature", currentPersona.temperature.toString())
@@ -402,20 +496,6 @@ internal fun AssistantService.sendTextMessageToServer(inputText: String, current
                     addFormDataPart("num_ctx", "8192")
                     if (currentPersona.isTranslator) {
                         addFormDataPart("target_language", currentPersona.targetLanguage)
-                    }
-                }
-
-                attachments.forEachIndexed { index, uri ->
-                    try {
-                        val bytes = readAttachmentCapped(uri)
-                        val mimeType = contentResolver.getType(uri) ?: "application/octet-stream"
-                        val fileName = "file_$index"
-                        requestBuilder.addFormDataPart("files", fileName, bytes.toRequestBody(mimeType.toMediaType()))
-                    } catch (e: AttachmentTooLargeException) {
-                        // S2: fail the whole request cleanly — oversized files are never skipped silently.
-                        throw e
-                    } catch (e: Exception) {
-                        android.util.Log.e("VoiceAssistant", "Failed to read attachment: $uri", e)
                     }
                 }
 
@@ -471,7 +551,7 @@ internal fun AssistantService.sendTextMessageToServer(inputText: String, current
 
                         // Rebuild request body with search context PREPENDED to input text
                         MultipartBody.Builder().setType(MultipartBody.FORM).apply {
-                            addFormDataPart("text", "${promptContext}Current date and time: $currentDateTime\n\nQuestion: $inputText")
+                            addFormDataPart("text", "${promptContext}Current date and time: $currentDateTime\n\nQuestion: $modelText")
                             addFormDataPart("model", actualModel)
                             addFormDataPart("backend_url", bUrl)
                             addFormDataPart("temperature", currentPersona.temperature.toString())
@@ -484,21 +564,7 @@ internal fun AssistantService.sendTextMessageToServer(inputText: String, current
                                 addFormDataPart("target_language", currentPersona.targetLanguage)
                             }
 
-                            // Re-add attachments
-                            attachments.forEachIndexed { index, uri ->
-                                try {
-                                    val bytes = readAttachmentCapped(uri)
-                                    val mimeType = contentResolver.getType(uri) ?: "application/octet-stream"
-                                    val fileName = "file_$index"
-                                    addFormDataPart("files", fileName, bytes.toRequestBody(mimeType.toMediaType()))
-                                } catch (e: AttachmentTooLargeException) {
-                                    // S2: fail the whole request cleanly — oversized files are never skipped silently.
-                                    throw e
-                                } catch (e: Exception) {
-                                    android.util.Log.e("VoiceAssistant", "Failed to read attachment: $uri", e)
-                                }
-                            }
-                        }.build()
+                            }.build()
                     } else requestBody
 
                     val requestBuilder = Request.Builder()
@@ -717,7 +783,7 @@ private fun AssistantService.isCloudModel(model: String): Boolean {
            _customCloudApis.value.any { it.name == providerName }
 }
 
-private fun AssistantService.performCloudChat(text: String, persona: Persona, useDeviceVoice: Boolean = false, startTime: Long, currentTurnInHistory: Boolean, generation: Long) {
+private fun AssistantService.performCloudChat(text: String, persona: Persona, useDeviceVoice: Boolean = false, startTime: Long, currentTurnInHistory: Boolean, generation: Long, attachments: List<Uri> = emptyList()) {
     serviceScope.launch {
         _state.value = AssistantState.THINKING
         updateNotification("Thinking (Cloud)...")
@@ -731,7 +797,7 @@ private fun AssistantService.performCloudChat(text: String, persona: Persona, us
                     ?: throw Exception("No config for provider '$providerName'")
 
                 if (apiSetting.apiKey.isBlank() && apiSetting.icon != "C") throw Exception("API Key for ${apiSetting.name} is missing")
-                val request = buildCloudRequest(apiSetting, persona, text, currentTurnInHistory)
+                val request = buildCloudRequest(apiSetting, persona, text, currentTurnInHistory, attachments)
                 // A6: track the call so the Stop button can cancel cloud requests too
                 // (previously execute() was called on an untracked Call).
                 val call = getDynamicClient(persona).newCall(request)
@@ -812,7 +878,7 @@ private fun AssistantService.performCloudChat(text: String, persona: Persona, us
     }
 }
 
-private suspend fun AssistantService.performDirectOllamaChat(baseUrl: String, model: String, text: String, persona: Persona, currentTurnInHistory: Boolean): Triple<String, String?, ByteArray?> {
+private suspend fun AssistantService.performDirectOllamaChat(baseUrl: String, model: String, text: String, persona: Persona, currentTurnInHistory: Boolean, attachments: List<Uri> = emptyList()): Triple<String, String?, ByteArray?> {
     // Resolve backend URL: fallback if empty or mistakenly pointing to a gateway (8880)
     val stripped = baseUrl.trim()
     val resolvedBackend = if (stripped.isBlank() || stripped.contains(":8880")) {
@@ -828,10 +894,14 @@ private suspend fun AssistantService.performDirectOllamaChat(baseUrl: String, mo
     json.put("model", model)
     json.put("stream", false)
 
+    // A-attachments: the model-facing prompt includes extracted file content. The
+    // original `text` is still used for search/news below.
+    val modelText = buildModelPrompt(text, attachments)
+
     val msgsArray = org.json.JSONArray()
     if (persona.isTranslator) {
         msgsArray.put(JSONObject().put("role", "system").put("content", "You are a translation engine. Translate the user's text into the requested target language. Return ONLY the translation, no explanations, no extra commentary."))
-        msgsArray.put(JSONObject().put("role", "user").put("content", "Translate the following text to ${persona.targetLanguage}: $text"))
+        msgsArray.put(JSONObject().put("role", "user").put("content", "Translate the following text to ${persona.targetLanguage}: $modelText"))
     } else {
         // Context injection
         val currentDateTime = getCurrentDateTimeString()
@@ -855,7 +925,7 @@ private suspend fun AssistantService.performDirectOllamaChat(baseUrl: String, mo
         // Budget-aware history selection
         val contextWindow = 8192
         val reservedOutput = persona.maxTokens.coerceAtLeast(1024)
-        val budget = maxOf(512, contextWindow - reservedOutput - estimateTokens(finalSystemPrompt) - estimateTokens(text))
+        val budget = maxOf(512, contextWindow - reservedOutput - estimateTokens(finalSystemPrompt) - estimateTokens(modelText))
 
         // A1: positional slice — the caller says whether the current user turn is
         // already the last entry in _messages (text flow appends it before the
@@ -881,7 +951,7 @@ private suspend fun AssistantService.performDirectOllamaChat(baseUrl: String, mo
 
         // A1: the current user turn is ALWAYS appended — repeated inputs must reach
         // the model as new turns even when identical text exists earlier in history.
-        msgsArray.put(JSONObject().put("role", "user").put("content", text))
+        msgsArray.put(JSONObject().put("role", "user").put("content", modelText))
     }
 
     json.put("messages", msgsArray)
@@ -929,7 +999,7 @@ private suspend fun AssistantService.performDirectOllamaChat(baseUrl: String, mo
     }
 }
 
-private suspend fun AssistantService.buildCloudRequest(api: CloudApiSetting, persona: Persona, text: String, currentTurnInHistory: Boolean): Request {
+private suspend fun AssistantService.buildCloudRequest(api: CloudApiSetting, persona: Persona, text: String, currentTurnInHistory: Boolean, attachments: List<Uri> = emptyList()): Request {
     val mediaType = "application/json; charset=utf-8".toMediaType()
     val json = JSONObject()
     
@@ -946,10 +1016,14 @@ private suspend fun AssistantService.buildCloudRequest(api: CloudApiSetting, per
         finalSystemPrompt = "$searchContext\n\n$finalSystemPrompt"
     }
 
+    // A-attachments: the model-facing prompt includes extracted file content. The
+    // original `text` is still used for search/news above.
+    val modelText = buildModelPrompt(text, attachments)
+
     // Budget-aware history selection
     val contextWindow = 128000 
     val reservedOutput = persona.maxTokens.coerceAtLeast(1024)
-    val budget = maxOf(512, contextWindow - reservedOutput - estimateTokens(finalSystemPrompt) - estimateTokens(text))
+    val budget = maxOf(512, contextWindow - reservedOutput - estimateTokens(finalSystemPrompt) - estimateTokens(modelText))
     
     // A1: positional slice — the caller says whether the current user turn is already
     // the last entry in _messages (text flow appends it; voice flow does not). No
@@ -992,7 +1066,7 @@ private suspend fun AssistantService.buildCloudRequest(api: CloudApiSetting, per
             }
             history.dropWhile { it.role != "user" }.forEach { msg -> appendAnthropicTurn(msg.role, msg.text) }
             // A1: the current user turn always reaches the model.
-            appendAnthropicTurn("user", text)
+            appendAnthropicTurn("user", modelText)
             json.put("messages", msgArray)
             Request.Builder().url("$baseUrl/v1/messages").header("x-api-key", api.apiKey).header("anthropic-version", "2023-06-01").header("content-type", "application/json").post(json.toString().toRequestBody(mediaType)).build()
         }
@@ -1015,7 +1089,7 @@ private suspend fun AssistantService.buildCloudRequest(api: CloudApiSetting, per
             }
             history.forEach { appendGeminiTurn(it.role, it.text) }
             // A1: the current user turn always reaches the model.
-            appendGeminiTurn("user", text)
+            appendGeminiTurn("user", modelText)
             json.put("contents", contents)
 
             val genConfig = JSONObject()
@@ -1040,7 +1114,7 @@ private suspend fun AssistantService.buildCloudRequest(api: CloudApiSetting, per
             val msgs = org.json.JSONArray().put(JSONObject().put("role", "system").put("content", finalSystemPrompt))
             history.forEach { msgs.put(JSONObject().put("role", it.role).put("content", it.text)) }
             // A1: the current user turn is ALWAYS appended — no text-matching dedup.
-            msgs.put(JSONObject().put("role", "user").put("content", text))
+            msgs.put(JSONObject().put("role", "user").put("content", modelText))
             json.put("messages", msgs)
             val url = if (baseUrl.endsWith("/chat/completions")) baseUrl else "$baseUrl/chat/completions"
             Request.Builder().url(url).header("Authorization", "Bearer ${api.apiKey}").post(json.toString().toRequestBody(mediaType)).build()
