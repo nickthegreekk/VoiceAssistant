@@ -163,6 +163,15 @@ fun AssistantService.speakTextOnDevice(text: String) {
 
 internal fun AssistantService.speakWithEspeak(text: String, persona: Persona) {
     stopAudio()
+    // C4: check silence BEFORE any synthesis work — when silent mode is on, skip the
+    // entire pipeline (engine initialization, voice selection, setVoice, synthesize)
+    // since the result would be discarded anyway. Same synchronous early-bail pattern
+    // as speakTextOnDevice's silenced check.
+    if (silenced.value) {
+        _state.value = AssistantState.IDLE
+        updateNotification("Ready to help")
+        return
+    }
     val engine = espeakEngine ?: run {
         _state.value = AssistantState.IDLE
         updateNotification("Ready to help")
@@ -198,12 +207,6 @@ internal fun AssistantService.speakWithEspeak(text: String, persona: Persona) {
         val samples = engine.synthesize(text)
         
         withContext(Dispatchers.Main) {
-            if (silenced.value) {
-                _state.value = AssistantState.IDLE
-                updateNotification("Ready to help")
-                return@withContext
-            }
-
             if (!requestAssistantFocus()) {
                 _state.value = AssistantState.IDLE
                 updateNotification("Ready to help")

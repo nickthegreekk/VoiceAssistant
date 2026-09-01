@@ -250,8 +250,10 @@ internal fun AssistantService.sendAudioToServer(file: File, currentPersona: Pers
                     addFormDataPart("top_p", currentPersona.topP.toString())
                     addFormDataPart("top_k", currentPersona.topK.toString())
                     addFormDataPart("repeat_penalty", currentPersona.repeatPenalty.toString())
-                    addFormDataPart("num_ctx", "8192")
+                    addFormDataPart("num_ctx", currentPersona.numCtx.toString())
                     addFormDataPart("context_time", currentDateTime)
+                    // TODO(temporary debug logging — remove after confirming numCtx)
+                    android.util.Log.d("AssistantService", "DEBUG [voice gateway multipart]: currentPersona.numCtx=${currentPersona.numCtx}")
                     if (currentPersona.isTranslator) {
                         addFormDataPart("target_language", currentPersona.targetLanguage)
                     }
@@ -493,11 +495,13 @@ internal fun AssistantService.sendTextMessageToServer(inputText: String, current
                     addFormDataPart("top_p", currentPersona.topP.toString())
                     addFormDataPart("top_k", currentPersona.topK.toString())
                     addFormDataPart("repeat_penalty", currentPersona.repeatPenalty.toString())
-                    addFormDataPart("num_ctx", "8192")
+                    addFormDataPart("num_ctx", currentPersona.numCtx.toString())
                     if (currentPersona.isTranslator) {
                         addFormDataPart("target_language", currentPersona.targetLanguage)
                     }
                 }
+                // TODO(temporary debug logging — remove after confirming numCtx)
+                android.util.Log.d("AssistantService", "DEBUG [text direct-ollama multipart]: currentPersona.numCtx=${currentPersona.numCtx}")
 
                 val requestBody = requestBuilder.build()
 
@@ -563,7 +567,9 @@ internal fun AssistantService.sendTextMessageToServer(inputText: String, current
                             addFormDataPart("top_p", currentPersona.topP.toString())
                             addFormDataPart("top_k", currentPersona.topK.toString())
                             addFormDataPart("repeat_penalty", currentPersona.repeatPenalty.toString())
-                            addFormDataPart("num_ctx", "8192")
+                            addFormDataPart("num_ctx", currentPersona.numCtx.toString())
+                            // TODO(temporary debug logging — remove after confirming numCtx)
+                            android.util.Log.d("AssistantService", "DEBUG [text gateway multipart]: currentPersona.numCtx=${currentPersona.numCtx}")
 
                             if (currentPersona.isTranslator) {
                                 addFormDataPart("target_language", currentPersona.targetLanguage)
@@ -971,7 +977,9 @@ private suspend fun AssistantService.performDirectOllamaChat(baseUrl: String, mo
     options.put("top_p", persona.topP)
     options.put("top_k", persona.topK)
     options.put("repeat_penalty", persona.repeatPenalty)
-    options.put("num_ctx", 8192)
+    options.put("num_ctx", persona.numCtx)
+    // TODO(temporary debug logging — remove after confirming numCtx)
+    android.util.Log.d("AssistantService", "DEBUG [direct-ollama options]: persona.numCtx=${persona.numCtx}")
     android.util.Log.d("AssistantService", "DEBUG: persona.name=${persona.name} enableThinking=${persona.enableThinking} isKnownThinking=${isKnownThinkingModel(model)}")
     options.put("think", persona.enableThinking && isKnownThinkingModel(model))
     options.put("num_predict", persona.maxTokens)
