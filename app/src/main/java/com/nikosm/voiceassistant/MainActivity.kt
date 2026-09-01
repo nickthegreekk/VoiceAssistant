@@ -1969,6 +1969,7 @@ fun PersonaEditor(
     var maxTokens by remember(persona) { mutableIntStateOf(persona.maxTokens) }
     var enableThinking by remember(persona) { mutableStateOf(persona.enableThinking) }
     var webSearchEnabled by remember(persona) { mutableStateOf(persona.webSearchEnabled) }
+    var ragEnabled by remember(persona) { mutableStateOf(persona.ragEnabled) }
     
     var isTranslator by remember(persona) { mutableStateOf(persona.isTranslator) }
     var targetLanguage by remember(persona) { mutableStateOf(persona.targetLanguage) }
@@ -2053,6 +2054,7 @@ fun PersonaEditor(
             maxTokens = maxTokens,
             enableThinking = enableThinking,
             webSearchEnabled = webSearchEnabled,
+            ragEnabled = ragEnabled,
             isTranslator = isTranslator,
             targetLanguage = targetLanguage,
             voiceMode = voiceMode,
@@ -2416,6 +2418,18 @@ fun PersonaEditor(
                                     style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
                             }
                             Switch(checked = webSearchEnabled, onCheckedChange = { webSearchEnabled = it })
+                        }
+                    }
+
+                    Spacer(Modifier.height(8.dp))
+                    Column {
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text("Knowledge Base", style = MaterialTheme.typography.bodyMedium)
+                                Text("Search your uploaded documents before responding.",
+                                    style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
+                            }
+                            Switch(checked = ragEnabled, onCheckedChange = { ragEnabled = it })
                         }
                     }
                 }

@@ -546,8 +546,13 @@ internal fun AssistantService.sendTextMessageToServer(inputText: String, current
                         fetchWebSearchContext(inputText)
                     } else ""
 
-                    val finalRequestBody = if (searchContext.isNotEmpty()) {
-                        val promptContext = "$searchContext\n\n"
+                    // Step 3 — RAG retrieval: prepend uploaded-document matches alongside
+                    // any web search context. Graceful: "" when unconfigured or on failure.
+                    val ragContext = if (currentPersona.ragEnabled) fetchRagContext(inputText) else ""
+                    val contextPrefix = listOf(searchContext, ragContext).filter { it.isNotEmpty() }.joinToString("\n\n")
+
+                    val finalRequestBody = if (contextPrefix.isNotEmpty()) {
+                        val promptContext = "$contextPrefix\n\n"
 
                         // Rebuild request body with search context PREPENDED to input text
                         MultipartBody.Builder().setType(MultipartBody.FORM).apply {
@@ -913,8 +918,13 @@ private suspend fun AssistantService.performDirectOllamaChat(baseUrl: String, mo
             fetchWebSearchContext(text)
         } else ""
 
-        if (searchContext.isNotEmpty()) {
-            finalSystemPrompt = "$searchContext\n\n$finalSystemPrompt"
+        // Step 3 — RAG retrieval: prepend uploaded-document matches alongside
+        // any web search context. Graceful: "" when unconfigured or on failure.
+        val ragContext = if (persona.ragEnabled) fetchRagContext(text) else ""
+
+        val contextPrefix = listOf(searchContext, ragContext).filter { it.isNotEmpty() }.joinToString("\n\n")
+        if (contextPrefix.isNotEmpty()) {
+            finalSystemPrompt = "$contextPrefix\n\n$finalSystemPrompt"
         }
 
         // Add system prompt first
@@ -1012,8 +1022,13 @@ private suspend fun AssistantService.buildCloudRequest(api: CloudApiSetting, per
         fetchWebSearchContext(text)
     } else ""
 
-    if (searchContext.isNotEmpty()) {
-        finalSystemPrompt = "$searchContext\n\n$finalSystemPrompt"
+    // Step 3 — RAG retrieval: prepend uploaded-document matches alongside
+    // any web search context. Graceful: "" when unconfigured or on failure.
+    val ragContext = if (persona.ragEnabled) fetchRagContext(text) else ""
+
+    val contextPrefix = listOf(searchContext, ragContext).filter { it.isNotEmpty() }.joinToString("\n\n")
+    if (contextPrefix.isNotEmpty()) {
+        finalSystemPrompt = "$contextPrefix\n\n$finalSystemPrompt"
     }
 
     // A-attachments: the model-facing prompt includes extracted file content. The
@@ -1163,7 +1178,13 @@ private fun AssistantService.parseCloudResponse(api: CloudApiSetting, persona: P
 
 private fun AssistantService.isKnownThinkingModel(modelName: String): Boolean {
     val name = modelName.lowercase()
-    return name.contains("deepseek-r1") || name.contains("deepseek-reasoner") || name.contains("-r1")
+    // "v4-pro": DeepSeek's R1 line is being delisted (completes 2026-10-10 per
+    // DeepSeek's announcement) and V4-Pro's built-in Thinking mode is the official
+    // R1 replacement. Deliberately NOT matched: the flash/vision variants
+    // (deepseek-v4-flash, deepseek-v4-flash-vision-exp) — they are the fast/
+    // non-reasoning tier and Ollama rejects think:true for them.
+    return name.contains("deepseek-r1") || name.contains("deepseek-reasoner") || name.contains("-r1") ||
+        name.contains("v4-pro")
 }
 
 private fun AssistantService.calculateCost(persona: Persona, promptTokens: Int, completionTokens: Int): Double {

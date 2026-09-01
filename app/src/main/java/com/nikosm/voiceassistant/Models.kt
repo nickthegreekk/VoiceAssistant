@@ -71,7 +71,8 @@ data class Persona(
     val repeatPenalty: Float = 1.1f,
     val maxTokens: Int = 2048,
     val enableThinking: Boolean = true,
-    val webSearchEnabled: Boolean = false
+    val webSearchEnabled: Boolean = false,
+    val ragEnabled: Boolean = false
 )
 
 @Serializable

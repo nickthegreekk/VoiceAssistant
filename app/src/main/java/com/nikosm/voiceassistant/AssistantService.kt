@@ -47,6 +47,69 @@ import javax.net.ssl.X509TrustManager
 private var vadDetector: VADDetector? = null
 private var vadRecorder: VADAudioRecorder? = null
 
+// ---------------------------------------------------------------------------
+// Cloud model list selection — tier diversity, not pure recency.
+// Pure "top N by date" drops specialty tiers whenever several flagships launch
+// close together. Two confirmed cases: Claude Haiku 4.5 (fast/cheap tier)
+// vanished behind the Sonnet/Opus/Fable 5 releases, and DeepSeek R1-0528
+// (reasoning specialist) is excluded by the newer V4 wave — neither competes
+// on "newness", they serve different purposes. The selection below guarantees
+// a slot for the most recent model of each available specialty tier alongside
+// the most recent flagship-tier models.
+// ---------------------------------------------------------------------------
+private const val MAX_CLOUD_MODELS_SHOWN = 4
+
+// Cross-provider "fast/small" tier signals in model names: Anthropic Haiku,
+// OpenAI mini/nano, Google flash (incl. flash-lite), generic "lite".
+private val SMALL_TIER_MODEL_PATTERNS = listOf("haiku", "mini", "nano", "flash", "lite")
+
+// Cross-provider "reasoning specialist" signals: DeepSeek R1, "*-reasoner"
+// style names, and explicit "thinking" variants.
+private val REASONING_TIER_MODEL_PATTERNS = listOf("r1", "reasoner", "thinking")
+
+private fun isSmallTierModel(name: String): Boolean {
+    val n = name.lowercase()
+    return SMALL_TIER_MODEL_PATTERNS.any { n.contains(it) }
+}
+
+private fun isReasoningTierModel(name: String): Boolean {
+    val n = name.lowercase()
+    return REASONING_TIER_MODEL_PATTERNS.any { n.contains(it) }
+}
+
+/**
+ * Picks the subset shown per provider from a most-recent-first list: the most
+ * recent model of each available specialty tier (fast/cheap, reasoning) is
+ * always included when one exists, then the list is filled with the most
+ * recent remaining models up to [maxCount]. Returned in the input (recency)
+ * order.
+ */
+private fun <T> selectDiverseModelSubset(models: List<T>, maxCount: Int, nameOf: (T) -> String): List<T> {
+    if (models.size <= maxCount) return models
+    // Classify into three broad tiers. Reasoning takes precedence over the
+    // small/fast check, since a name like "r1-lite" is first a reasoning model.
+    val reasoningTier = mutableListOf<T>()
+    val smallTier = mutableListOf<T>()
+    val flagshipTier = mutableListOf<T>()
+    for (m in models) {
+        val n = nameOf(m).lowercase()
+        when {
+            isReasoningTierModel(n) -> reasoningTier.add(m)
+            isSmallTierModel(n) -> smallTier.add(m)
+            else -> flagshipTier.add(m)
+        }
+    }
+    val chosen = LinkedHashSet<T>()
+    flagshipTier.firstOrNull()?.let { chosen.add(it) }   // newest flagship
+    smallTier.firstOrNull()?.let { chosen.add(it) }      // newest fast/cheap
+    reasoningTier.firstOrNull()?.let { chosen.add(it) }  // newest reasoning specialist
+    for (m in models) {
+        if (chosen.size >= maxCount) break
+        chosen.add(m)
+    }
+    return models.filter { chosen.contains(it) }
+}
+
 class AssistantService : Service() {
 
     private val binder = AssistantBinder()
@@ -735,6 +798,8 @@ class AssistantService : Service() {
         if (api.apiKey.isBlank() && api.icon != "C") return
         _isLoadingModels.value = true
         val baseUrl = api.baseUrl.trim().removeSuffix("/")
+        // TODO(temporary debug logging — remove once the DeepSeek model list is verified)
+        android.util.Log.d("AssistantService", "DEBUG fetchCloudModels: name='${api.name}' icon='${api.icon}' baseUrl=$baseUrl")
         serviceScope.launch(Dispatchers.IO) {
             val statusMap = _serverStatus.value.toMutableMap()
             statusMap.remove(api.name)
@@ -765,7 +830,7 @@ class AssistantService : Service() {
                                 val versionMatch = Regex("""\d+\.\d+""").find(name)
                                 versionMatch?.value?.toDoubleOrNull() ?: 0.0
                             }
-                            .take(3)
+                            .let { selectDiverseModelSubset(it, MAX_CLOUD_MODELS_SHOWN) { j -> j.getString("name").substringAfter("models/") } }
                             .map { "[${api.name}] ${it.getString("name").substringAfter("models/")}" }
                         }
                     }
@@ -789,7 +854,7 @@ class AssistantService : Service() {
                             }
 
                             rawModels.sortedByDescending { it.optString("created_at", "") }
-                                .take(3)
+                                .let { selectDiverseModelSubset(it, MAX_CLOUD_MODELS_SHOWN) { m -> m.optString("id") } }
                                 .map { "[${api.name}] ${it.getString("id")}" }
                         }
                     }
@@ -811,6 +876,9 @@ class AssistantService : Service() {
                                 rawModels.add(array.getJSONObject(i))
                             }
 
+                            // TODO(temporary debug logging — remove once the DeepSeek model list is verified)
+                            android.util.Log.d("AssistantService", "DEBUG raw models from API for '${api.name}' (icon='${api.icon}'): ${rawModels.size} models -> ${rawModels.joinToString(", ") { it.optString("id") }}")
+
                             val filtered = if (api.icon == "C" || api.icon == "D") {
                                 rawModels.map { "[${api.name}] ${it.getString("id")}" }
                             } else {
@@ -822,13 +890,15 @@ class AssistantService : Service() {
                                     isChat && !isNonChat
                                 }
                                 .sortedByDescending { it.optLong("created", 0) }
-                                .take(3)
+                                .let { selectDiverseModelSubset(it, MAX_CLOUD_MODELS_SHOWN) { m -> m.optString("id") } }
                                 .map { "[${api.name}] ${it.getString("id")}" }
                             }
                             filtered
                         }
                     }
                 }
+                // TODO(temporary debug logging — remove once the DeepSeek model list is verified)
+                android.util.Log.d("AssistantService", "DEBUG final stored model list for '${api.name}': $models")
                 withContext(Dispatchers.Main) {
                     val current = _fetchedCloudModels.value.toMutableMap()
                     current[api.name] = models
