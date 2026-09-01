@@ -316,6 +316,41 @@ internal suspend fun AssistantService.getKnowledgeCount(
     }
 }
 
+// Step 3 — RAG retrieval: fetch the top matches for the user's query from the
+// knowledge base. Same graceful-failure contract as fetchWebSearchContext:
+// returns "" when unconfigured, on HTTP failure, or on any exception, so the
+// chat proceeds normally without the injected context.
+internal suspend fun AssistantService.fetchRagContext(query: String): String {
+    val ragUrl = settingsManager.getRagServerUrl()
+    if (ragUrl.isNullOrBlank()) return ""
+    return try {
+        withContext(Dispatchers.IO) {
+            val requestBuilder = buildRagRequestBuilder(ragUrl, "/retrieve")
+            val body = MultipartBody.Builder().setType(MultipartBody.FORM)
+                .addFormDataPart("query", query)
+                .addFormDataPart("top_k", "3")
+                .build()
+            requestBuilder.post(body)
+            client.newCall(requestBuilder.build()).execute().use { response ->
+                if (!response.isSuccessful) return@withContext ""
+                val json = JSONObject(response.body.string())
+                val results = json.optJSONArray("results") ?: return@withContext ""
+                if (results.length() == 0) return@withContext ""
+                val sb = StringBuilder("RELEVANT INFORMATION FROM YOUR KNOWLEDGE BASE:\n")
+                for (i in 0 until results.length()) {
+                    val r = results.getJSONObject(i)
+                    sb.append("- ${r.optString("text")} (source: ${r.optString("source")})\n")
+                }
+                sb.append("\nUse this information if relevant to answer the user's question.")
+                sb.toString()
+            }
+        }
+    } catch (e: Exception) {
+        android.util.Log.e("AssistantService", "RAG retrieval failed", e)
+        ""
+    }
+}
+
 fun AssistantService.approveCertificate(request: CertApprovalRequest) {
     val certs = settingsManager.getTrustedCertificates().toMutableMap()
     certs[request.host] = request.fingerprint
