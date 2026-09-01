@@ -952,7 +952,12 @@ class AssistantService : Service() {
         
         return OkHttpClient.Builder()
             .sslSocketFactory(sslContext.socketFactory, pinnedTrustManager)
-            .hostnameVerifier { _, _ -> true }
+            // S1: validate the presented cert's SANs against the actual host (RFC 2818/6125,
+            // incl. IP-address hosts) instead of accepting any hostname. The prior blanket
+            // acceptance let an attacker present a cert not even claiming the target host on
+            // the crucial first-connection trust decision; the pinning below still protects
+            // against post-approval impersonation.
+            .hostnameVerifier(javax.net.ssl.HttpsURLConnection.getDefaultHostnameVerifier())
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(120, TimeUnit.SECONDS)
             .writeTimeout(120, TimeUnit.SECONDS)
