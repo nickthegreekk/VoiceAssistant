@@ -139,6 +139,6 @@ The developers of this app are not responsible for any data shared with third-pa
 
 
   ### App screenshot
-<img width="600" height="800" alt="Screenshot_20260902-102433_Celeste" src="https://github.com/user-attachments/assets/9ea57b8f-f966-499a-af5e-77e59ef3c41a" />
+<img width="600" height="1333" alt="Screenshot_20260902-102433_Celeste" src="https://github.com/user-attachments/assets/9ea57b8f-f966-499a-af5e-77e59ef3c41a" />
 
 
