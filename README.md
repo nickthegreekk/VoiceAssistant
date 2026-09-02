@@ -138,7 +138,8 @@ This app connects to third-party AI services. You are responsible for:
 The developers of this app are not responsible for any data shared with third-party services.
 
 
-  ### App screenshot
+  ### App screenshots
 <img width="300" height="667" alt="Screenshot_20260902-102433_Celeste" src="https://github.com/user-attachments/assets/9ea57b8f-f966-499a-af5e-77e59ef3c41a" />
+<img width="300" height="667" alt="Screenshot_20260902-103927_Celeste" src="https://github.com/user-attachments/assets/90466b2c-3fb7-4f70-8908-a378331fb407" />
 
 
