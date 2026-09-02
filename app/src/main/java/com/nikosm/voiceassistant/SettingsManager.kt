@@ -1,26 +1,82 @@
 package com.nikosm.voiceassistant
 
 import android.content.Context
+import android.content.SharedPreferences
+import android.security.keystore.KeyPermanentlyInvalidatedException
+import android.util.Log
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import org.json.JSONArray
 import org.json.JSONObject
+import java.security.KeyStore
 
 class SettingsManager(context: Context) {
 
-    private val masterKey = MasterKey.Builder(context)
-        .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
-        .build()
+    private val prefs: SharedPreferences = createEncryptedPrefsWithRecovery(context)
 
-    private val prefs = EncryptedSharedPreferences.create(
-        context,
-        "voice_assistant_secure_prefs",
-        masterKey,
-        EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-        EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
-    )
+    private fun createEncryptedPrefsWithRecovery(context: Context): SharedPreferences {
+        return try {
+            buildEncryptedPrefs(context)
+        } catch (e: Throwable) {
+            Log.e(
+                "SettingsManager",
+                "Encrypted prefs initialization failed — attempting recovery by clearing "
+                    + "corrupted Keystore entry and preferences. Previous settings will be lost.",
+                e
+            )
+            // Delete the corrupted AndroidKeyStore entry so a fresh key can be generated.
+            // The alias is defined in androidx.security.crypto.MasterKey as
+            // DEFAULT_MASTER_KEY_ALIAS = "_androidx_security_master_key_"
+            try {
+                val keyStore = KeyStore.getInstance("AndroidKeyStore")
+                keyStore.load(null)
+                val targetAlias = "_androidx_security_master_key_"
+                if (keyStore.containsAlias(targetAlias)) {
+                    keyStore.deleteEntry(targetAlias)
+                    Log.w("SettingsManager", "Deleted corrupted Keystore entry: $targetAlias")
+                }
+            } catch (keystoreEx: Throwable) {
+                Log.e("SettingsManager", "Keystore cleanup failed", keystoreEx)
+            }
+            // Also delete the (now-undecryptable) preferences file
+            context.deleteSharedPreferences("voice_assistant_secure_prefs")
+            // Retry — should now succeed with a genuinely fresh key.
+            // If it STILL fails (known Android Keystore2 bug on Pixel/Android 13 — see
+            // e.g. expo-secure-store issue #22804), fall back to unencrypted storage
+            // rather than crashing. The app stays functional; credentials/settings
+            // will not be encrypted at rest on this device.
+            try {
+                buildEncryptedPrefs(context)
+            } catch (retryException: Throwable) {
+                Log.w(
+                    "SettingsManager",
+                    "Encrypted storage unavailable on this device after retry "
+                        + "(known Android Keystore bug), falling back to unencrypted storage. "
+                        + "Credentials/settings will not be encrypted at rest.",
+                    retryException
+                )
+                context.getSharedPreferences(
+                    "voice_assistant_secure_prefs_fallback",
+                    Context.MODE_PRIVATE
+                )
+            }
+        }
+    }
+
+    private fun buildEncryptedPrefs(context: Context): SharedPreferences {
+        val masterKey = MasterKey.Builder(context)
+            .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+            .build()
+        return EncryptedSharedPreferences.create(
+            context,
+            "voice_assistant_secure_prefs",
+            masterKey,
+            EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+            EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
+        )
+    }
 
     private val json = Json {
         ignoreUnknownKeys = true

@@ -146,7 +146,12 @@ fun MainScreen(service: AssistantService?) {
         attachedFiles = (attachedFiles + uris).distinct()
     }
 
-    val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { _ -> }
+    val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        // Promote the service to foreground once RECORD_AUDIO is granted
+        if (granted) {
+            service?.promoteToForeground()
+        }
+    }
 
     LaunchedEffect(service) {
         if (service != null) {

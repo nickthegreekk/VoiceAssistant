@@ -7,6 +7,8 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
+import android.content.pm.PackageManager
+import androidx.core.content.ContextCompat
 import android.media.AudioAttributes
 import android.media.AudioDeviceInfo
 import android.media.AudioFormat
@@ -665,8 +667,23 @@ class AssistantService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        startForeground(NOTIFICATION_ID, createNotification("Ready to help"))
+        // Fix for Android 15/16 (targetSDK 37): RECORD_AUDIO must be granted before
+        // starting a foreground service with the microphone type. If not granted yet,
+        // start as a regular service first and promote to foreground once permission is granted.
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+            startForeground(NOTIFICATION_ID, createNotification("Ready to help"))
+        }
         return START_STICKY
+    }
+
+    /**
+     * Promotes this service to a foreground service with the microphone type.
+     * Call this after RECORD_AUDIO permission is granted.
+     */
+    fun promoteToForeground() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+            startForeground(NOTIFICATION_ID, createNotification("Ready to help"))
+        }
     }
 
     override fun onDestroy() {
