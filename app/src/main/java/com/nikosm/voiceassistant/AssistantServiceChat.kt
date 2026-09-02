@@ -143,7 +143,7 @@ private fun isUserCancellation(e: Throwable): Boolean =
 // of being excluded until a manual refresh. Server name -> epoch ms of when the next
 // attempt is allowed. Held in a plain (non-reactive) field because the retry pool only
 // needs the most recent mark; UI display/logic are unaffected.
-private val serverFailCooldownUntilMillis = mutableMapOf<String, Long>()
+internal val serverFailCooldownUntilMillis = mutableMapOf<String, Long>()
 
 // A3: returns true if the server is currently OK to try. A server is allowed back once
 // FAILED_COOLDOWN_MS has elapsed since it was marked failed, and a status that isn't a
@@ -153,7 +153,7 @@ internal fun AssistantService.isServerHealthyForRetry(name: String): Boolean {
     return (serverFailCooldownUntilMillis[name] ?: 0L) < System.currentTimeMillis()
 }
 
-private const val FAILED_COOLDOWN_MS = 60_000L // 60 seconds
+internal const val FAILED_COOLDOWN_MS = 60_000L // 60 seconds
 
 internal fun AssistantService.sendAudioToServer(file: File, currentPersona: Persona) {
     if (currentPersona.model.isBlank()) {

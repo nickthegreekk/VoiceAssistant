@@ -189,37 +189,91 @@ internal suspend fun AssistantService.synthesizeWithGateway(text: String, person
 }
 
 internal suspend fun AssistantService.transcribeWithGateway(file: File, persona: Persona): String? {
-    val url = persona.backendUrl
-    if (url.isBlank()) return null
-    
-    val gw = _serverBases.value.find { it.url == url } ?: ServerConfig("Gateway", url)
-    
-    return try {
-        withContext(Dispatchers.IO) {
-            val mediaType = if (file.extension == "wav") "audio/wav".toMediaType() else "audio/mp4".toMediaType()
-            val requestBody = MultipartBody.Builder()
-                .setType(MultipartBody.FORM)
-                .addFormDataPart("audio", file.name, file.asRequestBody(mediaType))
-                .build()
-            
-            val requestBuilder = Request.Builder()
-                .url(url.trimEnd('/') + "/transcribe")
-                .post(requestBody)
-            
-            if (!gw.username.isNullOrBlank()) {
-                requestBuilder.header("Authorization", Credentials.basic(gw.username, gw.password ?: ""))
-            }
-            
-            client.newCall(requestBuilder.build()).execute().use { response ->
-                if (!response.isSuccessful) throw Exception("Server error: ${response.code}")
-                val body = response.body.string()
-                JSONObject(body).optString("text", "")
-            }
+    val allGateways = _serverBases.value
+
+    // S2: resolve preferred gateway from persona's configured backendUrl
+    val preferredGateway = if (persona.backendUrl.isNotBlank()) {
+        allGateways.find { it.url == persona.backendUrl }
+    } else null
+
+    // Build gwsToTry using the same failover logic as sendTextMessageToServer/sendAudioToServer
+    val gwsToTry: List<ServerConfig> = if (persona.allowGatewayFailover) {
+        val workingGateways = allGateways.filter { isServerHealthyForRetry(it.name) }
+        buildList {
+            preferredGateway?.let { add(it) }
+            addAll(workingGateways.filter { it != preferredGateway })
         }
-    } catch (e: Exception) {
-        android.util.Log.e("AssistantService", "Gateway transcription failed", e)
-        null
+    } else {
+        when {
+            preferredGateway != null -> listOf(preferredGateway)
+            persona.backendUrl.isBlank() -> throw Exception(
+                "No gateway is configured for persona '${persona.name}'. Set a Backend URL in its persona settings, or enable 'Allow Gateway Failover'."
+            )
+            else -> throw Exception(
+                "Gateway '${persona.backendUrl}' for persona '${persona.name}' is not in the configured gateway list. Check Settings, or enable 'Allow Gateway Failover'."
+            )
+        }
     }
+
+    if (gwsToTry.isEmpty()) {
+        throw Exception("No working gateways available for transcription.")
+    }
+
+    var lastEx: Exception? = null
+    for (gw in gwsToTry.distinct()) {
+        val url = gw.url
+        try {
+            val result = withContext(Dispatchers.IO) {
+                val mediaType = if (file.extension == "wav") "audio/wav".toMediaType() else "audio/mp4".toMediaType()
+                val requestBody = MultipartBody.Builder()
+                    .setType(MultipartBody.FORM)
+                    .addFormDataPart("audio", file.name, file.asRequestBody(mediaType))
+                    .build()
+
+                val requestBuilder = Request.Builder()
+                    .url(url.trimEnd('/') + "/transcribe")
+                    .post(requestBody)
+
+                if (!gw.username.isNullOrBlank()) {
+                    requestBuilder.header("Authorization", Credentials.basic(gw.username, gw.password ?: ""))
+                }
+
+                client.newCall(requestBuilder.build()).execute().use { response ->
+                    if (!response.isSuccessful) throw Exception("Server error: ${response.code}")
+                    val body = response.body.string()
+                    JSONObject(body).optString("text", "")
+                }
+            }
+
+            // Update status to working since we just had a successful call
+            withContext(Dispatchers.Main) {
+                val statusMap = _serverStatus.value.toMutableMap()
+                _serverBases.value.find { it.url == url }?.let { statusMap[it.name] = "Online" }
+                _serverStatus.value = statusMap
+            }
+
+            if (result.isNotBlank()) return result
+            throw Exception("Empty transcription result")
+        } catch (e: Exception) {
+            // Mark failed with cooldown
+            withContext(Dispatchers.Main) {
+                val statusMap = _serverStatus.value.toMutableMap()
+                _serverBases.value.find { it.url == url }?.let { cfg ->
+                    val failureLabel = if (e is java.net.SocketTimeoutException || e is java.net.UnknownHostException) {
+                        "connection/timeout"
+                    } else {
+                        e.message?.take(30)
+                    }
+                    statusMap[cfg.name] = "failed: $failureLabel"
+                    serverFailCooldownUntilMillis[cfg.name] = System.currentTimeMillis() + FAILED_COOLDOWN_MS
+                }
+                _serverStatus.value = statusMap
+            }
+            lastEx = e
+        }
+    }
+
+    throw lastEx ?: Exception("All transcription attempts failed")
 }
 
 // ---------------------------------------------------------------------------
