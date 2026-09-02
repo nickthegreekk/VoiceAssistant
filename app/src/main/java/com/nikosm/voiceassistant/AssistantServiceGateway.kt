@@ -99,10 +99,16 @@ internal fun AssistantService.testGatewayVoice(text: String, url: String, langua
                     .url(url.trimEnd('/') + "/synthesize")
                     .post(requestBody)
                 
-                if (!gw.username.isNullOrBlank()) {
-                    requestBuilder.header("Authorization", Credentials.basic(gw.username, gw.password ?: ""))
+                when (gw.effectiveAuthType) {
+                    AuthType.NONE -> { /* no Authorization header */ }
+                    AuthType.BASIC -> if (!gw.username.isNullOrBlank()) {
+                        requestBuilder.header("Authorization", Credentials.basic(gw.username, gw.password ?: ""))
+                    }
+                    AuthType.API_KEY -> if (!gw.apiKey.isNullOrBlank()) {
+                        requestBuilder.header("Authorization", "Bearer ${gw.apiKey}")
+                    }
                 }
-                
+
                 client.newCall(requestBuilder.build()).execute().use { response ->
                     if (!response.isSuccessful) throw Exception("Server error: ${response.code}")
                     val contentType = response.header("Content-Type") ?: ""
@@ -113,7 +119,7 @@ internal fun AssistantService.testGatewayVoice(text: String, url: String, langua
                     }
                 }
             }
-            
+
             if (bytes != null) {
                 val outFile = File(cacheDir, "test_synthesis.wav")
                 outFile.writeBytes(bytes)
@@ -165,10 +171,16 @@ internal suspend fun AssistantService.synthesizeWithGateway(text: String, person
                 .url(url.trimEnd('/') + "/synthesize")
                 .post(requestBody)
             
-            if (!gw.username.isNullOrBlank()) {
-                requestBuilder.header("Authorization", Credentials.basic(gw.username, gw.password ?: ""))
+            when (gw.effectiveAuthType) {
+                AuthType.NONE -> { /* no Authorization header */ }
+                AuthType.BASIC -> if (!gw.username.isNullOrBlank()) {
+                    requestBuilder.header("Authorization", Credentials.basic(gw.username, gw.password ?: ""))
+                }
+                AuthType.API_KEY -> if (!gw.apiKey.isNullOrBlank()) {
+                    requestBuilder.header("Authorization", "Bearer ${gw.apiKey}")
+                }
             }
-            
+
             client.newCall(requestBuilder.build()).execute().use { response ->
                 if (!response.isSuccessful) throw Exception("Server error: ${response.code}")
                 val contentType = response.header("Content-Type") ?: ""
@@ -234,8 +246,14 @@ internal suspend fun AssistantService.transcribeWithGateway(file: File, persona:
                     .url(url.trimEnd('/') + "/transcribe")
                     .post(requestBody)
 
-                if (!gw.username.isNullOrBlank()) {
-                    requestBuilder.header("Authorization", Credentials.basic(gw.username, gw.password ?: ""))
+                when (gw.effectiveAuthType) {
+                    AuthType.NONE -> { /* no Authorization header */ }
+                    AuthType.BASIC -> if (!gw.username.isNullOrBlank()) {
+                        requestBuilder.header("Authorization", Credentials.basic(gw.username, gw.password ?: ""))
+                    }
+                    AuthType.API_KEY -> if (!gw.apiKey.isNullOrBlank()) {
+                        requestBuilder.header("Authorization", "Bearer ${gw.apiKey}")
+                    }
                 }
 
                 client.newCall(requestBuilder.build()).execute().use { response ->

@@ -302,8 +302,14 @@ internal fun AssistantService.sendAudioToServer(file: File, currentPersona: Pers
                         .url(if (currentPersona.isTranslator) "$base/translate" else "$base/voice-chat")
                         .post(requestBody)
 
-                    if (!gw.username.isNullOrBlank()) {
-                        requestBuilder.header("Authorization", Credentials.basic(gw.username, gw.password ?: ""))
+                    when (gw.effectiveAuthType) {
+                        AuthType.NONE -> { /* no Authorization header */ }
+                        AuthType.BASIC -> if (!gw.username.isNullOrBlank()) {
+                            requestBuilder.header("Authorization", Credentials.basic(gw.username, gw.password ?: ""))
+                        }
+                        AuthType.API_KEY -> if (!gw.apiKey.isNullOrBlank()) {
+                            requestBuilder.header("Authorization", "Bearer ${gw.apiKey}")
+                        }
                     }
 
                     val call = currentClient.newCall(requestBuilder.build())
@@ -991,8 +997,14 @@ private suspend fun AssistantService.performDirectOllamaChat(baseUrl: String, mo
         .post(json.toString().toRequestBody("application/json".toMediaType()))
 
     _ollamaBaseUrls.value.find { it.url == resolvedBackend }?.let { config ->
-        if (!config.username.isNullOrBlank()) {
-            requestBuilder.header("Authorization", Credentials.basic(config.username, config.password ?: ""))
+        when (config.effectiveAuthType) {
+            AuthType.NONE -> { /* no Authorization header */ }
+            AuthType.BASIC -> if (!config.username.isNullOrBlank()) {
+                requestBuilder.header("Authorization", Credentials.basic(config.username, config.password ?: ""))
+            }
+            AuthType.API_KEY -> if (!config.apiKey.isNullOrBlank()) {
+                requestBuilder.header("Authorization", "Bearer ${config.apiKey}")
+            }
         }
     }
 

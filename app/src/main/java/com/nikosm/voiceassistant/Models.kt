@@ -23,6 +23,9 @@ enum class AssistantState { IDLE, LISTENING, THINKING, SPEAKING }
 enum class VoiceMode { NONE, SYSTEM_TTS, BUNDLED_ESPEAK, GATEWAY }
 
 @Serializable
+enum class AuthType { NONE, BASIC, API_KEY }
+
+@Serializable
 data class ChatMessage(
     val role: String,
     val text: String,
@@ -92,8 +95,14 @@ data class ServerConfig(
     val name: String,
     val url: String,
     val username: String? = null,
-    val password: String? = null
-)
+    val password: String? = null,
+    val authType: AuthType = AuthType.NONE,
+    val apiKey: String? = null
+) {
+    // Backward compatibility: existing entries with username but default authType should use BASIC
+    val effectiveAuthType: AuthType
+        get() = if (authType == AuthType.NONE && !username.isNullOrBlank()) AuthType.BASIC else authType
+}
 
 data class CertApprovalRequest(
     val host: String,

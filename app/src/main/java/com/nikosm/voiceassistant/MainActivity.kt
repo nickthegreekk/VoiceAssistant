@@ -1374,9 +1374,9 @@ fun ServerSettings(service: AssistantService, gateways: List<ServerConfig>, olla
                 title = "Local Gateways",
                 servers = gateways,
                 status = serverStatus,
-                onAdd = { name: String, url: String, user: String?, pass: String? -> service.addServerBase(name, url, user, pass) },
+                onAdd = { name: String, url: String, user: String?, pass: String?, authType: AuthType, apiKey: String? -> service.addServerBase(name, url, user, pass, authType, apiKey) },
                 onRemove = { service.removeServerBase(it) },
-                onEdit = { old: ServerConfig, name: String, url: String, user: String?, pass: String? -> service.updateServerBase(old, name, url, user, pass) },
+                onEdit = { old: ServerConfig, name: String, url: String, user: String?, pass: String?, authType: AuthType, apiKey: String? -> service.updateServerBase(old, name, url, user, pass, authType, apiKey) },
                 onRefreshHealth = { service.forceCheckHealth(it, true) },
                 onRefreshModels = { /* Gateways don't have models */ },
                 onMoveUp = { service.moveServerUp(it, false) },
@@ -1389,9 +1389,9 @@ fun ServerSettings(service: AssistantService, gateways: List<ServerConfig>, olla
                 title = "Ollama Servers",
                 servers = ollama,
                 status = serverStatus,
-                onAdd = { name: String, url: String, user: String?, pass: String? -> service.addOllamaBase(name, url, user, pass) },
+                onAdd = { name: String, url: String, user: String?, pass: String?, authType: AuthType, apiKey: String? -> service.addOllamaBase(name, url, user, pass, authType, apiKey) },
                 onRemove = { service.removeOllamaBase(it) },
-                onEdit = { old: ServerConfig, name: String, url: String, user: String?, pass: String? -> service.updateOllamaBase(old, name, url, user, pass) },
+                onEdit = { old: ServerConfig, name: String, url: String, user: String?, pass: String?, authType: AuthType, apiKey: String? -> service.updateOllamaBase(old, name, url, user, pass, authType, apiKey) },
                 onRefreshHealth = { service.forceCheckHealth(it, false) },
                 onRefreshModels = { service.fetchModels(it) },
                 onMoveUp = { service.moveServerUp(it, true) },
@@ -1557,9 +1557,9 @@ fun ServerListSection(
     title: String,
     servers: List<ServerConfig>,
     status: Map<String, String>,
-    onAdd: (String, String, String?, String?) -> Unit,
+    onAdd: (String, String, String?, String?, AuthType, String?) -> Unit,
     onRemove: (ServerConfig) -> Unit,
-    onEdit: (ServerConfig, String, String, String?, String?) -> Unit,
+    onEdit: (ServerConfig, String, String, String?, String?, AuthType, String?) -> Unit,
     onRefreshHealth: (ServerConfig) -> Unit,
     onRefreshModels: (ServerConfig) -> Unit,
     onMoveUp: (ServerConfig) -> Unit,
@@ -1568,11 +1568,13 @@ fun ServerListSection(
 ) {
     var showAddDialog by remember { mutableStateOf(false) }
     var editingServer by remember { mutableStateOf<ServerConfig?>(null) }
-    
+
     var newName by remember { mutableStateOf("") }
     var newUrl by remember { mutableStateOf("") }
     var newUser by remember { mutableStateOf("") }
     var newPass by remember { mutableStateOf("") }
+    var newAuthType by remember { mutableStateOf(AuthType.NONE) }
+    var newApiKey by remember { mutableStateOf("") }
 
     Column {
         Row(
@@ -1632,12 +1634,14 @@ fun ServerListSection(
                             }
                         }
 
-                        IconButton(onClick = { 
+                        IconButton(onClick = {
                             editingServer = server
                             newName = server.name
                             newUrl = server.url
                             newUser = server.username ?: ""
                             newPass = server.password ?: ""
+                            newAuthType = if (server.username.isNullOrBlank()) AuthType.NONE else server.authType
+                            newApiKey = server.apiKey ?: ""
                         }, modifier = Modifier.size(28.dp)) {
                             Icon(Icons.Default.Edit, null, tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f), modifier = Modifier.size(18.dp))
                         }
@@ -1655,10 +1659,10 @@ fun ServerListSection(
         if (showAddDialog || editingServer != null) {
             val isEditing = editingServer != null
             AlertDialog(
-                onDismissRequest = { 
+                onDismissRequest = {
                     showAddDialog = false
                     editingServer = null
-                    newName = ""; newUrl = ""; newUser = ""; newPass = ""
+                    newName = ""; newUrl = ""; newUser = ""; newPass = ""; newAuthType = AuthType.NONE; newApiKey = ""
                 },
                 title = { Text(if (isEditing) "Edit Server" else "Add Server") },
                 text = {
@@ -1666,11 +1670,32 @@ fun ServerListSection(
                         OutlinedTextField(value = newName, onValueChange = { newName = it }, label = { Text("Name") }, modifier = Modifier.fillMaxWidth())
                         Spacer(Modifier.height(8.dp))
                         OutlinedTextField(value = newUrl, onValueChange = { newUrl = it }, label = { Text("URL (e.g. http://192.168.1.10:8880)") }, modifier = Modifier.fillMaxWidth())
-                        
-                        Spacer(Modifier.height(8.dp))
+
+                        Spacer(Modifier.height(12.dp))
+                        // Auth Type selector
+                        Text("Authentication", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f))
+                        Spacer(Modifier.height(4.dp))
                         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            OutlinedTextField(value = newUser, onValueChange = { newUser = it }, label = { Text("User (Opt)") }, modifier = Modifier.weight(1f))
-                            OutlinedTextField(value = newPass, onValueChange = { newPass = it }, label = { Text("Pass (Opt)") }, modifier = Modifier.weight(1f), visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation())
+                            AuthType.values().forEach { type ->
+                                FilterChip(
+                                    selected = newAuthType == type,
+                                    onClick = { newAuthType = type },
+                                    label = { Text(type.name.lowercase().replaceFirstChar { it.uppercase() }) }
+                                )
+                            }
+                        }
+
+                        if (newAuthType == AuthType.BASIC) {
+                            Spacer(Modifier.height(8.dp))
+                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                OutlinedTextField(value = newUser, onValueChange = { newUser = it }, label = { Text("Username") }, modifier = Modifier.weight(1f))
+                                OutlinedTextField(value = newPass, onValueChange = { newPass = it }, label = { Text("Password") }, modifier = Modifier.weight(1f), visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation())
+                            }
+                        }
+
+                        if (newAuthType == AuthType.API_KEY) {
+                            Spacer(Modifier.height(8.dp))
+                            OutlinedTextField(value = newApiKey, onValueChange = { newApiKey = it }, label = { Text("API Key") }, modifier = Modifier.fillMaxWidth(), visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation())
                         }
                     }
                 },
@@ -1678,21 +1703,21 @@ fun ServerListSection(
                     TextButton(onClick = {
                         if (newUrl.isNotBlank()) {
                             if (isEditing) {
-                                onEdit(editingServer!!, newName.ifBlank { "Server" }, newUrl, newUser.ifBlank { null }, newPass.ifBlank { null })
+                                onEdit(editingServer!!, newName.ifBlank { "Server" }, newUrl, newUser.ifBlank { null }, newPass.ifBlank { null }, newAuthType, newApiKey.ifBlank { null })
                             } else {
-                                onAdd(newName.ifBlank { "Server" }, newUrl, newUser.ifBlank { null }, newPass.ifBlank { null })
+                                onAdd(newName.ifBlank { "Server" }, newUrl, newUser.ifBlank { null }, newPass.ifBlank { null }, newAuthType, newApiKey.ifBlank { null })
                             }
                             showAddDialog = false
                             editingServer = null
-                            newName = ""; newUrl = ""; newUser = ""; newPass = ""
+                            newName = ""; newUrl = ""; newUser = ""; newPass = ""; newAuthType = AuthType.NONE; newApiKey = ""
                         }
                     }) { Text(if (isEditing) "Save" else "Add") }
                 },
                 dismissButton = {
-                    TextButton(onClick = { 
+                    TextButton(onClick = {
                         showAddDialog = false
                         editingServer = null
-                        newName = ""; newUrl = ""; newUser = ""; newPass = ""
+                        newName = ""; newUrl = ""; newUser = ""; newPass = ""; newAuthType = AuthType.NONE; newApiKey = ""
                     }) { Text("Cancel") }
                 }
             )
@@ -2587,18 +2612,22 @@ fun LanguageBar(
 fun WelcomeScreen(service: AssistantService?, onFinish: () -> Unit, personaColor: Color) {
     var step by remember { mutableIntStateOf(0) }
     val isReady = service != null
-    
+
     // Step 1: Ollama
     var ollamaName by remember { mutableStateOf("Local Ollama") }
     var ollamaUrl by remember { mutableStateOf("") }
     var ollamaUser by remember { mutableStateOf("") }
     var ollamaPass by remember { mutableStateOf("") }
+    var ollamaAuthType by remember { mutableStateOf(AuthType.NONE) }
+    var ollamaApiKey by remember { mutableStateOf("") }
 
     // Step 2: Gateway
     var gwName by remember { mutableStateOf("Voice Gateway") }
     var gwUrl by remember { mutableStateOf("") }
     var gwUser by remember { mutableStateOf("") }
     var gwPass by remember { mutableStateOf("") }
+    var gwAuthType by remember { mutableStateOf(AuthType.NONE) }
+    var gwApiKey by remember { mutableStateOf("") }
 
     Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         Column(modifier = Modifier.fillMaxSize().safeDrawingPadding().padding(32.dp).imePadding(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
@@ -2627,28 +2656,49 @@ fun WelcomeScreen(service: AssistantService?, onFinish: () -> Unit, personaColor
                     Text("Step 1: Ollama Server", style = MaterialTheme.typography.headlineSmall)
                     Text("The engine that runs your AI models.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.5f))
                     Spacer(modifier = Modifier.height(24.dp))
-                    
+
                     OutlinedTextField(value = ollamaName, onValueChange = { ollamaName = it }, label = { Text("Server Name") }, modifier = Modifier.fillMaxWidth())
                     Spacer(modifier = Modifier.height(12.dp))
                     OutlinedTextField(value = ollamaUrl, onValueChange = { ollamaUrl = it }, label = { Text("URL (e.g. http://192.168.1.10:11434)") }, modifier = Modifier.fillMaxWidth())
-                    
+
                     Spacer(modifier = Modifier.height(12.dp))
+                    // Auth Type selector
+                    Text("Authentication", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f))
+                    Spacer(modifier = Modifier.height(4.dp))
                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedTextField(value = ollamaUser, onValueChange = { ollamaUser = it }, label = { Text("User (Opt)") }, modifier = Modifier.weight(1f))
-                        OutlinedTextField(value = ollamaPass, onValueChange = { ollamaPass = it }, label = { Text("Pass (Opt)") }, modifier = Modifier.weight(1f), visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation())
+                        AuthType.values().forEach { type ->
+                            FilterChip(
+                                selected = ollamaAuthType == type,
+                                onClick = { ollamaAuthType = type },
+                                label = { Text(type.name.lowercase().replaceFirstChar { it.uppercase() }) }
+                            )
+                        }
+                    }
+
+                    if (ollamaAuthType == AuthType.BASIC) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedTextField(value = ollamaUser, onValueChange = { ollamaUser = it }, label = { Text("Username") }, modifier = Modifier.weight(1f))
+                            OutlinedTextField(value = ollamaPass, onValueChange = { ollamaPass = it }, label = { Text("Password") }, modifier = Modifier.weight(1f), visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation())
+                        }
+                    }
+
+                    if (ollamaAuthType == AuthType.API_KEY) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        OutlinedTextField(value = ollamaApiKey, onValueChange = { ollamaApiKey = it }, label = { Text("API Key") }, modifier = Modifier.fillMaxWidth(), visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation())
                     }
 
                     Spacer(modifier = Modifier.height(32.dp))
                     Button(
-                        onClick = { 
+                        onClick = {
                             if (ollamaUrl.isNotBlank()) {
-                                service?.addOllamaBase(ollamaName, ollamaUrl, ollamaUser.ifBlank { null }, ollamaPass.ifBlank { null })
+                                service?.addOllamaBase(ollamaName, ollamaUrl, ollamaUser.ifBlank { null }, ollamaPass.ifBlank { null }, ollamaAuthType, ollamaApiKey.ifBlank { null })
                             }
-                            step = 2 
-                        }, 
+                            step = 2
+                        },
                         enabled = isReady,
-                        modifier = Modifier.fillMaxWidth().height(56.dp), 
-                        shape = MaterialTheme.shapes.medium, 
+                        modifier = Modifier.fillMaxWidth().height(56.dp),
+                        shape = MaterialTheme.shapes.medium,
                         colors = ButtonDefaults.buttonColors(containerColor = personaColor)
                     ) {
                         if (isReady) {
@@ -2665,28 +2715,49 @@ fun WelcomeScreen(service: AssistantService?, onFinish: () -> Unit, personaColor
                     Text("Step 2: Voice Gateway", style = MaterialTheme.typography.headlineSmall)
                     Text("Handles voice synthesis and transcription.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.5f))
                     Spacer(modifier = Modifier.height(24.dp))
-                    
+
                     OutlinedTextField(value = gwName, onValueChange = { gwName = it }, label = { Text("Gateway Name") }, modifier = Modifier.fillMaxWidth())
                     Spacer(modifier = Modifier.height(12.dp))
                     OutlinedTextField(value = gwUrl, onValueChange = { gwUrl = it }, label = { Text("URL (e.g. http://192.168.1.10:8880)") }, modifier = Modifier.fillMaxWidth())
-                    
+
                     Spacer(modifier = Modifier.height(12.dp))
+                    // Auth Type selector
+                    Text("Authentication", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f))
+                    Spacer(modifier = Modifier.height(4.dp))
                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedTextField(value = gwUser, onValueChange = { gwUser = it }, label = { Text("User (Opt)") }, modifier = Modifier.weight(1f))
-                        OutlinedTextField(value = gwPass, onValueChange = { gwPass = it }, label = { Text("Pass (Opt)") }, modifier = Modifier.weight(1f), visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation())
+                        AuthType.values().forEach { type ->
+                            FilterChip(
+                                selected = gwAuthType == type,
+                                onClick = { gwAuthType = type },
+                                label = { Text(type.name.lowercase().replaceFirstChar { it.uppercase() }) }
+                            )
+                        }
+                    }
+
+                    if (gwAuthType == AuthType.BASIC) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedTextField(value = gwUser, onValueChange = { gwUser = it }, label = { Text("Username") }, modifier = Modifier.weight(1f))
+                            OutlinedTextField(value = gwPass, onValueChange = { gwPass = it }, label = { Text("Password") }, modifier = Modifier.weight(1f), visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation())
+                        }
+                    }
+
+                    if (gwAuthType == AuthType.API_KEY) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        OutlinedTextField(value = gwApiKey, onValueChange = { gwApiKey = it }, label = { Text("API Key") }, modifier = Modifier.fillMaxWidth(), visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation())
                     }
 
                     Spacer(modifier = Modifier.height(32.dp))
                     Button(
-                        onClick = { 
+                        onClick = {
                             if (gwUrl.isNotBlank()) {
-                                service?.addServerBase(gwName, gwUrl, gwUser.ifBlank { null }, gwPass.ifBlank { null })
+                                service?.addServerBase(gwName, gwUrl, gwUser.ifBlank { null }, gwPass.ifBlank { null }, gwAuthType, gwApiKey.ifBlank { null })
                             }
                             onFinish()
-                        }, 
+                        },
                         enabled = isReady,
-                        modifier = Modifier.fillMaxWidth().height(56.dp), 
-                        shape = MaterialTheme.shapes.medium, 
+                        modifier = Modifier.fillMaxWidth().height(56.dp),
+                        shape = MaterialTheme.shapes.medium,
                         colors = ButtonDefaults.buttonColors(containerColor = personaColor)
                     ) {
                         if (isReady) {
@@ -2695,9 +2766,8 @@ fun WelcomeScreen(service: AssistantService?, onFinish: () -> Unit, personaColor
                             CircularProgressIndicator(modifier = Modifier.size(24.dp), color = Color.Black, strokeWidth = 2.dp)
                         }
                     }
-                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                        TextButton(onClick = { step = 1 }) { Text("Back", color = personaColor) }
-                        TextButton(onClick = { onFinish() }) { Text("Skip", color = personaColor) }
+                    TextButton(onClick = { onFinish() }, modifier = Modifier.padding(top = 8.dp)) {
+                        Text("Skip for now", color = personaColor)
                     }
                 }
             }

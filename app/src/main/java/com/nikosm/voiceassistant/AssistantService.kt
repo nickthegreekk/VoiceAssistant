@@ -339,10 +339,16 @@ class AssistantService : Service() {
     }
 
     private suspend fun checkServerHealth(target: ServerConfig, isGateway: Boolean) {
-        val credential = if (isGateway && !target.username.isNullOrBlank()) {
-            Credentials.basic(target.username, target.password ?: "")
-        } else null
-        
+        val authorizationHeader = when (target.effectiveAuthType) {
+            AuthType.NONE -> null
+            AuthType.BASIC -> if (!target.username.isNullOrBlank()) {
+                Credentials.basic(target.username, target.password ?: "")
+            } else null
+            AuthType.API_KEY -> if (!target.apiKey.isNullOrBlank()) {
+                "Bearer ${target.apiKey}"
+            } else null
+        }
+
         val url = if (isGateway) {
             target.url.trimEnd('/') + "/"
         } else {
@@ -351,10 +357,10 @@ class AssistantService : Service() {
             if (base.endsWith("/api")) base = base.removeSuffix("/api")
             "$base/api/tags"
         }
-        
+
         try {
             val requestBuilder = Request.Builder().url(url)
-            credential?.let { requestBuilder.header("Authorization", it) }
+            authorizationHeader?.let { requestBuilder.header("Authorization", it) }
             
             fastClient.newCall(requestBuilder.build()).execute().use { response ->
                 val statusMap = _serverStatus.value.toMutableMap()
@@ -438,9 +444,9 @@ class AssistantService : Service() {
         settingsManager.saveFavoriteModels(_favoriteModels.value)
     }
 
-    fun addServerBase(name: String, url: String, username: String? = null, password: String? = null) {
+    fun addServerBase(name: String, url: String, username: String? = null, password: String? = null, authType: AuthType = AuthType.NONE, apiKey: String? = null) {
         if (_serverBases.value.none { it.url == url }) {
-            _serverBases.value = _serverBases.value + ServerConfig(name, url, username, password)
+            _serverBases.value = _serverBases.value + ServerConfig(name, url, username, password, authType, apiKey)
             saveSettings()
             fetchModels()
         }
@@ -451,11 +457,11 @@ class AssistantService : Service() {
         saveSettings()
     }
 
-    fun updateServerBase(oldConfig: ServerConfig, newName: String, newUrl: String, newUsername: String? = null, newPassword: String? = null) {
+    fun updateServerBase(oldConfig: ServerConfig, newName: String, newUrl: String, newUsername: String? = null, newPassword: String? = null, newAuthType: AuthType = AuthType.NONE, newApiKey: String? = null) {
         val current = _serverBases.value.toMutableList()
         val idx = current.indexOf(oldConfig)
         if (idx != -1) {
-            current[idx] = ServerConfig(newName, newUrl, newUsername, newPassword)
+            current[idx] = ServerConfig(newName, newUrl, newUsername, newPassword, newAuthType, newApiKey)
             _serverBases.value = current
             saveSettings()
             fetchModels(current[idx])
@@ -471,9 +477,9 @@ class AssistantService : Service() {
         saveSettings()
     }
 
-    fun addOllamaBase(name: String, url: String, username: String? = null, password: String? = null) {
+    fun addOllamaBase(name: String, url: String, username: String? = null, password: String? = null, authType: AuthType = AuthType.NONE, apiKey: String? = null) {
         if (_ollamaBaseUrls.value.none { it.url == url }) {
-            _ollamaBaseUrls.value = _ollamaBaseUrls.value + ServerConfig(name, url, username, password)
+            _ollamaBaseUrls.value = _ollamaBaseUrls.value + ServerConfig(name, url, username, password, authType, apiKey)
             saveSettings()
             fetchModels()
         }
@@ -508,11 +514,11 @@ class AssistantService : Service() {
         }
     }
 
-    fun updateOllamaBase(oldConfig: ServerConfig, newName: String, newUrl: String, newUsername: String? = null, newPassword: String? = null) {
+    fun updateOllamaBase(oldConfig: ServerConfig, newName: String, newUrl: String, newUsername: String? = null, newPassword: String? = null, newAuthType: AuthType = AuthType.NONE, newApiKey: String? = null) {
         val current = _ollamaBaseUrls.value.toMutableList()
         val idx = current.indexOf(oldConfig)
         if (idx != -1) {
-            current[idx] = ServerConfig(newName, newUrl, newUsername, newPassword)
+            current[idx] = ServerConfig(newName, newUrl, newUsername, newPassword, newAuthType, newApiKey)
             _ollamaBaseUrls.value = current
             saveSettings()
             fetchModels(current[idx])
