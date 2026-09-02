@@ -135,4 +135,9 @@ This app connects to third-party AI services. You are responsible for:
 - Complying with the terms of service of your chosen LLM provider
 - Any costs incurred from API usage
 
+
+  ### App screenshot
+- <img width="1080" height="2400" alt="Screenshot_20260902-102433_Celeste" src="https://github.com/user-attachments/assets/9ea57b8f-f966-499a-af5e-77e59ef3c41a" />
+
+
 The developers of this app are not responsible for any data shared with third-party services.
