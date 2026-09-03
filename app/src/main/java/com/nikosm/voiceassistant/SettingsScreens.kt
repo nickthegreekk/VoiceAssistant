@@ -623,7 +623,7 @@ fun ServerListSection(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     // Status Dot
-                    val serverStatus = status[server.name]
+                    val serverStatus = status[server.url]
                     val isOnline = serverStatus == null || !serverStatus.lowercase().contains("failed")
                     Box(
                         modifier = Modifier

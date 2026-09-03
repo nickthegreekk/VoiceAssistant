@@ -264,7 +264,7 @@ internal suspend fun AssistantService.transcribeWithGateway(file: File, persona:
             // Update status to working since we just had a successful call
             withContext(Dispatchers.Main) {
                 val statusMap = _serverStatus.value.toMutableMap()
-                _serverBases.value.find { it.url == url }?.let { statusMap[it.name] = "Online" }
+                _serverBases.value.find { it.url == url }?.let { statusMap[it.url] = "Online" }
                 _serverStatus.value = statusMap
             }
 
@@ -280,8 +280,8 @@ internal suspend fun AssistantService.transcribeWithGateway(file: File, persona:
                     } else {
                         e.message?.take(30)
                     }
-                    statusMap[cfg.name] = "failed: $failureLabel"
-                    serverFailCooldownUntilMillis[cfg.name] = System.currentTimeMillis() + FAILED_COOLDOWN_MS
+                    statusMap[cfg.url] = "failed: $failureLabel"
+                    serverFailCooldownUntilMillis[cfg.url] = System.currentTimeMillis() + FAILED_COOLDOWN_MS
                 }
                 _serverStatus.value = statusMap
             }

@@ -379,15 +379,15 @@ class AssistantService : Service() {
             fastClient.newCall(requestBuilder.build()).execute().use { response ->
                 val statusMap = _serverStatus.value.toMutableMap()
                 if (response.isSuccessful || response.code == 401) {
-                    statusMap[target.name] = "Online"
+                    statusMap[target.url] = "Online"
                 } else {
-                    statusMap[target.name] = "failed: ${response.code}"
+                    statusMap[target.url] = "failed: ${response.code}"
                 }
                 _serverStatus.value = statusMap
             }
         } catch (e: Exception) {
             val statusMap = _serverStatus.value.toMutableMap()
-            statusMap[target.name] = "failed: offline"
+            statusMap[target.url] = "failed: offline"
             _serverStatus.value = statusMap
         }
     }
