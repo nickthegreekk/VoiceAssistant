@@ -125,8 +125,6 @@ private suspend fun AssistantService.buildAttachmentSections(attachments: List<U
 // content. This is the single mechanism that delivers extracted file text to all
 // backends. Empty attachments just pass the original text through.
 private suspend fun AssistantService.buildModelPrompt(text: String, attachments: List<Uri>): String {
-    android.util.Log.d("AssistantService", "DEBUG buildModelPrompt: attachments.size=${attachments.size}")
-    android.util.Log.d("AssistantService", "DEBUG buildModelPrompt: attachments.size=${attachments.size}")
     if (attachments.isEmpty()) return text
     return "$text\n\n${buildAttachmentSections(attachments)}"
 }
@@ -252,8 +250,6 @@ internal fun AssistantService.sendAudioToServer(file: File, currentPersona: Pers
                     addFormDataPart("repeat_penalty", currentPersona.repeatPenalty.toString())
                     addFormDataPart("num_ctx", currentPersona.numCtx.toString())
                     addFormDataPart("context_time", currentDateTime)
-                    // TODO(temporary debug logging — remove after confirming numCtx)
-                    android.util.Log.d("AssistantService", "DEBUG [voice gateway multipart]: currentPersona.numCtx=${currentPersona.numCtx}")
                     if (currentPersona.isTranslator) {
                         addFormDataPart("target_language", currentPersona.targetLanguage)
                     }
@@ -506,9 +502,6 @@ internal fun AssistantService.sendTextMessageToServer(inputText: String, current
                         addFormDataPart("target_language", currentPersona.targetLanguage)
                     }
                 }
-                // TODO(temporary debug logging — remove after confirming numCtx)
-                android.util.Log.d("AssistantService", "DEBUG [text direct-ollama multipart]: currentPersona.numCtx=${currentPersona.numCtx}")
-
                 val requestBody = requestBuilder.build()
 
                 val statusMap = _serverStatus.value
@@ -574,8 +567,6 @@ internal fun AssistantService.sendTextMessageToServer(inputText: String, current
                             addFormDataPart("top_k", currentPersona.topK.toString())
                             addFormDataPart("repeat_penalty", currentPersona.repeatPenalty.toString())
                             addFormDataPart("num_ctx", currentPersona.numCtx.toString())
-                            // TODO(temporary debug logging — remove after confirming numCtx)
-                            android.util.Log.d("AssistantService", "DEBUG [text gateway multipart]: currentPersona.numCtx=${currentPersona.numCtx}")
 
                             if (currentPersona.isTranslator) {
                                 addFormDataPart("target_language", currentPersona.targetLanguage)
@@ -984,9 +975,9 @@ private suspend fun AssistantService.performDirectOllamaChat(baseUrl: String, mo
     options.put("top_k", persona.topK)
     options.put("repeat_penalty", persona.repeatPenalty)
     options.put("num_ctx", persona.numCtx)
-    // TODO(temporary debug logging — remove after confirming numCtx)
-    android.util.Log.d("AssistantService", "DEBUG [direct-ollama options]: persona.numCtx=${persona.numCtx}")
-    android.util.Log.d("AssistantService", "DEBUG: persona.name=${persona.name} enableThinking=${persona.enableThinking} isKnownThinking=${isKnownThinkingModel(model)}")
+    // Debug-only: per-request reasoning trace (fires once per direct-Ollama completion).
+    // Kept gated — useful with the thinking-aware read-timeout multiplier in getDynamicClient.
+    if (BuildConfig.DEBUG) android.util.Log.d("AssistantService", "DEBUG: persona.name=${persona.name} enableThinking=${persona.enableThinking} isKnownThinking=${isKnownThinkingModel(model)}")
     options.put("think", persona.enableThinking && isKnownThinkingModel(model))
     options.put("num_predict", persona.maxTokens)
 

@@ -81,11 +81,8 @@ class VADAudioRecorder(
                         Log.w("VADAudioRecorder", "Unexpected read size: $read (expected $chunkSize)")
                     }
                     if (read == chunkSize) {
-                        val maxAmplitude = buffer.maxOf { kotlin.math.abs(it.toInt()) }
-                        Log.d("VADAudioRecorder", "Raw max amplitude: $maxAmplitude (of 32768 max)")
                         val floatData = FloatArray(chunkSize) { buffer[it] / 32768.0f }
                         val prob = detector.isSpeech(floatData)
-                        Log.d("VADAudioRecorder", "Speech probability: $prob")
                         
                         if (prob > probThreshold) {
                             speechFrames++

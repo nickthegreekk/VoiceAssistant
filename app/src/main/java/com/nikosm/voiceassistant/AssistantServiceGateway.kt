@@ -67,11 +67,9 @@ private fun detectScriptLanguage(text: String): String? {
 internal suspend fun detectGatewayResponseLanguage(text: String): String {
     return try {
         val detected = detectScriptLanguage(text)
-        // TODO(temporary debug logging — remove once TTS language routing is verified on-device)
-        android.util.Log.d("AssistantService", "DEBUG: TTS language detection: len=${text.length} script='${detected ?: "none (Latin/undetermined)"}' -> '${detected ?: "English"}'")
         detected ?: "English"
     } catch (e: Exception) {
-        android.util.Log.w("AssistantService", "DEBUG: TTS language detection failed — falling back to 'English'", e)
+        if (BuildConfig.DEBUG) android.util.Log.w("AssistantService", "DEBUG: TTS language detection failed — falling back to 'English'", e)
         "English"
     }
 }

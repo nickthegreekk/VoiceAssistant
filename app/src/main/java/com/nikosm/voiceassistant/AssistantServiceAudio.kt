@@ -19,9 +19,7 @@ import java.io.File
 private var ttsUtteranceCounter: Long = 0
 
 fun AssistantService.toggleEarpieceMode() {
-    val before = earpieceMode.value
     _earpieceMode.value = !earpieceMode.value
-    android.util.Log.d("AssistantService", "DEBUG: toggleEarpieceMode called — before=$before after=${_earpieceMode.value}")
 }
 
 /**
@@ -68,14 +66,9 @@ internal fun AssistantService.requestAssistantFocus(): Boolean {
                 @Suppress("DEPRECATION")
                 audioManager.isSpeakerphoneOn = false
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                    val allDevices = audioManager.availableCommunicationDevices.map { it.type }
-                    android.util.Log.d("AssistantService", "DEBUG: available communication devices = $allDevices")
                     val earpiece = audioManager.availableCommunicationDevices.find { it.type == AudioDeviceInfo.TYPE_BUILTIN_EARPIECE }
                     if (earpiece != null) {
-                        val success = audioManager.setCommunicationDevice(earpiece)
-                        android.util.Log.d("AssistantService", "DEBUG: setCommunicationDevice(earpiece) returned $success")
-                    } else {
-                        android.util.Log.d("AssistantService", "DEBUG: no earpiece device found in available list")
+                        audioManager.setCommunicationDevice(earpiece)
                     }
                 }
             } else {

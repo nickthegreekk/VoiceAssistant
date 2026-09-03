@@ -863,8 +863,6 @@ class AssistantService : Service() {
         if (api.apiKey.isBlank() && api.icon != "C") return
         _isLoadingModels.value = true
         val baseUrl = api.baseUrl.trim().removeSuffix("/")
-        // TODO(temporary debug logging — remove once the DeepSeek model list is verified)
-        android.util.Log.d("AssistantService", "DEBUG fetchCloudModels: name='${api.name}' icon='${api.icon}' baseUrl=$baseUrl")
         serviceScope.launch(Dispatchers.IO) {
             val statusMap = _serverStatus.value.toMutableMap()
             statusMap.remove(api.name)
@@ -941,9 +939,6 @@ class AssistantService : Service() {
                                 rawModels.add(array.getJSONObject(i))
                             }
 
-                            // TODO(temporary debug logging — remove once the DeepSeek model list is verified)
-                            android.util.Log.d("AssistantService", "DEBUG raw models from API for '${api.name}' (icon='${api.icon}'): ${rawModels.size} models -> ${rawModels.joinToString(", ") { it.optString("id") }}")
-
                             val filtered = if (api.icon == "C" || api.icon == "D") {
                                 rawModels.map { "[${api.name}] ${it.getString("id")}" }
                             } else {
@@ -962,8 +957,6 @@ class AssistantService : Service() {
                         }
                     }
                 }
-                // TODO(temporary debug logging — remove once the DeepSeek model list is verified)
-                android.util.Log.d("AssistantService", "DEBUG final stored model list for '${api.name}': $models")
                 withContext(Dispatchers.Main) {
                     val current = _fetchedCloudModels.value.toMutableMap()
                     current[api.name] = models

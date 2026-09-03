@@ -325,13 +325,11 @@ fun MainScreen(service: AssistantService?) {
                     )) },
                     onRemoveAttachment = { attachedFiles = attachedFiles - it },
                     onSendClick = {
-                        android.util.Log.d("AssistantService", "DEBUG onSendClick: attachedFiles.size=${attachedFiles.size} BEFORE snapshot")
                         // Defensive copy: the composition's attachedFiles is a
                         // state-backed mutable list. We snapshot it BEFORE clearing the
                         // UI, so the synchronous `attachedFiles = emptyList()` below
                         // can't leave the in-flight send reading an emptied list.
                         val filesToSend = attachedFiles.toList()
-                        android.util.Log.d("AssistantService", "DEBUG onSendClick: filesToSend.size=${filesToSend.size} AFTER snapshot")
                         service?.sendTextMessageToServer(textInput, currentPersona, filesToSend)
                         textInput = ""
                         attachedFiles = emptyList()
