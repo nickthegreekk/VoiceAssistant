@@ -1196,7 +1196,7 @@ private fun AssistantService.parseCloudResponse(api: CloudApiSetting, persona: P
     return Triple(text, reasoning, UsageInfo(pTokens, cTokens, pTokens + cTokens, cost))
 }
 
-private fun AssistantService.isKnownThinkingModel(modelName: String): Boolean {
+internal fun AssistantService.isKnownThinkingModel(modelName: String): Boolean {
     val name = modelName.lowercase()
     // "v4-pro": DeepSeek's R1 line is being delisted (completes 2026-10-10 per
     // DeepSeek's announcement) and V4-Pro's built-in Thinking mode is the official

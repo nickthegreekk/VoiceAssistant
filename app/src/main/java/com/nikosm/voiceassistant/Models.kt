@@ -104,6 +104,15 @@ data class ServerConfig(
         get() = if (authType == AuthType.NONE && !username.isNullOrBlank()) AuthType.BASIC else authType
 }
 
+// Result of a setup-context connection test (Add/Edit Server dialogs, "Test Connection",
+// status-dot re-check). Structured so the setup UI can map the raw outcome to a specific,
+// actionable message — unlike the passive status dot, which intentionally stays coarse.
+data class ServerConnectionResult(
+    val success: Boolean,
+    val httpCode: Int? = null,  // HTTP status when the server responded but rejected the request
+    val detail: String? = null  // raw detail: HTTP status phrase or exception message
+)
+
 data class CertApprovalRequest(
     val host: String,
     val fingerprint: String,

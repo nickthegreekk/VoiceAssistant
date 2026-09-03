@@ -359,15 +359,18 @@ fun GeneralSettings(service: AssistantService, totalCost: Double, onDismiss: () 
     }
 }
 
-
 @Composable
 fun ServerSettings(service: AssistantService, gateways: List<ServerConfig>, ollama: List<ServerConfig>) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var serverStatus by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
+    // Setup-context connection failures (Test Connection button, save flow, dot re-check)
+    // are surfaced through this host — visible and specific, unlike the passive status dot.
+    val snackbarHostState = remember { SnackbarHostState() }
     LaunchedEffect(service) {
         service.serverStatus.collect { serverStatus = it }
     }
+    Box(modifier = Modifier.fillMaxSize()) {
     LazyColumn(verticalArrangement = Arrangement.spacedBy(16.dp)) {
         item {
             SettingsSectionHeader(title = "Connections", icon = Icons.Default.Dns)
@@ -382,7 +385,9 @@ fun ServerSettings(service: AssistantService, gateways: List<ServerConfig>, olla
                 onRefreshModels = { /* Gateways don't have models */ },
                 onMoveUp = { service.moveServerUp(it, false) },
                 onMoveDown = { service.moveServerDown(it, false) },
-                isGateway = true
+                isGateway = true,
+                service = service,
+                snackbarHostState = snackbarHostState
             )
         }
         item {
@@ -397,7 +402,9 @@ fun ServerSettings(service: AssistantService, gateways: List<ServerConfig>, olla
                 onRefreshModels = { service.fetchModels(it) },
                 onMoveUp = { service.moveServerUp(it, true) },
                 onMoveDown = { service.moveServerDown(it, true) },
-                isGateway = false
+                isGateway = false,
+                service = service,
+                snackbarHostState = snackbarHostState
             )
         }
         item {
@@ -550,6 +557,11 @@ fun ServerSettings(service: AssistantService, gateways: List<ServerConfig>, olla
                 }
             }
         }
+        }
+        SnackbarHost(
+            hostState = snackbarHostState,
+            modifier = Modifier.align(Alignment.BottomCenter)
+        )
     }
 }
 
@@ -565,10 +577,19 @@ fun ServerListSection(
     onRefreshModels: (ServerConfig) -> Unit,
     onMoveUp: (ServerConfig) -> Unit,
     onMoveDown: (ServerConfig) -> Unit,
-    isGateway: Boolean
+    isGateway: Boolean,
+    service: AssistantService,
+    snackbarHostState: SnackbarHostState
 ) {
+    val scope = rememberCoroutineScope()
     var showAddDialog by remember { mutableStateOf(false) }
     var editingServer by remember { mutableStateOf<ServerConfig?>(null) }
+
+    // Outcome of the in-dialog "Test Connection" probe (result + the auth type actually
+    // used, captured at test time so later field edits can't silently change the message).
+    // Keyed to the dialog's visibility so it resets on open/close/server switch.
+    var testOutcome by remember(showAddDialog, editingServer) { mutableStateOf<Pair<ServerConnectionResult, AuthType>?>(null) }
+    var testInProgress by remember(showAddDialog, editingServer) { mutableStateOf(false) }
 
     var newName by remember { mutableStateOf("") }
     var newUrl by remember { mutableStateOf("") }
@@ -610,7 +631,21 @@ fun ServerListSection(
                             .size(8.dp)
                             .clip(CircleShape)
                             .background(if (isOnline) Color.Green else Color.Red)
-                            .clickable { onRefreshHealth(server) }
+                            .clickable {
+                                onRefreshHealth(server)
+                                // The dot alone is easy to miss — also surface a specific,
+                                // actionable failure message for this manual re-check.
+                                scope.launch {
+                                    val result = service.testServerConnection(server, isGateway)
+                                    if (!result.success) {
+                                        snackbarHostState.showSnackbar(
+                                            message = "${server.name}: ${serverConnectionFailureMessage(result, server.effectiveAuthType)}",
+                                            withDismissAction = true,
+                                            duration = SnackbarDuration.Long
+                                        )
+                                    }
+                                }
+                            }
                     )
 
                     Column(modifier = Modifier.weight(1f)) {
@@ -698,11 +733,65 @@ fun ServerListSection(
                             Spacer(Modifier.height(8.dp))
                             OutlinedTextField(value = newApiKey, onValueChange = { newApiKey = it }, label = { Text("API Key") }, modifier = Modifier.fillMaxWidth(), visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation())
                         }
+
+                        Spacer(Modifier.height(12.dp))
+                        // Setup-context connection probe against the fields as currently
+                        // entered (nothing is saved). Result shows inline — a snackbar would
+                        // render behind this dialog's scrim, so inline is the visible channel
+                        // while the dialog is open.
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            TextButton(
+                                onClick = {
+                                    val candidate = ServerConfig(
+                                        name = newName.ifBlank { "Server" },
+                                        url = newUrl,
+                                        username = newUser.ifBlank { null },
+                                        password = newPass.ifBlank { null },
+                                        authType = newAuthType,
+                                        apiKey = newApiKey.ifBlank { null }
+                                    )
+                                    testOutcome = null
+                                    testInProgress = true
+                                    scope.launch {
+                                        val result = service.testServerConnection(candidate, isGateway)
+                                        testOutcome = result to candidate.effectiveAuthType
+                                        testInProgress = false
+                                    }
+                                },
+                                enabled = newUrl.isNotBlank() && !testInProgress
+                            ) {
+                                if (testInProgress) {
+                                    CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
+                                    Spacer(Modifier.width(8.dp))
+                                }
+                                Icon(Icons.Default.Wifi, null, modifier = Modifier.size(16.dp))
+                                Spacer(Modifier.width(6.dp))
+                                Text("Test Connection")
+                            }
+                        }
+                        testOutcome?.let { (result, authUsed) ->
+                            Text(
+                                text = if (result.success) "Connection successful" else serverConnectionFailureMessage(result, authUsed),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = if (result.success) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
+                            )
+                        }
                     }
                 },
                 confirmButton = {
                     TextButton(onClick = {
                         if (newUrl.isNotBlank()) {
+                            // Capture before the field resets below — the connection check
+                            // runs after save and reports failures as a snackbar (this
+                            // dialog is gone by then, so inline text wouldn't be visible).
+                            val savedConfig = ServerConfig(
+                                name = newName.ifBlank { "Server" },
+                                url = newUrl,
+                                username = newUser.ifBlank { null },
+                                password = newPass.ifBlank { null },
+                                authType = newAuthType,
+                                apiKey = newApiKey.ifBlank { null }
+                            )
                             if (isEditing) {
                                 onEdit(editingServer!!, newName.ifBlank { "Server" }, newUrl, newUser.ifBlank { null }, newPass.ifBlank { null }, newAuthType, newApiKey.ifBlank { null })
                             } else {
@@ -711,6 +800,16 @@ fun ServerListSection(
                             showAddDialog = false
                             editingServer = null
                             newName = ""; newUrl = ""; newUser = ""; newPass = ""; newAuthType = AuthType.NONE; newApiKey = ""
+                            scope.launch {
+                                val result = service.testServerConnection(savedConfig, isGateway)
+                                if (!result.success) {
+                                    snackbarHostState.showSnackbar(
+                                        message = "${savedConfig.name}: ${serverConnectionFailureMessage(result, savedConfig.effectiveAuthType)}",
+                                        withDismissAction = true,
+                                        duration = SnackbarDuration.Long
+                                    )
+                                }
+                            }
                         }
                     }) { Text(if (isEditing) "Save" else "Add") }
                 },
@@ -822,6 +921,30 @@ fun CloudSettings(service: AssistantService, apis: List<CloudApiSetting>) {
                 onMoveDown = { service.moveCustomCloudApiDown(it) }
             )
         }
+    }
+}
+
+// Maps a setup-context connection-test outcome to specific, actionable wording —
+// deliberately distinct from the generic strings used elsewhere. Setup context only:
+// chat errors keep their existing error-bubble display.
+// internal so the JVM unit test (ServerConnectionMessageTest) can pin the wording.
+internal fun serverConnectionFailureMessage(result: ServerConnectionResult, authType: AuthType): String {
+    return when {
+        result.httpCode == 401 || result.httpCode == 403 ->
+            if (authType == AuthType.API_KEY) "Authentication failed — check your API key"
+            else "Authentication failed — check your username/password"
+        result.httpCode == 404 ->
+            "Server responded, but this address doesn't seem right — check the URL"
+        result.httpCode != null ->
+            buildString {
+                append("Unexpected server response: HTTP ${result.httpCode}")
+                result.detail?.let { append(" — $it") }
+            }
+        else ->
+            buildString {
+                append("Couldn't reach the server — check the address and that it's running")
+                result.detail?.let { append(" ($it)") }
+            }
     }
 }
 

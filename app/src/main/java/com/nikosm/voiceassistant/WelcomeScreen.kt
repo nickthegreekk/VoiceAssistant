@@ -120,7 +120,7 @@ fun WelcomeScreen(service: AssistantService?, onFinish: () -> Unit, personaColor
                     Button(
                         onClick = {
                             if (ollamaUrl.isNotBlank()) {
-                                service?.addServerBase(ollamaName, ollamaUrl, ollamaUser.ifBlank { null }, ollamaPass.ifBlank { null }, ollamaAuthType, ollamaApiKey.ifBlank { null })
+                                service?.addOllamaBase(ollamaName, ollamaUrl, ollamaUser.ifBlank { null }, ollamaPass.ifBlank { null }, ollamaAuthType, ollamaApiKey.ifBlank { null })
                             }
                             step = 2
                         },

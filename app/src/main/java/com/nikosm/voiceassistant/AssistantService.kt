@@ -285,7 +285,14 @@ class AssistantService : Service() {
     internal fun getDynamicClient(persona: Persona, useStandard: Boolean = persona.isCloud): OkHttpClient {
         // Scale read timeout with maxTokens to accommodate slow hardware on long responses
         // Floor of 120s, scales up for budgets above 1200 tokens
-        val timeout = maxOf(120L, persona.maxTokens / 10L)
+        // Thinking-aware multiplier: when the model genuinely reasons, thinking tokens and
+        // answer tokens share num_predict and thinking generation is dramatically slower per
+        // token on CPU-bound/partially-offloaded hardware, so a budget calibrated only for
+        // normal-speed generation undershoots. The direct-Ollama path is non-streaming
+        // (stream:false), so readTimeout is a total wall-clock deadline for prompt-eval plus
+        // the whole generation — hence 3x whenever thinking is actually enabled.
+        val thinkingMultiplier = if (persona.enableThinking && isKnownThinkingModel(persona.model)) 3L else 1L
+        val timeout = maxOf(120L, persona.maxTokens / 10L) * thinkingMultiplier
         val baseClient = if (useStandard) standardClient else client
         return baseClient.newBuilder()
             .readTimeout(timeout, TimeUnit.SECONDS)
@@ -338,8 +345,8 @@ class AssistantService : Service() {
         }
     }
 
-    private suspend fun checkServerHealth(target: ServerConfig, isGateway: Boolean) {
-        val authorizationHeader = when (target.effectiveAuthType) {
+    private fun buildAuthorizationHeader(target: ServerConfig): String? {
+        return when (target.effectiveAuthType) {
             AuthType.NONE -> null
             AuthType.BASIC -> if (!target.username.isNullOrBlank()) {
                 Credentials.basic(target.username, target.password ?: "")
@@ -348,8 +355,10 @@ class AssistantService : Service() {
                 "Bearer ${target.apiKey}"
             } else null
         }
+    }
 
-        val url = if (isGateway) {
+    private fun buildHealthCheckUrl(target: ServerConfig, isGateway: Boolean): String {
+        return if (isGateway) {
             target.url.trimEnd('/') + "/"
         } else {
             var base = target.url.trim().removeSuffix("/")
@@ -357,11 +366,16 @@ class AssistantService : Service() {
             if (base.endsWith("/api")) base = base.removeSuffix("/api")
             "$base/api/tags"
         }
+    }
+
+    private suspend fun checkServerHealth(target: ServerConfig, isGateway: Boolean) {
+        val authorizationHeader = buildAuthorizationHeader(target)
+        val url = buildHealthCheckUrl(target, isGateway)
 
         try {
             val requestBuilder = Request.Builder().url(url)
             authorizationHeader?.let { requestBuilder.header("Authorization", it) }
-            
+
             fastClient.newCall(requestBuilder.build()).execute().use { response ->
                 val statusMap = _serverStatus.value.toMutableMap()
                 if (response.isSuccessful || response.code == 401) {
@@ -375,6 +389,34 @@ class AssistantService : Service() {
             val statusMap = _serverStatus.value.toMutableMap()
             statusMap[target.name] = "failed: offline"
             _serverStatus.value = statusMap
+        }
+    }
+
+    // Setup-context connection test for the Add/Edit Server dialogs ("Test Connection"
+    // button, save flow, and status-dot re-check). Unlike checkServerHealth — which
+    // deliberately treats 401 as "Online" for the passive status dot — this returns the
+    // raw outcome so the setup UI can surface the specific problem (bad credentials vs
+    // wrong URL vs unreachable host). Short 10s timeouts so the Test button fails fast;
+    // built on `client` so self-signed gateway certs are accepted exactly as today.
+    internal suspend fun testServerConnection(target: ServerConfig, isGateway: Boolean): ServerConnectionResult {
+        val probeClient = client.newBuilder()
+            .connectTimeout(10, TimeUnit.SECONDS)
+            .readTimeout(10, TimeUnit.SECONDS)
+            .build()
+        return withContext(Dispatchers.IO) {
+            try {
+                val requestBuilder = Request.Builder().url(buildHealthCheckUrl(target, isGateway))
+                buildAuthorizationHeader(target)?.let { requestBuilder.header("Authorization", it) }
+                probeClient.newCall(requestBuilder.build()).execute().use { response ->
+                    if (response.isSuccessful) {
+                        ServerConnectionResult(success = true)
+                    } else {
+                        ServerConnectionResult(success = false, httpCode = response.code, detail = response.message.ifBlank { null })
+                    }
+                }
+            } catch (e: Exception) {
+                ServerConnectionResult(success = false, httpCode = null, detail = e.message ?: e.javaClass.simpleName)
+            }
         }
     }
 

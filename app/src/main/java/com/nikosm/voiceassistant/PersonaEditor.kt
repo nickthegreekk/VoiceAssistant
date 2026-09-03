@@ -536,39 +536,14 @@ fun PersonaEditor(
             SettingsSectionHeader(title = "LLM Parameters", icon = Icons.Default.Tune)
             SettingsSection {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    ParameterSlider(label = "Temperature", value = temp, range = 0f..2f, onValueChange = { temp = it })
-                    ParameterSlider(label = "Top P", value = topP, range = 0f..1f, onValueChange = { topP = it })
-                    ParameterSlider(label = "Repeat Penalty", value = repeatPenalty, range = 0.5f..2.0f, onValueChange = { repeatPenalty = it })
-                    
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("Top K: ", style = MaterialTheme.typography.labelSmall)
-                        Slider(value = topK.toFloat(), onValueChange = { topK = it.toInt() }, valueRange = 1f..100f, modifier = Modifier.weight(1f))
-                        Text(topK.toString(), modifier = Modifier.width(32.dp), textAlign = TextAlign.End)
-                    }
-
-                    Column {
-                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                            Text("Max Response Length", style = MaterialTheme.typography.labelSmall)
-                            Text(maxTokens.toString(), style = MaterialTheme.typography.labelSmall)
-                        }
-                        Slider(value = maxTokens.toFloat(), onValueChange = { maxTokens = it.toInt() }, valueRange = 100f..8192f)
-                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                            Text("Fast (slow CPU / low RAM)", style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp), color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
-                            Text("Long (needs fast hardware)", style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp), color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
-                        }
-                    }
-
-                    Column {
-                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                            Text("Context Window Size", style = MaterialTheme.typography.labelSmall)
-                            Text(numCtx.toString(), style = MaterialTheme.typography.labelSmall)
-                        }
-                        Slider(value = numCtx.toFloat(), onValueChange = { numCtx = it.toInt() }, valueRange = 2048f..32768f)
-                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                            Text("Smaller (less VRAM / faster)", style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp), color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
-                            Text("Larger (more VRAM / memory-heavy)", style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp), color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
-                        }
-                    }
+                    ParameterSlider(label = "Temperature", value = temp, range = 0f..2f, onValueChange = { temp = it }, lowLabel = "More focused / predictable", highLabel = "More creative / random")
+                    ParameterSlider(label = "Top P", value = topP, range = 0f..1f, onValueChange = { topP = it }, lowLabel = "Narrower word choice", highLabel = "Wider word choice")
+                    ParameterSlider(label = "Repeat Penalty", value = repeatPenalty, range = 0.5f..2.0f, onValueChange = { repeatPenalty = it }, lowLabel = "Allows repetition", highLabel = "Avoids repetition")
+                    ParameterSlider(label = "Top K", value = topK.toFloat(), range = 1f..100f, onValueChange = { topK = it.toInt() }, format = { it.toInt().toString() }, lowLabel = "Fewer word options", highLabel = "More word options")
+                    ParameterSlider(label = "Max Response Length", value = maxTokens.toFloat(), range = 100f..8192f, onValueChange = { maxTokens = it.toInt() }, format = { it.toInt().toString() }, lowLabel = "Fast (slow CPU / low RAM)", highLabel = "Long (needs fast hardware)")
+                    // Continuous track, but state snaps to power-of-two detents so num_ctx
+                    // always lands on values Ollama operators expect (2k → 32k).
+                    ParameterSlider(label = "Context Window Size", value = numCtx.toFloat(), range = 2048f..32768f, onValueChange = { v -> numCtx = CTX_WINDOW_DETENTS.minByOrNull { kotlin.math.abs(it - v) } ?: v.toInt() }, format = { it.toInt().toString() }, lowLabel = "Smaller (less VRAM / faster)", highLabel = "Larger (more VRAM / memory-heavy)")
 
                     Spacer(Modifier.height(8.dp))
                     Column {
@@ -655,16 +630,48 @@ fun PersonaEditor(
     }
 }
 
+// Sane num_ctx detents (Ollama convention): 2k → 32k. See the Context Window slider.
+private val CTX_WINDOW_DETENTS = listOf(2048, 4096, 8192, 16384, 32768)
+
 @Composable
-fun ParameterSlider(label: String, value: Float, range: ClosedFloatingPointRange<Float>, onValueChange: (Float) -> Unit) {
-    Column {
+fun ParameterSlider(
+    label: String,
+    value: Float,
+    range: ClosedFloatingPointRange<Float>,
+    onValueChange: (Float) -> Unit,
+    modifier: Modifier = Modifier,
+    format: ((Float) -> String)? = null,
+    lowLabel: String? = null,
+    highLabel: String? = null
+) {
+    Column(modifier = modifier) {
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
             Text(label, style = MaterialTheme.typography.labelSmall)
-            Text(String.format(java.util.Locale.US, "%.2f", value), style = MaterialTheme.typography.labelSmall)
+            Text(format?.invoke(value) ?: String.format(java.util.Locale.US, "%.2f", value), style = MaterialTheme.typography.labelSmall)
         }
         Slider(value = value, onValueChange = onValueChange, valueRange = range)
+        // Two-sided low/high-end caption (10sp, 50% onSurface — the app's parameter-caption
+        // style). Each side gets half the row (low = start-aligned, high = end-aligned) so
+        // the captions stay pinned edge-to-edge instead of colliding when combined text
+        // runs long.
+        if (lowLabel != null && highLabel != null) {
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Caption(lowLabel, modifier = Modifier.weight(1f))
+                Caption(highLabel, modifier = Modifier.weight(1f), align = TextAlign.End)
+            }
+        }
     }
 }
+
+@Composable
+private fun Caption(text: String, modifier: Modifier = Modifier, align: TextAlign = TextAlign.Start) =
+    Text(
+        text = text,
+        modifier = modifier,
+        textAlign = align,
+        style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
+        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+    )
 
 @Composable
 fun LanguageBar(

@@ -232,6 +232,15 @@ fun MainScreen(service: AssistantService?) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) permissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
     }
 
+    // Service still binding — first-run status isn't knowable yet (isFirstRun's
+    // remember(service) can only resolve once the binder arrives). Hold on a blank
+    // themed background instead of flashing the main UI before the Welcome flow
+    // appears on first launch.
+    if (service == null) {
+        Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {}
+        return
+    }
+
     if (isFirstRun) {
         WelcomeScreen(
             service = service,
