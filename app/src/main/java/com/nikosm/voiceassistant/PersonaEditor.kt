@@ -179,7 +179,7 @@ fun PersonaEditor(
 
     // Auto-save logic
     // TODO(temporary debug logging — confirm numCtx is in the key list)
-    LaunchedEffect(name, model, systemPrompt, themeColor, temp, topP, topK, repeatPenalty, maxTokens, numCtx, enableThinking, webSearchEnabled, isTranslator, targetLanguage, voiceMode, voiceEngine, kokoroVoice, backendUrl) {
+    LaunchedEffect(name, model, systemPrompt, themeColor, temp, topP, topK, repeatPenalty, maxTokens, numCtx, enableThinking, webSearchEnabled, ragEnabled, isTranslator, targetLanguage, voiceMode, voiceEngine, kokoroVoice, backendUrl) {
         // Skip initial evaluation if needed? No, persona change will trigger it once, which is fine.
         delay(500)
         val trimmedModel = model.trim()
