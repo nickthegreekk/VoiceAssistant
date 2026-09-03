@@ -48,6 +48,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -127,6 +128,7 @@ fun PersonaEditor(
     var enableThinking by remember(persona) { mutableStateOf(persona.enableThinking) }
     var webSearchEnabled by remember(persona) { mutableStateOf(persona.webSearchEnabled) }
     var ragEnabled by remember(persona) { mutableStateOf(persona.ragEnabled) }
+    var allowGatewayFailover by remember(persona) { mutableStateOf(persona.allowGatewayFailover) }
     
     var isTranslator by remember(persona) { mutableStateOf(persona.isTranslator) }
     var targetLanguage by remember(persona) { mutableStateOf(persona.targetLanguage) }
@@ -135,6 +137,15 @@ fun PersonaEditor(
     var kokoroVoice by remember(persona) { mutableStateOf(persona.kokoroVoice) }
     var backendUrl by remember(persona) { mutableStateOf(persona.backendUrl) }
     var showDeleteConfirm by remember { mutableStateOf(false) }
+
+    // Flush-on-close: the debounce's delay(500) is cancelled when the composable
+    // leaves composition, so closing within 500ms of an edit silently discards it.
+    // This ref always holds the latest onSave (in "add" mode it switches from
+    // addPersona to updatePersona after the first save), and lastSavedPersona
+    // lets the dispose-time flush skip a save the debounce already made.
+    val onSaveRef = remember { mutableStateOf(onSave) }
+    onSaveRef.value = onSave
+    var lastSavedPersona by remember { mutableStateOf(persona) }
 
     val initialConnection = remember(persona) {
         if (model.startsWith("[") && model.contains("] ")) {
@@ -178,7 +189,7 @@ fun PersonaEditor(
     }
 
     // Auto-save logic
-    LaunchedEffect(name, model, systemPrompt, themeColor, temp, topP, topK, repeatPenalty, maxTokens, numCtx, enableThinking, webSearchEnabled, ragEnabled, isTranslator, targetLanguage, voiceMode, voiceEngine, kokoroVoice, backendUrl) {
+    LaunchedEffect(name, model, systemPrompt, themeColor, temp, topP, topK, repeatPenalty, maxTokens, numCtx, enableThinking, webSearchEnabled, ragEnabled, allowGatewayFailover, isTranslator, targetLanguage, voiceMode, voiceEngine, kokoroVoice, backendUrl) {
         // Skip initial evaluation if needed? No, persona change will trigger it once, which is fine.
         delay(500)
         val trimmedModel = model.trim()
@@ -213,6 +224,7 @@ fun PersonaEditor(
             enableThinking = enableThinking,
             webSearchEnabled = webSearchEnabled,
             ragEnabled = ragEnabled,
+            allowGatewayFailover = allowGatewayFailover,
             isTranslator = isTranslator,
             targetLanguage = targetLanguage,
             voiceMode = voiceMode,
@@ -222,7 +234,44 @@ fun PersonaEditor(
         )
         
         if (updated != persona) {
-            onSave(updated)
+            onSaveRef.value(updated)
+            lastSavedPersona = updated
+        }
+    }
+
+    // Flush any pending edit on dispose. Captures the latest local state at close
+    // time and saves it — but only if it differs from what the debounce already
+    // saved, so a normal close (debounce already fired) doesn't double-save.
+    DisposableEffect(Unit) {
+        onDispose {
+            val trimmedModel = model.trim()
+            val updated = persona.copy(
+                name = name,
+                model = trimmedModel,
+                systemPrompt = systemPrompt,
+                themeColor = themeColor,
+                isCloud = persona.isCloud,
+                providerIcon = persona.providerIcon,
+                temperature = temp,
+                topP = topP,
+                topK = topK,
+                repeatPenalty = repeatPenalty,
+                maxTokens = maxTokens,
+                numCtx = numCtx,
+                enableThinking = enableThinking,
+                webSearchEnabled = webSearchEnabled,
+                ragEnabled = ragEnabled,
+                allowGatewayFailover = allowGatewayFailover,
+                isTranslator = isTranslator,
+                targetLanguage = targetLanguage,
+                voiceMode = voiceMode,
+                voiceEngine = voiceEngine,
+                kokoroVoice = kokoroVoice,
+                backendUrl = backendUrl
+            )
+            if (updated != lastSavedPersona) {
+                onSaveRef.value(updated)
+            }
         }
     }
 
@@ -526,6 +575,18 @@ fun PersonaEditor(
                     label = { Text("Gateway URL") },
                     modifier = Modifier.fillMaxWidth()
                 )
+            }
+            item {
+                Column {
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Allow Gateway Failover", style = MaterialTheme.typography.bodyMedium)
+                            Text("If this persona's configured gateway is unreachable, try other configured gateways instead of failing immediately.",
+                                style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
+                        }
+                        Switch(checked = allowGatewayFailover, onCheckedChange = { allowGatewayFailover = it })
+                    }
+                }
             }
         }
 
