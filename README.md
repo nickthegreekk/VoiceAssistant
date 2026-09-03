@@ -1,4 +1,4 @@
-# VoiceAssistant
+# Celeste VoiceAssistant
 
 A privacy-focused, open-source Android voice assistant that connects to multiple LLM providers. Features hands-free voice interaction, on-device voice activity detection, and support for both local (Ollama) and cloud-based AI models.
 
