@@ -39,6 +39,9 @@ import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.saveable.listSaver
+import androidx.compose.runtime.saveable.rememberSaveable
+
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -66,18 +69,27 @@ import kotlinx.coroutines.*
 import androidx.compose.material3.TabRowDefaults.tabIndicatorOffset
 import androidx.compose.foundation.gestures.scrollBy
 
+// Picked attachments must survive Activity recreation (rotation); Uri is Parcelable
+// but a List<Uri> isn't directly Bundle-storable, so save the elements individually.
+private val AttachedFilesSaver = listSaver<List<Uri>, Uri>(
+    save = { it.toList() },
+    restore = { it }
+)
+
 @Composable
 fun MainScreen(service: AssistantService?) {
     val context = LocalContext.current
     val focusManager = LocalFocusManager.current
     
-    var showSettings by remember { mutableStateOf(false) }
-    var showPersonaPicker by remember { mutableStateOf(false) }
-    var textInput by remember { mutableStateOf("") }
-    var textModeOpen by remember { mutableStateOf(false) }
+    // Dialog/panel visibility and in-progress input use rememberSaveable so they survive
+    // Activity recreation (e.g. device rotation), which discards plain remember state.
+    var showSettings by rememberSaveable { mutableStateOf(false) }
+    var showPersonaPicker by rememberSaveable { mutableStateOf(false) }
+    var textInput by rememberSaveable { mutableStateOf("") }
+    var textModeOpen by rememberSaveable { mutableStateOf(false) }
     var revealedChars by remember { mutableIntStateOf(Int.MAX_VALUE) }
     var lastAnimatedMessageId by remember { mutableStateOf("") }
-    var attachedFiles by remember { mutableStateOf<List<Uri>>(emptyList()) }
+    var attachedFiles by rememberSaveable(stateSaver = AttachedFilesSaver) { mutableStateOf<List<Uri>>(emptyList()) }
     var isFirstRun by remember(service) { mutableStateOf(service?.isFirstRun() ?: false) }
 
     var state by remember { mutableStateOf(AssistantState.IDLE) }

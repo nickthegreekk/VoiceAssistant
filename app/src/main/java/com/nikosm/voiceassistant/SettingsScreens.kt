@@ -40,6 +40,10 @@ import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.Saver
+import androidx.compose.runtime.saveable.rememberSaveable
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -94,11 +98,23 @@ fun PersonaSelector(
     }
 }
 
+// ServerConfig/CloudApiSetting are kotlinx-serializable but not Parcelable, so the
+// add/edit dialog states are persisted to instance state as JSON strings.
+private val ServerConfigSaver = Saver<ServerConfig?, String>(
+    save = { it?.let { config -> Json.encodeToString(ServerConfig.serializer(), config) } ?: "" },
+    restore = { if (it.isEmpty()) null else runCatching { Json.decodeFromString(ServerConfig.serializer(), it) }.getOrNull() }
+)
+
+private val CloudApiSettingSaver = Saver<CloudApiSetting?, String>(
+    save = { it?.let { api -> Json.encodeToString(CloudApiSetting.serializer(), api) } ?: "" },
+    restore = { if (it.isEmpty()) null else runCatching { Json.decodeFromString(CloudApiSetting.serializer(), it) }.getOrNull() }
+)
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsDialog(service: AssistantService?, onDismiss: () -> Unit, personaColor: Color) {
     val context = LocalContext.current
-    var selectedTab by remember { mutableIntStateOf(0) }
+    var selectedTab by rememberSaveable { mutableIntStateOf(0) }
     val tabs = listOf("General", "Servers", "Cloud", "Personas")
 
     var totalCost by remember { mutableDoubleStateOf(0.0) }
@@ -282,7 +298,7 @@ fun GeneralSettings(service: AssistantService, totalCost: Double, onDismiss: () 
         }
         item {
             SettingsSectionHeader(title = "History", icon = Icons.Default.History)
-            var showClearConfirm by remember { mutableStateOf(false) }
+            var showClearConfirm by rememberSaveable { mutableStateOf(false) }
             SettingsSection {
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(
@@ -582,8 +598,8 @@ fun ServerListSection(
     snackbarHostState: SnackbarHostState
 ) {
     val scope = rememberCoroutineScope()
-    var showAddDialog by remember { mutableStateOf(false) }
-    var editingServer by remember { mutableStateOf<ServerConfig?>(null) }
+    var showAddDialog by rememberSaveable { mutableStateOf(false) }
+    var editingServer by rememberSaveable(stateSaver = ServerConfigSaver) { mutableStateOf<ServerConfig?>(null) }
 
     // Outcome of the in-dialog "Test Connection" probe (result + the auth type actually
     // used, captured at test time so later field edits can't silently change the message).
@@ -591,12 +607,12 @@ fun ServerListSection(
     var testOutcome by remember(showAddDialog, editingServer) { mutableStateOf<Pair<ServerConnectionResult, AuthType>?>(null) }
     var testInProgress by remember(showAddDialog, editingServer) { mutableStateOf(false) }
 
-    var newName by remember { mutableStateOf("") }
-    var newUrl by remember { mutableStateOf("") }
-    var newUser by remember { mutableStateOf("") }
-    var newPass by remember { mutableStateOf("") }
-    var newAuthType by remember { mutableStateOf(AuthType.NONE) }
-    var newApiKey by remember { mutableStateOf("") }
+    var newName by rememberSaveable { mutableStateOf("") }
+    var newUrl by rememberSaveable { mutableStateOf("") }
+    var newUser by rememberSaveable { mutableStateOf("") }
+    var newPass by rememberSaveable { mutableStateOf("") }
+    var newAuthType by rememberSaveable { mutableStateOf(AuthType.NONE) }
+    var newApiKey by rememberSaveable { mutableStateOf("") }
 
     Column {
         Row(
@@ -958,12 +974,12 @@ fun CustomCloudApiList(
     onMoveUp: (CloudApiSetting) -> Unit,
     onMoveDown: (CloudApiSetting) -> Unit
 ) {
-    var showAddDialog by remember { mutableStateOf(false) }
-    var editingApi by remember { mutableStateOf<CloudApiSetting?>(null) }
+    var showAddDialog by rememberSaveable { mutableStateOf(false) }
+    var editingApi by rememberSaveable(stateSaver = CloudApiSettingSaver) { mutableStateOf<CloudApiSetting?>(null) }
     
-    var name by remember { mutableStateOf("") }
-    var url by remember { mutableStateOf("") }
-    var key by remember { mutableStateOf("") }
+    var name by rememberSaveable { mutableStateOf("") }
+    var url by rememberSaveable { mutableStateOf("") }
+    var key by rememberSaveable { mutableStateOf("") }
 
     Column {
         Row(

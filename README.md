@@ -28,6 +28,22 @@ Pre-configured personas for different use cases:
 - **Translator** - Multi-language translation support (16 languages)
 - **Custom LLM** - Connect to any OpenAI-compatible server
 
+### Translator Mode
+
+The Translator persona turns Celeste into a real-time interpreter: speak in one language, it transcribes, translates, and speaks the result back in another — all in one continuous voice interaction, no typing required.
+
+This is genuinely fast enough for real use. Tested live with a native Spanish speaker using [TranslateGemma](https://developers.googleblog.com/en/translategemma-open-multilingual-translation-model/) 4B — the smaller, faster of Google's two dedicated translation models — short practical phrases (opening hours, schedules, directions) translated and spoke back in roughly **3 seconds end to end**, fast enough to hold an actual conversation rather than feeling like waiting on a machine.
+
+**Why it's accurate:** TranslateGemma is a model purpose-built for translation, not a general chat model repurposed for the job — on real translation benchmarks it outperforms models many times its size. Both the 4B and 12B variants are supported; 4B is the recommended default for speed, with 12B available as an option when translation quality matters more than response time (e.g., for less common language pairs or nuanced phrasing).
+
+**How to use it:**
+1. Set up a [Voice Gateway](#voice-gateway-tts--stt-server) — Translator mode requires it for speech recognition and speech output
+2. Pull a translation model on your Ollama server: `ollama pull translategemma:4b`
+3. Select the Translator persona, choose your target language
+4. Speak — Celeste transcribes your speech, translates it, and speaks the translation back
+
+**Known limitation:** translation quality is strongest for common, practical phrases (the kind of everyday exchange it was built and tested for) — genuinely nuanced or idiomatic language may not always translate perfectly, same as any translation tool. For anything where exact wording matters, verify with a native speaker rather than relying on it fully.
+
 ### Advanced Features
 - **RAG (Retrieval Augmented Generation)** - Connect to a knowledge base for document-aware responses
 - **Web Search** - SearXNG integration for real-time web queries

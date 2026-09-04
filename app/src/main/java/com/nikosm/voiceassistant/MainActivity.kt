@@ -40,6 +40,10 @@ import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.Saver
+import androidx.compose.runtime.saveable.rememberSaveable
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -65,6 +69,26 @@ import com.nikosm.voiceassistant.ui.theme.VoiceAssistantTheme
 import kotlinx.coroutines.*
 import androidx.compose.material3.TabRowDefaults.tabIndicatorOffset
 import androidx.compose.foundation.gestures.scrollBy
+
+// The persona editor's open state must survive Activity recreation (rotation), but
+// Persona is kotlinx-serializable rather than Parcelable — persist it as JSON.
+@Serializable
+private data class EditingPersonaPayload(val index: Int, val persona: Persona)
+
+private val EditingPersonaSaver = Saver<Pair<Int, Persona>?, String>(
+    save = { editing ->
+        editing?.let { (index, persona) ->
+            Json.encodeToString(EditingPersonaPayload.serializer(), EditingPersonaPayload(index, persona))
+        } ?: ""
+    },
+    restore = { encoded ->
+        if (encoded.isEmpty()) null
+        else runCatching {
+            val payload = Json.decodeFromString(EditingPersonaPayload.serializer(), encoded)
+            payload.index to payload.persona
+        }.getOrNull()
+    }
+)
 
     class MainActivity : ComponentActivity() {
     private var assistantService by mutableStateOf<AssistantService?>(null)
@@ -107,7 +131,20 @@ import androidx.compose.foundation.gestures.scrollBy
 
 @Composable
 fun PersonaSettings(service: AssistantService, personas: List<Persona>, currentThemeColor: Color) {
-    var editingPersona by remember { mutableStateOf<Pair<Int, Persona>?>(null) }
+    var editingPersona by rememberSaveable(stateSaver = EditingPersonaSaver) { mutableStateOf<Pair<Int, Persona>?>(null) }
+
+    // One-shot staleness guard: when the Activity is recreated while the editor is open,
+    // the restored snapshot can be older than the service's copy (edits are debounced
+    // into the service while editing). Re-resolve it against the current list so the
+    // editor doesn't show — and later re-commit — outdated values. On a fresh open,
+    // editingPersona is still null at first composition, so this is a no-op.
+    LaunchedEffect(Unit) {
+        val (index, snapshot) = editingPersona ?: return@LaunchedEffect
+        if (index == -1) return@LaunchedEffect // brand-new persona: the snapshot is the source of truth
+        personas.find { it.name == snapshot.name }?.let { fresh ->
+            if (fresh != snapshot) editingPersona = index to fresh
+        }
+    }
 
     if (editingPersona == null) {
         Column {

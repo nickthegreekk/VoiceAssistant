@@ -28,6 +28,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -39,24 +40,26 @@ import androidx.compose.ui.unit.dp
 
 @Composable
 fun WelcomeScreen(service: AssistantService?, onFinish: () -> Unit, personaColor: Color) {
-    var step by remember { mutableIntStateOf(0) }
+    var step by rememberSaveable { mutableIntStateOf(0) }
     val isReady = service != null
 
+    // Wizard progress and typed server credentials are instance state so they survive
+    // Activity recreation (e.g. rotation) during onboarding.
     // Step 1: Ollama
-    var ollamaName by remember { mutableStateOf("Local Ollama") }
-    var ollamaUrl by remember { mutableStateOf("") }
-    var ollamaUser by remember { mutableStateOf("") }
-    var ollamaPass by remember { mutableStateOf("") }
-    var ollamaAuthType by remember { mutableStateOf(AuthType.NONE) }
-    var ollamaApiKey by remember { mutableStateOf("") }
+    var ollamaName by rememberSaveable { mutableStateOf("Local Ollama") }
+    var ollamaUrl by rememberSaveable { mutableStateOf("") }
+    var ollamaUser by rememberSaveable { mutableStateOf("") }
+    var ollamaPass by rememberSaveable { mutableStateOf("") }
+    var ollamaAuthType by rememberSaveable { mutableStateOf(AuthType.NONE) }
+    var ollamaApiKey by rememberSaveable { mutableStateOf("") }
 
     // Step 2: Gateway
-    var gwName by remember { mutableStateOf("Voice Gateway") }
-    var gwUrl by remember { mutableStateOf("") }
-    var gwUser by remember { mutableStateOf("") }
-    var gwPass by remember { mutableStateOf("") }
-    var gwAuthType by remember { mutableStateOf(AuthType.NONE) }
-    var gwApiKey by remember { mutableStateOf("") }
+    var gwName by rememberSaveable { mutableStateOf("Voice Gateway") }
+    var gwUrl by rememberSaveable { mutableStateOf("") }
+    var gwUser by rememberSaveable { mutableStateOf("") }
+    var gwPass by rememberSaveable { mutableStateOf("") }
+    var gwAuthType by rememberSaveable { mutableStateOf(AuthType.NONE) }
+    var gwApiKey by rememberSaveable { mutableStateOf("") }
 
     Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         Column(modifier = Modifier.fillMaxSize().safeDrawingPadding().padding(32.dp).imePadding(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
