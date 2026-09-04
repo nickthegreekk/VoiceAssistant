@@ -66,15 +66,18 @@ import kotlinx.coroutines.*
 import androidx.compose.material3.TabRowDefaults.tabIndicatorOffset
 import androidx.compose.foundation.gestures.scrollBy
 
-class MainActivity : ComponentActivity() {
+    class MainActivity : ComponentActivity() {
     private var assistantService by mutableStateOf<AssistantService?>(null)
+    private var isBound = false
     private val connection = object : android.content.ServiceConnection {
         override fun onServiceConnected(name: android.content.ComponentName?, service: android.os.IBinder?) {
             val binder = service as AssistantService.AssistantBinder
             assistantService = binder.getService()
+            isBound = true
         }
         override fun onServiceDisconnected(name: android.content.ComponentName?) {
             assistantService = null
+            isBound = false
         }
     }
 
@@ -91,7 +94,14 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        unbindService(connection)
+        if (isBound) {
+            try {
+                unbindService(connection)
+            } catch (_: IllegalArgumentException) {
+                // Service may have already been disconnected
+            }
+            isBound = false
+        }
     }
 }
 
