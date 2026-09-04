@@ -957,6 +957,7 @@ private suspend fun AssistantService.performDirectOllamaChat(baseUrl: String, mo
         }
 
         android.util.Log.d("AssistantService", "Ollama Budget: history=${history.size}, used=$usedTokens, budget=$budget")
+        history.forEachIndexed { i, msg -> android.util.Log.d("AssistantService", "DEBUG history[$i] role=${msg.role} preview=${msg.text.take(100)}") }
 
         history.forEach { msg ->
             msgsArray.put(JSONObject().put("role", msg.role).put("content", msg.text))
@@ -1155,7 +1156,20 @@ private fun AssistantService.parseCloudResponse(api: CloudApiSetting, persona: P
     var text = ""; var reasoning: String? = null; var pTokens = 0; var cTokens = 0
     when (api.icon) {
         "A" -> {
-            text = json.getJSONArray("content").getJSONObject(0).getString("text")
+            // Anthropic Messages API: content is an array of blocks. Extended-thinking
+            // Claude models emit a "thinking" block before the "text" block — reading
+            // index 0 alone would grab the wrong block or throw on .getString("text").
+            // Iterate all blocks: concatenate text blocks, capture thinking into reasoning.
+            val content = json.getJSONArray("content")
+            val textParts = mutableListOf<String>()
+            for (i in 0 until content.length()) {
+                val block = content.getJSONObject(i)
+                when (block.optString("type")) {
+                    "text" -> textParts.add(block.optString("text"))
+                    "thinking" -> reasoning = block.optString("thinking")
+                }
+            }
+            text = textParts.joinToString("")
             if (json.has("usage")) {
                 val usage = json.getJSONObject("usage")
                 pTokens = usage.optInt("input_tokens", 0)
