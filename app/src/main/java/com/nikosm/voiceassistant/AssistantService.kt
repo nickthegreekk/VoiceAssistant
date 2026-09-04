@@ -272,7 +272,17 @@ class AssistantService : Service() {
 
     fun toggleSilence() {
         _silenced.value = !_silenced.value
-        currentPlayer?.setVolume(if (_silenced.value) 0f else 1f, if (_silenced.value) 0f else 1f)
+        val silenced = _silenced.value
+        // Gateway voice (MediaPlayer): mute in place — preserved for unmuting on toggle-off.
+        currentPlayer?.setVolume(if (silenced) 0f else 1f, if (silenced) 0f else 1f)
+        // A9: eSpeak (AudioTrack) — same in-place mute intent. AudioTrack.setVolume
+        // takes a single float (sets both channels), unlike MediaPlayer's two-param form.
+        currentAudioTrack?.setVolume(if (silenced) 0f else 1f)
+        // A9: System TTS — Android's TextToSpeech API has no live volume control on an
+        // already-started utterance, so stopping is the only clean option. tts.stop()
+        // is safe: the utterance's onError fires (delegated to onDone), which runs the
+        // standard cleanup path. No stuck state.
+        if (silenced) tts.stop()
     }
 
     fun toggleMicMute() {
