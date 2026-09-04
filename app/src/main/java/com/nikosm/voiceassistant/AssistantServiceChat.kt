@@ -26,6 +26,7 @@ private const val MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024 // 25 MB
 private const val ATTACHMENT_MB = MAX_ATTACHMENT_BYTES / (1024 * 1024)
 
 private class AttachmentException(message: String) : Exception(message)
+private class SafetyBlockedException(message: String) : Exception(message)
 
 private val plaintextMimeTypes = setOf(
     "text/plain", "text/markdown", "text/x-markdown",
@@ -1177,7 +1178,40 @@ private fun AssistantService.parseCloudResponse(api: CloudApiSetting, persona: P
             }
         }
         "G" -> {
-            text = json.getJSONArray("candidates").getJSONObject(0).getJSONObject("content").getJSONArray("parts").getJSONObject(0).getString("text")
+            // Gemini: check for safety-blocked responses before parsing candidates.
+            // Blocked prompt: top-level promptFeedback.blockReason is present.
+            // Blocked response: candidates may be empty, or candidates[0].finishReason == "SAFETY".
+            if (json.has("promptFeedback")) {
+                val feedback = json.optJSONObject("promptFeedback")
+                val reason = feedback?.optString("blockReason")
+                if (!reason.isNullOrBlank()) {
+                    throw SafetyBlockedException("Gemini blocked the prompt: $reason")
+                }
+            }
+            val candidates = json.optJSONArray("candidates")
+            if (candidates == null || candidates.length() == 0) {
+                throw SafetyBlockedException("Gemini returned no candidates (possibly blocked by safety filters)")
+            }
+            val candidate = candidates.optJSONObject(0)
+            val finishReason = candidate?.optString("finishReason")
+            if (finishReason == "SAFETY") {
+                throw SafetyBlockedException("Gemini response blocked by safety filters")
+            }
+            // Multi-part parsing: iterate all parts and concatenate text parts,
+            // rather than assuming a single part at index 0.
+            val content = candidate?.optJSONObject("content")
+            val parts = content?.optJSONArray("parts")
+            val textParts = mutableListOf<String>()
+            if (parts != null) {
+                for (i in 0 until parts.length()) {
+                    val part = parts.optJSONObject(i)
+                    val partText = part?.optString("text")
+                    if (!partText.isNullOrBlank()) {
+                        textParts.add(partText)
+                    }
+                }
+            }
+            text = textParts.joinToString("")
             if (json.has("usageMetadata")) {
                 val usage = json.getJSONObject("usageMetadata")
                 pTokens = usage.optInt("promptTokenCount", 0)
