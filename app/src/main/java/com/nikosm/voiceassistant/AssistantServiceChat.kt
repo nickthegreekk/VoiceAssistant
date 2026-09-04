@@ -65,7 +65,7 @@ internal fun AssistantService.isPlainTextAttachment(uri: Uri): Boolean {
 // Reads an attachment as strict UTF-8 text, capped at MAX_ATTACHMENT_BYTES. Fails
 // cleanly (with a clear message) for unsupported types, oversized files, or non-UTF-8
 // content, rather than sending garbage bytes to the model.
-internal fun AssistantService.readAttachmentText(uri: Uri): String {
+internal suspend fun AssistantService.readAttachmentText(uri: Uri): String = withContext(Dispatchers.IO) {
     if (!isPlainTextAttachment(uri)) {
         throw AttachmentException(
             "'$uri' is not a supported plain-text file. Only text files (.txt, .md, .json, .yaml, code, etc.) can be attached."
@@ -88,7 +88,7 @@ internal fun AssistantService.readAttachmentText(uri: Uri): String {
         if (!isValidUtf8(bytes)) {
             throw AttachmentException("Attachment '$uri' is not valid UTF-8 text.")
         }
-        return String(bytes, Charsets.UTF_8)
+        return@withContext String(bytes, Charsets.UTF_8)
     }
     throw AttachmentException("Could not open attachment: $uri")
 }

@@ -18,6 +18,7 @@ import android.media.AudioTrack
 import android.media.MediaPlayer
 import android.media.MediaRecorder
 import android.net.Uri
+import android.widget.Toast
 import android.os.Binder
 import android.os.Build
 import android.os.IBinder
@@ -123,6 +124,12 @@ class AssistantService : Service() {
 
     val _messages = MutableStateFlow<List<ChatMessage>>(emptyList())
     val messages = _messages.asStateFlow()
+
+    // RAG knowledge-base upload progress/outcome. Hoisted to the service (instead of
+    // dialog-local remember state) so it survives Settings-dialog closure: the uploads
+    // run on serviceScope and the dialog just collects this flow for display.
+    val _knowledgeUploadStatus = MutableStateFlow("")
+    val knowledgeUploadStatus = _knowledgeUploadStatus.asStateFlow()
 
     private var currentPersonaName: String? = null
 
@@ -737,6 +744,46 @@ class AssistantService : Service() {
         val success = settingsManager.importBackup(json)
         if (success) loadSettings()
         return success
+    }
+
+    // Backup export/import run on serviceScope — not the Settings dialog's UI scope —
+    // so closing the dialog mid-operation can no longer cancel them and leave a
+    // truncated export file or a half-applied import. Toasts work from the foreground
+    // service regardless of what's on screen.
+    fun exportBackupToFile(uri: Uri) {
+        serviceScope.launch {
+            try {
+                val backup = exportBackup()
+                withContext(Dispatchers.IO) {
+                    contentResolver.openOutputStream(uri)?.use { out ->
+                        out.write(backup.toByteArray())
+                    }
+                }
+                Toast.makeText(applicationContext, "Backup exported successfully", Toast.LENGTH_SHORT).show()
+            } catch (e: Exception) {
+                Toast.makeText(applicationContext, "Export failed: ${e.message}", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    fun importBackupFromFile(uri: Uri) {
+        serviceScope.launch {
+            try {
+                val json = withContext(Dispatchers.IO) {
+                    contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
+                }
+                if (json != null) {
+                    val success = importBackup(json)
+                    Toast.makeText(
+                        applicationContext,
+                        if (success) "Import successful" else "Import failed: Invalid format",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+            } catch (e: Exception) {
+                Toast.makeText(applicationContext, "Import failed: ${e.message}", Toast.LENGTH_LONG).show()
+            }
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {

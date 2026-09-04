@@ -2,6 +2,8 @@ package com.nikosm.voiceassistant
 
 import android.media.AudioAttributes
 import android.media.AudioManager
+import android.net.Uri
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -342,6 +344,31 @@ internal suspend fun AssistantService.uploadKnowledgeDocument(
         }
     } catch (e: Exception) {
         RagResult.Failure(Exception("Failed to upload document to RAG server: ${e.message}", e))
+    }
+}
+
+// Fire-and-forget RAG ingest on serviceScope: the upload must survive Settings-dialog
+// closure (the dialog-scoped rememberCoroutineScope used to cancel it mid-flight — the
+// HTTP request usually completed server-side, but the app-side outcome was silently
+// discarded). Progress/outcome is published via knowledgeUploadStatus, which the dialog
+// collects for display and which survives closure, so reopening Settings still shows
+// how each document ended up.
+internal fun AssistantService.uploadKnowledgeDocumentsToRag(uris: List<Uri>, ragUrl: String) {
+    uris.forEach { uri ->
+        serviceScope.launch {
+            val name = uri.path?.substringAfterLast("/", "document")?.substringAfterLast(".") ?: "document"
+            try {
+                _knowledgeUploadStatus.value = "Uploading $name..."
+                val text = readAttachmentText(uri)
+                when (val result = uploadKnowledgeDocument(text, name, ragUrl)) {
+                    is RagResult.Success -> _knowledgeUploadStatus.value = "Uploaded $name"
+                    is RagResult.Failure -> _knowledgeUploadStatus.value = "Failed: ${result.exception.message}"
+                }
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                _knowledgeUploadStatus.value = "Failed: ${e.message}"
+            }
+        }
     }
 }
 

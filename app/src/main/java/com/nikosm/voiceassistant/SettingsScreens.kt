@@ -200,51 +200,17 @@ fun SettingsDialog(service: AssistantService?, onDismiss: () -> Unit, personaCol
 
 @Composable
 fun GeneralSettings(service: AssistantService, totalCost: Double, onDismiss: () -> Unit) {
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
 
     val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
-        uri?.let {
-            scope.launch(Dispatchers.IO) {
-                try {
-                    val backup = service.exportBackup()
-                    context.contentResolver.openOutputStream(it)?.use { out ->
-                        out.write(backup.toByteArray())
-                    }
-                    withContext(Dispatchers.Main) {
-                        android.widget.Toast.makeText(context, "Backup exported successfully", android.widget.Toast.LENGTH_SHORT).show()
-                    }
-                } catch (e: Exception) {
-                    withContext(Dispatchers.Main) {
-                        android.widget.Toast.makeText(context, "Export failed: ${e.message}", android.widget.Toast.LENGTH_LONG).show()
-                    }
-                }
-            }
-        }
+        // Runs on serviceScope (inside the service) so closing the Settings dialog can
+        // no longer cancel the export mid-write and leave a truncated file.
+        uri?.let { service.exportBackupToFile(it) }
     }
 
     val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        uri?.let {
-            scope.launch(Dispatchers.IO) {
-                try {
-                    val json = context.contentResolver.openInputStream(it)?.bufferedReader()?.use { it.readText() }
-                    if (json != null) {
-                        val success = service.importBackup(json)
-                        withContext(Dispatchers.Main) {
-                            if (success) {
-                                android.widget.Toast.makeText(context, "Import successful", android.widget.Toast.LENGTH_SHORT).show()
-                            } else {
-                                android.widget.Toast.makeText(context, "Import failed: Invalid format", android.widget.Toast.LENGTH_LONG).show()
-                            }
-                        }
-                    }
-                } catch (e: Exception) {
-                    withContext(Dispatchers.Main) {
-                        android.widget.Toast.makeText(context, "Import failed: ${e.message}", android.widget.Toast.LENGTH_LONG).show()
-                    }
-                }
-            }
-        }
+        // Runs on serviceScope (inside the service) so closing the Settings dialog can
+        // no longer cancel a half-applied import.
+        uri?.let { service.importBackupFromFile(it) }
     }
 
     LazyColumn(verticalArrangement = Arrangement.spacedBy(16.dp)) {
@@ -456,7 +422,14 @@ fun ServerSettings(service: AssistantService, gateways: List<ServerConfig>, olla
                 var ragUser by remember { mutableStateOf("") }
                 var ragPass by remember { mutableStateOf("") }
                 var docCount by remember { mutableStateOf<Int?>(null) }
-                var uploadStatus by remember { mutableStateOf<String>("") }
+                // Upload progress/outcome is hoisted to the service (StateFlow) so it
+                // survives dialog closure: the upload runs on serviceScope and the
+                // dialog just collects the status for display. The count display is
+                // still dialog-local (transient) — reset when an upload succeeds.
+                val uploadStatus by service.knowledgeUploadStatus.collectAsState()
+                LaunchedEffect(uploadStatus) {
+                    if (uploadStatus.startsWith("Uploaded")) docCount = null
+                }
 
                 LaunchedEffect(service) {
                     ragUrl = service.getRagServerUrl() ?: ""
@@ -520,7 +493,7 @@ fun ServerSettings(service: AssistantService, gateways: List<ServerConfig>, olla
                                 docCount = null
                                 when (val result = service.getKnowledgeCount(ragUrl)) {
                                     is RagResult.Success -> docCount = result.value
-                                    is RagResult.Failure -> uploadStatus = "Error: ${result.exception.message}"
+                                    is RagResult.Failure -> service._knowledgeUploadStatus.value = "Error: ${result.exception.message}"
                                 }
                             }
                         }) {
@@ -532,24 +505,10 @@ fun ServerSettings(service: AssistantService, gateways: List<ServerConfig>, olla
                 val kbAttachmentLauncher = rememberLauncherForActivityResult(
                     ActivityResultContracts.OpenMultipleDocuments()
                 ) { uris ->
-                    uris.forEach { uri ->
-                        val name = uri.path?.substringAfterLast("/", "document")?.substringAfterLast(".") ?: "document"
-                        scope.launch {
-                            try {
-                                val text = service.readAttachmentText(uri)
-                                uploadStatus = "Uploading $name..."
-                                when (val result = service.uploadKnowledgeDocument(text, name, ragUrl)) {
-                                    is RagResult.Success -> {
-                                        uploadStatus = "Uploaded $name"
-                                        docCount = null
-                                    }
-                                    is RagResult.Failure -> uploadStatus = "Failed: ${result.exception.message}"
-                                }
-                            } catch (e: Exception) {
-                                uploadStatus = "Failed: ${e.message}"
-                            }
-                        }
-                    }
+                    // Upload runs on serviceScope (inside the service) so closing the
+                    // Settings dialog can no longer cancel it and silently discard the
+                    // outcome; progress/result is published via knowledgeUploadStatus.
+                    service.uploadKnowledgeDocumentsToRag(uris, ragUrl)
                 }
 
                 OutlinedButton(
