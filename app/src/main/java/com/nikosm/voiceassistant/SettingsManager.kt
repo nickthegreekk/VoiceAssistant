@@ -10,11 +10,16 @@ import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
 import java.security.KeyStore
 
 class SettingsManager(context: Context) {
 
     private val prefs: SharedPreferences = createEncryptedPrefsWithRecovery(context)
+
+    private companion object {
+        const val MAX_PERSONA_MESSAGES = 5 // TEMP: was 200, for eviction test
+    }
 
     private fun createEncryptedPrefsWithRecovery(context: Context): SharedPreferences {
         return try {
@@ -202,7 +207,19 @@ class SettingsManager(context: Context) {
     }
 
     fun savePersonaMessages(personaName: String, messages: List<ChatMessage>) {
-        prefs.edit().putString("persona_messages_$personaName", json.encodeToString(messages)).apply()
+        // C3: cap persisted history at 200 messages per persona. Trim from the oldest
+        // end (keep most recent 200). Before discarding any evicted message, delete its
+        // audio cache file if present — otherwise WAV files become orphaned on disk.
+        val capped = if (messages.size > MAX_PERSONA_MESSAGES) {
+            val evicted = messages.subList(0, messages.size - MAX_PERSONA_MESSAGES)
+            evicted.forEach { msg ->
+                msg.audioFilePath?.let { path ->
+                    try { File(path).delete() } catch (_: Exception) { /* already gone */ }
+                }
+            }
+            messages.subList(messages.size - MAX_PERSONA_MESSAGES, messages.size)
+        } else messages
+        prefs.edit().putString("persona_messages_$personaName", json.encodeToString(capped)).apply()
     }
 
     fun getPersonaMessages(personaName: String): List<ChatMessage>? {
