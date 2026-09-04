@@ -17,3 +17,4 @@ build/
 *.apk
 app/.cxx/
 .idea/
+app/release/baselineProfiles/
