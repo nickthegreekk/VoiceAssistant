@@ -14,6 +14,16 @@ class VADDetector(context: Context) {
 
     private var state: FloatArray = FloatArray(2 * 1 * 128)
 
+    // Guards the recurrent `state` array: isSpeech() runs on the recorder's IO thread
+    // while reset() runs on Main (resume()/stop()) — an unsynchronized fill-vs-read/write
+    // could tear the state tensor mid-inference, and a post-run write-back could
+    // resurrect pre-reset state. Kept separate from the recorder's data lock on purpose:
+    // sharing it would hold the data lock across ONNX inference. synchronized is
+    // reentrant, so the recorder's own IO-loop reset() calls never self-deadlock; the
+    // only cross-thread cost is a coinciding Main-side reset() briefly waiting (~1ms).
+    private val stateLock = Any()
+
+
     init {
         try {
             val modelBytes = context.assets.open("silero_vad.onnx").readBytes()
@@ -33,7 +43,7 @@ class VADDetector(context: Context) {
         }
     }
 
-    fun isSpeech(samples: FloatArray): Float {
+    fun isSpeech(samples: FloatArray): Float = synchronized(stateLock) {
         val s = session ?: return 0f
 
         val container = mutableMapOf<String, OnnxTensor>()
@@ -86,11 +96,15 @@ class VADDetector(context: Context) {
     }
 
     fun reset() {
-        state.fill(0f)
+        synchronized(stateLock) { state.fill(0f) }
     }
 
     fun close() {
-        session?.close()
-        env.close()
+        // Also under stateLock so the session can't be closed mid-inference (e.g.
+        // onDestroy's close() racing the loop's last isSpeech() after stop()).
+        synchronized(stateLock) {
+            session?.close()
+            env.close()
+        }
     }
 }

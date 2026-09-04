@@ -33,6 +33,17 @@ class VADAudioRecorder(
     private val probThreshold = 0.5f
     
     private val recordedData = mutableListOf<ShortArray>()
+
+    // Guards recordedData: the recording loop mutates it on Dispatchers.IO while stop()
+    // (Main thread) can clear it concurrently. Unsynchronized add/clear interleaving can
+    // tear the list state, and stop() landing mid-saveToWav() made its iterator throw
+    // ConcurrentModificationException — silently caught, killing the recording coroutine,
+    // dropping the finished utterance and leaving hands-free VAD dead until re-toggled.
+    // Held only for microsecond-scale in-memory ops (add/clear/snapshot) — never file
+    // I/O, never across a suspension — so Main's stop() never blocks for long and no
+    // deadlock cycle exists with VADDetector's own internal state lock.
+    private val dataLock = Any()
+
     
     var muted = false
     var isPaused = false
@@ -69,7 +80,7 @@ class VADAudioRecorder(
                     if (isPaused || muted) {
                         if (isRecording) {
                             isRecording = false
-                            recordedData.clear()
+                            synchronized(dataLock) { recordedData.clear() }
                             detector.reset()
                         }
                         delay(200)
@@ -95,17 +106,17 @@ class VADAudioRecorder(
                         if (!isRecording && speechFrames >= speechThreshold) {
                             isRecording = true
                             withContext(Dispatchers.Main) { onSpeechStart() }
-                            recordedData.clear()
+                            synchronized(dataLock) { recordedData.clear() }
                         }
                         
                         if (isRecording) {
-                            recordedData.add(buffer.copyOf())
+                            synchronized(dataLock) { recordedData.add(buffer.copyOf()) }
                             if (silenceFrames >= silenceThreshold) {
                                 isRecording = false
                                 val file = saveToWav()
                                 isPaused = true // Pause until resumed by service (e.g. after response)
                                 withContext(Dispatchers.Main) { onSpeechEnd(file) }
-                                recordedData.clear()
+                                synchronized(dataLock) { recordedData.clear() }
                                 detector.reset()
                                 speechFrames = 0
                                 silenceFrames = 0
@@ -128,7 +139,11 @@ class VADAudioRecorder(
         job?.cancel()
         job = null
         isRecording = false
-        recordedData.clear()
+        // Runs on Main while the IO loop may be mid-iteration; the lock makes this clear
+        // atomic against add() and saveToWav()'s snapshot (the CME source). The loop can
+        // still append one orphan chunk if it already passed its flag check — harmless,
+        // the next start()/speech-start clears it.
+        synchronized(dataLock) { recordedData.clear() }
         detector.reset()
         Log.d("VADAudioRecorder", "VAD monitoring stopped")
     }
@@ -142,13 +157,19 @@ class VADAudioRecorder(
     }
     
     private fun saveToWav(): File {
+        // Snapshot the chunk list under the lock (a cheap reference copy), then release
+        // the lock BEFORE the file I/O: stop() must never block for the write duration,
+        // and iterating the live list let stop()'s clear() throw
+        // ConcurrentModificationException mid-save. The header size derives from the same
+        // snapshot, keeping header and samples consistent.
+        val chunks = synchronized(dataLock) { ArrayList(recordedData) }
         val file = File(cacheDir, "vad_recording_${System.currentTimeMillis()}.wav")
-        val dataSize = recordedData.size * chunkSize * 2
-        
+        val dataSize = chunks.size * chunkSize * 2
+
         FileOutputStream(file).use { fos ->
             writeWavHeader(fos, dataSize)
             val byteBuffer = ByteBuffer.allocate(chunkSize * 2).order(ByteOrder.LITTLE_ENDIAN)
-            for (chunk in recordedData) {
+            for (chunk in chunks) {
                 byteBuffer.clear()
                 for (s in chunk) byteBuffer.putShort(s)
                 fos.write(byteBuffer.array())
