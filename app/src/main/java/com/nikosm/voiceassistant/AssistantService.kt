@@ -226,13 +226,28 @@ class AssistantService : Service() {
     val audioFocusChangeListener = AudioManager.OnAudioFocusChangeListener { focusChange ->
         when (focusChange) {
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT,
-            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK,
-            AudioManager.AUDIOFOCUS_LOSS -> {
+            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
+                // A8: transient loss — pause Gateway voice (MediaPlayer) for
+                // resumption on GAIN, but stop the other two engines cleanly
+                // (eSpeak can't be paused, and system TTS must stop too — otherwise
+                // they'd keep speaking through an incoming call).
                 if (currentPlayer?.isPlaying == true) {
                     currentPlayer?.pause()
                     pausedByFocusLoss = true
-                    _state.value = AssistantState.IDLE
                 }
+                currentAudioTrack?.let {
+                    try { if (it.playState == AudioTrack.PLAYSTATE_PLAYING) it.stop() } catch (e: Exception) {}
+                    it.release()
+                }
+                currentAudioTrack = null
+                tts.stop()
+                _state.value = AssistantState.IDLE
+            }
+            AudioManager.AUDIOFOCUS_LOSS -> {
+                // A8: permanent loss — stop all three engines and abandon the focus
+                // request itself rather than leaving it dangling (a GAIN may never come).
+                stopAudio()
+                pausedByFocusLoss = false
             }
             AudioManager.AUDIOFOCUS_GAIN -> {
                 if (pausedByFocusLoss) {
