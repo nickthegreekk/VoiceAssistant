@@ -8,6 +8,7 @@ import android.media.AudioManager
 import android.media.AudioTrack
 import android.media.MediaPlayer
 import android.os.Build
+import android.util.Log
 import androidx.compose.ui.graphics.Color
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -131,6 +132,10 @@ fun AssistantService.speakTextOnDevice(text: String) {
         }
         override fun onError(id: String?) {
             // A3: same ID gate as onDone — a stale error callback must not clean up.
+            // The ID-gate inside onDone filters superseded utterances, so a failure
+            // that reaches here is genuine and currently relevant — log it before
+            // delegating for cleanup so TTS synthesis failures are debuggable.
+            Log.w("TTS", "TTS synthesis failed for utterance $id")
             onDone(id)
         }
     })
