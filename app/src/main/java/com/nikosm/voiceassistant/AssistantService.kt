@@ -821,6 +821,14 @@ class AssistantService : Service() {
         tts.shutdown()
         vadRecorder?.stop()
         vadDetector?.close()
+        // A13: release the eSpeak NG native engine (espeak_Terminate + frees its static
+        // output buffer). Previously this was dropped on every service teardown, leaking
+        // the native engine (and its allocation) for the process lifetime. The native
+        // side stays valid until nativeTerminate(); a subsequent espeakEngine accessor
+        // call lazily reinitializes a fresh engine. Deliberately placed AFTER
+        // serviceScope.cancel()/stopAudio() so any in-flight kotlinx blocking synthesize
+        // coroutine has been cancelled — see the documented limitation below.
+        espeakEngine?.release()
     }
 
     private fun createNotificationChannel() {
