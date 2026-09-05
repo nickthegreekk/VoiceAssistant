@@ -1155,8 +1155,6 @@ class AssistantService : Service() {
             vadDetector = VADDetector(this)
         }
 
-        val persona = personas.value.firstOrNull() ?: DEFAULT_PERSONAS[0]
-
         if (vadRecorder == null) {
             vadRecorder = VADAudioRecorder(
                 detector = vadDetector!!,
@@ -1167,7 +1165,13 @@ class AssistantService : Service() {
                     updateNotification("Listening (VAD)...")
                 },
                 onSpeechEnd = { file ->
-                    sendAudioToServer(file, persona)
+                    // Resolve the persona fresh at speech-end time: a hands-free session
+                    // outlives persona switches, and the old start-of-session capture ran
+                    // every utterance with (and then had it silently discarded by
+                    // isChatContextCurrent against) whatever persona was first in the list.
+                    val resolvedPersona = currentPersonaName?.let { name -> personas.value.find { it.name == name } }
+                        ?: personas.value.firstOrNull() ?: DEFAULT_PERSONAS[0]
+                    sendAudioToServer(file, resolvedPersona)
                 }
             )
         }
