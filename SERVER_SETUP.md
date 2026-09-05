@@ -268,7 +268,7 @@ Celeste connects to this service via the **TOFU-pinning client** (same as the TT
 
 - [ ] Gateway credentials are unique, not left as placeholders, rotated if ever shared in plaintext (chat logs, screenshots, etc.)
 - [ ] Cloud provider API calls (Anthropic, OpenAI, Google, DeepSeek) use standard TLS validation — **never** the TOFU-pinning client meant for self-hosted servers
-- [ ] All internal services (RAG, CSM if used) bound to `127.0.0.1`, not `0.0.0.0`
+- [ ] The TTS Gateway and RAG service are bound to `0.0.0.0` (required — the phone connects directly) but protected by HTTPS + Basic Auth; anything genuinely internal-only (e.g., the CSM microservice, if ever used) stays bound to `127.0.0.1`
 - [ ] No conversation content or credentials logged unconditionally in release builds — gate behind `BuildConfig.DEBUG`
 - [ ] `.gitignore` excludes signing keys (`*.jks`), `local.properties`, and build artifacts before any public push
 
