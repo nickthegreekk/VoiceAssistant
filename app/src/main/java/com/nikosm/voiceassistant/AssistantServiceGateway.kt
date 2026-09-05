@@ -242,7 +242,7 @@ internal suspend fun AssistantService.transcribeWithGateway(file: File, persona:
 
     // Build gwsToTry using the same failover logic as sendTextMessageToServer/sendAudioToServer
     val gwsToTry: List<ServerConfig> = if (persona.allowGatewayFailover) {
-        val workingGateways = allGateways.filter { isServerHealthyForRetry(it.name) }
+        val workingGateways = allGateways.filter { isServerHealthyForRetry(it.url) }
         buildList {
             preferredGateway?.let { add(it) }
             addAll(workingGateways.filter { it != preferredGateway })
