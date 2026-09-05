@@ -909,6 +909,14 @@ class AssistantService : Service() {
         } finally {
             recorder = null
         }
+        // Release the focus startRecording() acquired, unconditionally: playback
+        // cleanup only abandons focus when playback actually happens, so on error
+        // or VoiceMode.NONE paths the transient request was otherwise held
+        // indefinitely, ducking other apps until the app was killed. Safe when
+        // playback does follow: requestAssistantFocus() builds and requests a fresh
+        // AudioFocusRequest when the field is null (and legally re-requests focus
+        // on a reused one), so the normal record -> playback flow is unaffected.
+        abandonAssistantFocus()
         outputFile?.let { sendAudioToServer(it, currentPersona) }
     }
 
