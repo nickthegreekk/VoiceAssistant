@@ -947,6 +947,14 @@ class AssistantService : Service() {
         _messages.value = settingsManager.getPersonaMessages(persona.name) ?: emptyList()
     }
 
+    // The persona the service currently considers active. The UI seeds itself from
+    // this on (re)bind — the service outlives the Activity, so after rotation this
+    // IS the user's actual selection, and reading it prevents the old behavior of
+    // silently resetting to the default persona on every recreation. Null when no
+    // persona is selected yet, or the selected name no longer exists in the list.
+    val currentPersona: Persona?
+        get() = currentPersonaName?.let { name -> _personas.value.find { it.name == name } }
+
     fun clearMessages() { 
         _messages.value = emptyList()
         currentPersonaName?.let { settingsManager.savePersonaMessages(it, emptyList()) }

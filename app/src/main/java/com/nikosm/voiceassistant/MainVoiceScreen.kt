@@ -118,7 +118,13 @@ fun MainScreen(service: AssistantService?) {
         }
     }
 
-    var currentPersona by remember { mutableStateOf(DEFAULT_PERSONAS[0]) }
+    // Seeded from the service's actual selection the moment the binder arrives
+    // (keyed on service: re-seeds synchronously on (re)bind). The service outlives
+    // the Activity, so after rotation its current persona IS the user's active one
+    // — a plain remember of DEFAULT_PERSONAS[0] used to reset the selection (and,
+    // via the old unconditional switchPersona below, the service's too) on every
+    // recreation.
+    var currentPersona by remember(service) { mutableStateOf(service?.currentPersona ?: DEFAULT_PERSONAS[0]) }
     val personaColor by animateColorAsState(targetValue = currentPersona.themeColor, animationSpec = tween(1000), label = "personaColor")
 
     val listState = rememberLazyListState()
@@ -146,7 +152,14 @@ fun MainScreen(service: AssistantService?) {
             }
             service.saveSettings()
             service.fetchModels()
-            service.switchPersona(currentPersona)
+            // Only seed the service when it has no selection of its own (fresh
+            // service, first launch). On rebind after rotation the service already
+            // holds the user's active persona — currentPersona was seeded from it
+            // above — so an unconditional switch here silently reset the selection
+            // (and swapped the visible history) on every recreation.
+            if (service.currentPersona == null) {
+                service.switchPersona(currentPersona)
+            }
         }
     }
 
