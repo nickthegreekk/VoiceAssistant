@@ -142,6 +142,11 @@ class AssistantService : Service() {
     private var chatRequestSeq: Long = 0
     internal fun nextChatRequestSeq(): Long = ++chatRequestSeq
     internal fun isChatRequestCurrent(seq: Long): Boolean = seq == chatRequestSeq
+    // B4: read-only accessor for staleness guards outside the chat flows (e.g.
+    // testGatewayVoice): capture the current generation WITHOUT bumping it, so a
+    // non-chat action is invalidated by Stop or a newer chat request but never
+    // invalidates anything else itself.
+    internal fun currentChatRequestSeq(): Long = chatRequestSeq
     internal fun isChatContextCurrent(seq: Long, personaName: String): Boolean =
         seq == chatRequestSeq && currentPersonaName == personaName
 

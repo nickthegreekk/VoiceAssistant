@@ -81,6 +81,12 @@ internal fun AssistantService.testGatewayVoice(text: String, url: String, langua
     serviceScope.launch {
         _state.value = AssistantState.THINKING
         updateNotification("Testing Gateway...")
+        // B4: capture the current request generation before the fetch starts (read
+        // only — never bumps the chat sequence, so it can't discard an in-flight
+        // chat response). Stop (stopEverything) and any newer chat request bump the
+        // sequence, so this snapshot goes stale the moment either happens; it is
+        // re-checked immediately before playback below.
+        val generation = currentChatRequestSeq()
         try {
             val bytes = withContext(Dispatchers.IO) {
                 val requestBody = MultipartBody.Builder()
@@ -129,6 +135,14 @@ internal fun AssistantService.testGatewayVoice(text: String, url: String, langua
             }
 
             if (bytes != null) {
+                // B4: re-check the generation immediately before playback. A Stop
+                // landing between fetch completion and this point used to let
+                // playAudioFile start anyway — an audible blip that stopAudio() then
+                // had to cut short. A superseded test now skips playback entirely.
+                if (!isChatRequestCurrent(generation)) {
+                    if (BuildConfig.DEBUG) android.util.Log.d("AssistantService", "Gateway test discarded — superseded by Stop or a newer request before playback")
+                    return@launch // finally performs the THINKING-only clean state reset
+                }
                 val outFile = File(cacheDir, "test_synthesis.wav")
                 outFile.writeBytes(bytes)
                 playAudioFile(outFile)
