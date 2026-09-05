@@ -18,7 +18,7 @@ class SettingsManager(context: Context) {
     private val prefs: SharedPreferences = createEncryptedPrefsWithRecovery(context)
 
     private companion object {
-        const val MAX_PERSONA_MESSAGES = 5 // TEMP: was 200, for eviction test
+        const val MAX_PERSONA_MESSAGES = 200
     }
 
     private fun createEncryptedPrefsWithRecovery(context: Context): SharedPreferences {
