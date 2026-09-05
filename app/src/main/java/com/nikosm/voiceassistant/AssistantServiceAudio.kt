@@ -403,6 +403,15 @@ fun AssistantService.stopAudio() {
 fun AssistantService.stopEverything() {
     currentCall?.cancel()
     currentCall = null
+    // Stop-semantics fix: invalidate any in-flight turn through the same generation
+    // mechanism used for superseded requests. currentCall only tracks the main chat
+    // request — standalone transcription/synthesis/RAG calls either don't set it or
+    // run in phases where it is null. Bumping the sequence makes every existing
+    // isChatRequestCurrent/isChatContextCurrent apply-gate (sendAudioToServer,
+    // sendTextMessageToServer, performCloudChat) discard whatever the in-flight turn
+    // eventually produces — no history append and, critically, no playResponse —
+    // even when the underlying network work completes after Stop was pressed.
+    nextChatRequestSeq()
     stopAudio()
     if (assistantState.value == AssistantState.THINKING || assistantState.value == AssistantState.LISTENING) {
         _state.value = AssistantState.IDLE
@@ -415,14 +424,45 @@ fun AssistantService.stopEverything() {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) audioManager.clearCommunicationDevice()
 }
 
+/**
+ * Strips markdown formatting from text before on-device TTS synthesis.
+ * Mirrors the server-side clean_text_for_tts() in tts_server.py so that the
+ * eSpeak and System TTS engines don't read markup symbols aloud (**bold**,
+ * *italic*, # headers, `backticks`). The Gateway/Kokoro path already gets this
+ * treatment server-side, but on-device engines never did — until now.
+ *
+ * - **bold** / *italic* → keep enclosed text, strip the asterisks
+ * - # / ## / etc. heading markers → removed
+ * - ` / `` code markers → removed
+ * - Excessive blank lines (3+) → collapsed to a single blank line
+ */
+fun cleanTextForTts(text: String): String {
+    var cleaned = text
+    // **bold** markers — keep the enclosed text, strip the asterisks
+    cleaned = cleaned.replace(Regex("\\*\\*(.+?)\\*\\*"), "$1")
+    // *italic* markers — keep the enclosed text, strip the asterisks
+    cleaned = cleaned.replace(Regex("\\*(.+?)\\*"), "$1")
+    // # / ## / ### heading markers (line-start, 1–6 hashes followed by whitespace)
+    cleaned = cleaned.replace(Regex("^#{1,6}\\s+", RegexOption.MULTILINE), "")
+    // Backtick code markers (single and triple)
+    cleaned = cleaned.replace(Regex("`+"), "")
+    // Collapse 3+ consecutive newlines to a single blank line
+    cleaned = cleaned.replace(Regex("\\n{3,}"), "\n\n")
+    return cleaned
+}
+
 fun AssistantService.playResponse(persona: Persona, file: File? = null, deviceText: String? = null) {
+    // Clean markdown markup once at the dispatch point so every on-device engine
+    // (System TTS and eSpeak) speaks readable text — the Gateway path is cleaned
+    // server-side and passes through here with file != null, so it's unaffected.
+    val cleanedText = deviceText?.let { cleanTextForTts(it) }
     when (persona.voiceMode) {
         VoiceMode.NONE -> {
             _state.value = AssistantState.IDLE
             updateNotification("Ready to help")
         }
         VoiceMode.SYSTEM_TTS -> {
-            if (deviceText != null) speakTextOnDevice(deviceText)
+            if (cleanedText != null) speakTextOnDevice(cleanedText)
             else {
                 if (file != null) playAudioFile(file)
                 else {
@@ -432,7 +472,7 @@ fun AssistantService.playResponse(persona: Persona, file: File? = null, deviceTe
             }
         }
         VoiceMode.BUNDLED_ESPEAK -> {
-            if (deviceText != null) speakWithEspeak(deviceText, persona)
+            if (cleanedText != null) speakWithEspeak(cleanedText, persona)
             else {
                 if (file != null) playAudioFile(file)
                 else {
@@ -444,7 +484,7 @@ fun AssistantService.playResponse(persona: Persona, file: File? = null, deviceTe
         VoiceMode.GATEWAY -> {
             if (file != null) playAudioFile(file)
             else {
-                if (deviceText != null) speakTextOnDevice(deviceText)
+                if (cleanedText != null) speakTextOnDevice(cleanedText)
                 else {
                     _state.value = AssistantState.IDLE
                     updateNotification("Ready to help")

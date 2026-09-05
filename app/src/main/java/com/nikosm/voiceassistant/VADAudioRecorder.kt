@@ -148,6 +148,11 @@ class VADAudioRecorder(
         Log.d("VADAudioRecorder", "VAD monitoring stopped")
     }
 
+    fun pause() {
+        isPaused = true
+        Log.d("VADAudioRecorder", "VAD Monitoring Paused")
+    }
+
     fun resume() {
         isPaused = false
         detector.reset()

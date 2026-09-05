@@ -109,14 +109,22 @@ internal fun AssistantService.testGatewayVoice(text: String, url: String, langua
                     }
                 }
 
-                client.newCall(requestBuilder.build()).execute().use { response ->
-                    if (!response.isSuccessful) throw Exception("Server error: ${response.code}")
-                    val contentType = response.header("Content-Type") ?: ""
-                    if (contentType.contains("application/json")) {
-                        null
-                    } else {
-                        response.body.bytes()
+                // Tracked in currentCall so the Stop button can cancel this call too.
+                val call = client.newCall(requestBuilder.build())
+                currentCall = call
+                try {
+                    call.execute().use { response ->
+                        if (!response.isSuccessful) throw Exception("Server error: ${response.code}")
+                        val contentType = response.header("Content-Type") ?: ""
+                        if (contentType.contains("application/json")) {
+                            null
+                        } else {
+                            response.body.bytes()
+                        }
                     }
+                } finally {
+                    // A6-style: only clear the slot if this call still owns it.
+                    if (currentCall === call) currentCall = null
                 }
             }
 
@@ -181,17 +189,27 @@ internal suspend fun AssistantService.synthesizeWithGateway(text: String, person
                 }
             }
 
-            client.newCall(requestBuilder.build()).execute().use { response ->
-                if (!response.isSuccessful) throw Exception("Server error: ${response.code}")
-                val contentType = response.header("Content-Type") ?: ""
-                if (contentType.contains("application/json")) {
-                    val json = JSONObject(response.body.string())
-                    val note = json.optString("note", "Voice unavailable for this language.")
-                    android.util.Log.d("AssistantService", "Synthesis skipped: $note")
-                    null
-                } else {
-                    response.body.bytes()
+            // Tracked in currentCall so the Stop button can cancel synthesis too —
+            // previously an in-flight synthesis was unstoppable and its audio played
+            // even after Stop (the identity guard keeps cleanup from clobbering a
+            // newer phase's call).
+            val call = client.newCall(requestBuilder.build())
+            currentCall = call
+            try {
+                call.execute().use { response ->
+                    if (!response.isSuccessful) throw Exception("Server error: ${response.code}")
+                    val contentType = response.header("Content-Type") ?: ""
+                    if (contentType.contains("application/json")) {
+                        val json = JSONObject(response.body.string())
+                        val note = json.optString("note", "Voice unavailable for this language.")
+                        android.util.Log.d("AssistantService", "Synthesis skipped: $note")
+                        null
+                    } else {
+                        response.body.bytes()
+                    }
                 }
+            } finally {
+                if (currentCall === call) currentCall = null
             }
         }
     } catch (e: Exception) {
@@ -256,10 +274,22 @@ internal suspend fun AssistantService.transcribeWithGateway(file: File, persona:
                     }
                 }
 
-                client.newCall(requestBuilder.build()).execute().use { response ->
-                    if (!response.isSuccessful) throw Exception("Server error: ${response.code}")
-                    val body = response.body.string()
-                    JSONObject(body).optString("text", "")
+                val call = client.newCall(requestBuilder.build())
+                currentCall = call
+                try {
+                    call.execute().use { response ->
+                        if (!response.isSuccessful) throw Exception("Server error: ${response.code}")
+                        val body = response.body.string()
+                        JSONObject(body).optString("text", "")
+                    }
+                } catch (e: Exception) {
+                    // A5: a user stop cancelled this attempt — abort the failover loop
+                    // immediately and don't mark the gateway unhealthy for a cancellation
+                    // it didn't cause (mirrors the tracked loops in AssistantServiceChat).
+                    if (call.isCanceled()) throw java.io.IOException("Cancelled")
+                    throw e
+                } finally {
+                    if (currentCall === call) currentCall = null
                 }
             }
 
@@ -410,18 +440,25 @@ internal suspend fun AssistantService.fetchRagContext(query: String): String {
                 .addFormDataPart("top_k", "3")
                 .build()
             requestBuilder.post(body)
-            client.newCall(requestBuilder.build()).execute().use { response ->
-                if (!response.isSuccessful) return@withContext ""
-                val json = JSONObject(response.body.string())
-                val results = json.optJSONArray("results") ?: return@withContext ""
-                if (results.length() == 0) return@withContext ""
-                val sb = StringBuilder("RELEVANT INFORMATION FROM YOUR KNOWLEDGE BASE:\n")
-                for (i in 0 until results.length()) {
-                    val r = results.getJSONObject(i)
-                    sb.append("- ${r.optString("text")} (source: ${r.optString("source")})\n")
+            // Tracked in currentCall so context enrichment is stoppable too.
+            val call = client.newCall(requestBuilder.build())
+            currentCall = call
+            try {
+                call.execute().use { response ->
+                    if (!response.isSuccessful) return@withContext ""
+                    val json = JSONObject(response.body.string())
+                    val results = json.optJSONArray("results") ?: return@withContext ""
+                    if (results.length() == 0) return@withContext ""
+                    val sb = StringBuilder("RELEVANT INFORMATION FROM YOUR KNOWLEDGE BASE:\n")
+                    for (i in 0 until results.length()) {
+                        val r = results.getJSONObject(i)
+                        sb.append("- ${r.optString("text")} (source: ${r.optString("source")})\n")
+                    }
+                    sb.append("\nUse this information if relevant to answer the user's question.")
+                    sb.toString()
                 }
-                sb.append("\nUse this information if relevant to answer the user's question.")
-                sb.toString()
+            } finally {
+                if (currentCall === call) currentCall = null
             }
         }
     } catch (e: Exception) {

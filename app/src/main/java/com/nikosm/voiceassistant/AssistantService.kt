@@ -355,8 +355,10 @@ class AssistantService : Service() {
 
         serviceScope.launch {
             assistantState.collect { state ->
-                if (state == AssistantState.IDLE) {
-                    vadRecorder?.resume()
+                when (state) {
+                    AssistantState.IDLE -> vadRecorder?.resume()
+                    AssistantState.SPEAKING -> vadRecorder?.pause()
+                    else -> {}
                 }
             }
         }
