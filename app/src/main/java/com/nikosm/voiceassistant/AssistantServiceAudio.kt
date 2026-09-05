@@ -94,6 +94,21 @@ internal fun AssistantService.requestAssistantFocus(): Boolean {
     }
 }
 
+/**
+ * B2: identity-guarded focus abandonment for engine cleanup paths. Captures the
+ * AudioFocusRequest instance this cleanup is about to abandon, abandons exactly
+ * that instance, and only clears the shared audioFocusRequest field if it still
+ * holds that same instance — a cleanup running for an already-superseded request
+ * cannot clobber a newer one that requestAssistantFocus() has since installed
+ * (the same cross-engine protection stopAudio() applies to currentAudioTrack /
+ * currentPlayer).
+ */
+internal fun AssistantService.abandonAssistantFocus() {
+    val request = audioFocusRequest ?: return
+    audioManager.abandonAudioFocusRequest(request)
+    if (audioFocusRequest === request) audioFocusRequest = null
+}
+
 fun AssistantService.speakTextOnDevice(text: String) {
     if (!ttsReady || silenced.value) {
         _state.value = AssistantState.IDLE
@@ -124,8 +139,7 @@ fun AssistantService.speakTextOnDevice(text: String) {
                 currentUtteranceId = null
                 _state.value = AssistantState.IDLE
                 updateNotification("Ready to help")
-                audioFocusRequest?.let { req -> audioManager.abandonAudioFocusRequest(req) }
-                audioFocusRequest = null
+                abandonAssistantFocus()
                 audioManager.mode = AudioManager.MODE_NORMAL
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) audioManager.clearCommunicationDevice()
             }
@@ -152,8 +166,7 @@ fun AssistantService.speakTextOnDevice(text: String) {
         currentUtteranceId = null
         _state.value = AssistantState.IDLE
         updateNotification("Ready to help")
-        audioFocusRequest?.let { req -> audioManager.abandonAudioFocusRequest(req) }
-        audioFocusRequest = null
+        abandonAssistantFocus()
         audioManager.mode = AudioManager.MODE_NORMAL
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) audioManager.clearCommunicationDevice()
     }
@@ -273,8 +286,7 @@ internal fun AssistantService.speakWithEspeak(text: String, persona: Persona) {
                             if (assistantState.value == AssistantState.SPEAKING) {
                                 _state.value = AssistantState.IDLE
                                 updateNotification("Ready to help")
-                                audioFocusRequest?.let { req -> audioManager.abandonAudioFocusRequest(req) }
-                                audioFocusRequest = null
+                                abandonAssistantFocus()
                                 audioManager.mode = AudioManager.MODE_NORMAL
                                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) audioManager.clearCommunicationDevice()
                             }
@@ -327,8 +339,7 @@ internal fun AssistantService.playAudioFile(file: File) {
                 it.release()
                 currentPlayer = null
                 _voiceDuration.value = 0
-                audioFocusRequest?.let { req -> audioManager.abandonAudioFocusRequest(req) }
-                audioFocusRequest = null
+                abandonAssistantFocus()
                 audioManager.mode = AudioManager.MODE_NORMAL
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) audioManager.clearCommunicationDevice()
             }
@@ -351,8 +362,7 @@ internal fun AssistantService.playAudioFile(file: File) {
                 mp.release()
                 currentPlayer = null
                 _voiceDuration.value = 0
-                audioFocusRequest?.let { req -> audioManager.abandonAudioFocusRequest(req) }
-                audioFocusRequest = null
+                abandonAssistantFocus()
                 audioManager.mode = AudioManager.MODE_NORMAL
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) audioManager.clearCommunicationDevice()
             } else {
@@ -373,8 +383,7 @@ internal fun AssistantService.playAudioFile(file: File) {
         _state.value = AssistantState.IDLE
         updateNotification("Ready to help")
         player.release()
-        audioFocusRequest?.let { req -> audioManager.abandonAudioFocusRequest(req) }
-        audioFocusRequest = null
+        abandonAssistantFocus()
     }
 }
 
@@ -394,8 +403,7 @@ fun AssistantService.stopAudio() {
         updateNotification("Ready to help")
     }
     _voiceDuration.value = 0
-    audioFocusRequest?.let { req -> audioManager.abandonAudioFocusRequest(req) }
-    audioFocusRequest = null
+    abandonAssistantFocus()
     audioManager.mode = AudioManager.MODE_NORMAL
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) audioManager.clearCommunicationDevice()
 }
@@ -418,8 +426,7 @@ fun AssistantService.stopEverything() {
         updateNotification("Ready to help")
     }
     _voiceDuration.value = 0
-    audioFocusRequest?.let { req -> audioManager.abandonAudioFocusRequest(req) }
-    audioFocusRequest = null
+    abandonAssistantFocus()
     audioManager.mode = AudioManager.MODE_NORMAL
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) audioManager.clearCommunicationDevice()
 }
