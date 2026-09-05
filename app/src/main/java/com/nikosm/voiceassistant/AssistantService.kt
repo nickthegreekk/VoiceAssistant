@@ -202,6 +202,25 @@ class AssistantService : Service() {
     internal val _isLoadingModels = MutableStateFlow(false)
     val isLoadingModels = _isLoadingModels.asStateFlow()
 
+    // B3 (chat): concurrent model fetches must not let one finishing call leave
+    // _isLoadingModels=false while another is still in flight. A single boolean can't
+    // represent that; track the number of in-flight fetches instead and only clear the
+    // flag when the count returns to zero. Both callers (fetchModels/fetchCloudModels)
+    // update the count on the Main dispatcher, so it's only ever touched there — no
+    // lock needed. Validate with a hard floor at 0 so a defensive decrement can never
+    // go negative.
+    private var modelFetchInFlightCount = 0
+
+    internal fun incrementModelFetchCount() {
+        modelFetchInFlightCount++
+        _isLoadingModels.value = modelFetchInFlightCount > 0
+    }
+
+    internal fun decrementModelFetchCount() {
+        modelFetchInFlightCount = (modelFetchInFlightCount - 1).coerceAtLeast(0)
+        _isLoadingModels.value = modelFetchInFlightCount > 0
+    }
+
     val _lastPriceSyncTimestamp = MutableStateFlow(0L)
     val lastPriceSyncTimestamp = _lastPriceSyncTimestamp.asStateFlow()
 
@@ -943,7 +962,7 @@ class AssistantService : Service() {
 
     fun fetchCloudModels(api: CloudApiSetting) {
         if (api.apiKey.isBlank() && api.icon != "C") return
-        _isLoadingModels.value = true
+        incrementModelFetchCount()
         val baseUrl = api.baseUrl.trim().removeSuffix("/")
         serviceScope.launch(Dispatchers.IO) {
             val statusMap = _serverStatus.value.toMutableMap()
@@ -1049,7 +1068,7 @@ class AssistantService : Service() {
                 statusMap[api.name] = e.message ?: "Cloud fetch failed"
                 withContext(Dispatchers.Main) { _serverStatus.value = statusMap }
             } finally {
-                _isLoadingModels.value = false
+                decrementModelFetchCount()
             }
         }
     }

@@ -706,14 +706,20 @@ internal fun AssistantService.sendTextMessageToServer(inputText: String, current
 internal fun AssistantService.fetchModels(config: ServerConfig? = null) {
     val targets = if (config != null) listOf(config) else _ollamaBaseUrls.value
     if (targets.isEmpty()) return
-    _isLoadingModels.value = true
+    incrementModelFetchCount()
 
     serviceScope.launch(Dispatchers.IO) {
-        val statusMap = _serverStatus.value.toMutableMap()
-        val localModelsMap = _fetchedLocalModels.value.toMutableMap()
+        // B3 (chat) fix: do NOT snapshot _serverStatus/_fetchedLocalModels at coroutine
+        // start and write them back wholesale at the end — two overlapping fetchModels
+        // calls for different servers would then let the second-finishing call clobber
+        // the first's results with its own stale snapshot. Instead, each iteration
+        // collects results for JUST its own targets, and the completion block updates
+        // only those specific entries in the LIVE state (read-modify-write), so a
+        // concurrent call for another server keeps its own updates untouched.
+        val perTargetResults = linkedMapOf<String, Pair<String, List<String>?>>() // url -> (status, models or null)
 
         for (target in targets) {
-            statusMap.remove(target.url)
+            perTargetResults[target.url] = "Could not connect to server" to null
             var base = target.url.trim().removeSuffix("/")
             if (base.endsWith("/v1")) base = base.removeSuffix("/v1")
             if (base.endsWith("/api")) base = base.removeSuffix("/api")
@@ -754,8 +760,7 @@ internal fun AssistantService.fetchModels(config: ServerConfig? = null) {
                                 }
                             }
                             if (success) {
-                                localModelsMap[target.name] = serverModels.map { "[${target.name}] $it" }
-                                statusMap[target.url] = "Online"
+                                perTargetResults[target.url] = "Online" to serverModels.map { "[${target.name}] $it" }
                             }
                         } else {
                             lastErrorMessage = when (response.code) {
@@ -769,15 +774,30 @@ internal fun AssistantService.fetchModels(config: ServerConfig? = null) {
                 }
             }
             if (!success) {
-                statusMap[target.url] = lastErrorMessage
+                perTargetResults[target.url] = lastErrorMessage to null
             }
         }
 
         withContext(Dispatchers.Main) {
-            _serverStatus.value = statusMap
+            // B3: apply only our targets' entries into the LIVE maps, never a stale
+            // full-map snapshot, so an overlapping fetch for a different server's
+            // results are preserved.
+            var localModelsMap = _fetchedLocalModels.value.toMutableMap()
+            for ((url, result) in perTargetResults) {
+                val (status, models) = result
+                val targetName = targets.firstOrNull { it.url == url }?.name ?: continue
+                if (models != null) {
+                    localModelsMap[targetName] = models
+                } else {
+                    localModelsMap.remove(targetName)
+                }
+                var statusMap = _serverStatus.value.toMutableMap()
+                statusMap[url] = status
+                _serverStatus.value = statusMap
+            }
             _fetchedLocalModels.value = localModelsMap
             _availableModels.value = localModelsMap.values.flatten().distinct()
-            _isLoadingModels.value = false
+            decrementModelFetchCount()
         }
     }
 }
