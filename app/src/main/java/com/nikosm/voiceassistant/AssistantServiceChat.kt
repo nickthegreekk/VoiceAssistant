@@ -538,22 +538,26 @@ internal fun AssistantService.sendTextMessageToServer(inputText: String, current
                     throw Exception("No working servers available. Check your connection in Settings.")
                 }
 
+                // C2: context enrichment (news / web search / RAG) is loop-invariant —
+                // fetch it once, before the retry loop, instead of re-running SearXNG
+                // queries and RAG retrievals on every failed gateway attempt. This also
+                // guarantees identical injected context across failover attempts.
+                val searchContext = if (isNewsRequest(inputText)) {
+                    fetchNewsContext()
+                } else if (currentPersona.webSearchEnabled) {
+                    fetchWebSearchContext(inputText)
+                } else ""
+
+                // Step 3 — RAG retrieval: prepend uploaded-document matches alongside
+                // any web search context. Graceful: "" when unconfigured or on failure.
+                val ragContext = if (currentPersona.ragEnabled) fetchRagContext(inputText) else ""
+                val contextPrefix = listOf(searchContext, ragContext).filter { it.isNotEmpty() }.joinToString("\n\n")
+
                 var lastEx: Exception? = null
                 for (gw in gwsToTry.distinct()) {
                     val base = gw.url
                     // Scale read timeout with maxTokens to handle long processing/reasoning
                     val currentClient = getDynamicClient(currentPersona, useStandard = false)
-
-                    val searchContext = if (isNewsRequest(inputText)) {
-                        fetchNewsContext()
-                    } else if (currentPersona.webSearchEnabled) {
-                        fetchWebSearchContext(inputText)
-                    } else ""
-
-                    // Step 3 — RAG retrieval: prepend uploaded-document matches alongside
-                    // any web search context. Graceful: "" when unconfigured or on failure.
-                    val ragContext = if (currentPersona.ragEnabled) fetchRagContext(inputText) else ""
-                    val contextPrefix = listOf(searchContext, ragContext).filter { it.isNotEmpty() }.joinToString("\n\n")
 
                     val finalRequestBody = if (contextPrefix.isNotEmpty()) {
                         val promptContext = "$contextPrefix\n\n"
