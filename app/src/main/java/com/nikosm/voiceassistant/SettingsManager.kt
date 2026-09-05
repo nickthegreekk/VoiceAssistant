@@ -227,6 +227,19 @@ class SettingsManager(context: Context) {
         return if (data != null) json.decodeFromString(data) else null
     }
 
+    // Rename support: history is persisted keyed by persona NAME, so a rename must
+    // carry the old name-keyed entry over to the new one — otherwise the old entry
+    // is orphaned on disk forever and the renamed persona starts empty. No-op when
+    // the names match or the old persona never had saved history. (If the new name
+    // collides with an existing persona's history, the renamed persona claims it —
+    // persona identity is name-based throughout the app.)
+    fun migratePersonaHistory(oldName: String, newName: String) {
+        if (oldName == newName) return
+        val data = prefs.getString("persona_messages_$oldName", null) ?: return
+        prefs.edit().putString("persona_messages_$newName", data)
+            .remove("persona_messages_$oldName").apply()
+    }
+
     fun exportBackup(): String {
         val personas = getPersonas() ?: emptyList()
         val personaMessages = personas.associate { it.name to (getPersonaMessages(it.name) ?: emptyList()) }

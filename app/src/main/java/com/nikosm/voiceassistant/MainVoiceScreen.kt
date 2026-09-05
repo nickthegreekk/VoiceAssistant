@@ -165,7 +165,14 @@ fun MainScreen(service: AssistantService?) {
 
     LaunchedEffect(personaList) {
         if (personaList.isNotEmpty()) {
-            val updated = personaList.find { it.name == currentPersona.name }
+            // Resolve the persona to mirror via the service's own selection where
+            // possible: the service re-points currentPersonaName when the active
+            // persona is renamed, so a rename no longer misses the name lookup and
+            // falls through to the personaList[0] fallback below (which silently
+            // switched the user off the persona they were using). The fallback now
+            // only fires when the active persona was genuinely deleted.
+            val lookupName = service?.currentPersona?.name ?: currentPersona.name
+            val updated = personaList.find { it.name == lookupName }
             if (updated != null) {
                 currentPersona = updated
             } else {

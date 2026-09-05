@@ -715,6 +715,18 @@ class AssistantService : Service() {
     fun updatePersona(index: Int, persona: Persona) {
         val current = _personas.value.toMutableList()
         if (index in current.indices) {
+            val oldName = current[index].name
+            if (persona.name != oldName) {
+                // Rename: move the persona's history to the new name-keyed storage
+                // entry (it would otherwise be orphaned on disk forever), and when
+                // the renamed persona is the active one, keep the selection pointing
+                // at it — same in-memory conversation, just a new identity, so no
+                // reload and no visible switch.
+                settingsManager.migratePersonaHistory(oldName, persona.name)
+                if (currentPersonaName == oldName) {
+                    currentPersonaName = persona.name
+                }
+            }
             current[index] = persona
             _personas.value = current
             saveSettings()
