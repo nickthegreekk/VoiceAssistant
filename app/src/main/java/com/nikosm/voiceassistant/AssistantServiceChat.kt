@@ -970,7 +970,7 @@ private suspend fun AssistantService.performDirectOllamaChat(baseUrl: String, mo
         msgsArray.put(JSONObject().put("role", "system").put("content", finalSystemPrompt))
 
         // Budget-aware history selection
-        val contextWindow = 8192
+        val contextWindow = persona.numCtx // Fix #3 (sibling): was hardcoded 8192 — keep the client-side trim in sync with the num_ctx this request sends to the server
         val reservedOutput = persona.maxTokens.coerceAtLeast(1024)
         val budget = maxOf(512, contextWindow - reservedOutput - estimateTokens(finalSystemPrompt) - estimateTokens(modelText))
 
@@ -1082,7 +1082,7 @@ private suspend fun AssistantService.buildCloudRequest(api: CloudApiSetting, per
     val modelText = buildModelPrompt(text, attachments)
 
     // Budget-aware history selection
-    val contextWindow = 128000 
+    val contextWindow = persona.numCtx // Fix #3: was hardcoded 128000 — the persona's own Context Window Size setting is now the trimming budget 
     val reservedOutput = persona.maxTokens.coerceAtLeast(1024)
     val budget = maxOf(512, contextWindow - reservedOutput - estimateTokens(finalSystemPrompt) - estimateTokens(modelText))
     
