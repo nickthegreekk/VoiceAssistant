@@ -459,17 +459,18 @@ fun cleanTextForTts(text: String): String {
 }
 
 fun AssistantService.playResponse(persona: Persona, file: File? = null, deviceText: String? = null) {
-    // Clean markdown markup once at the dispatch point so every on-device engine
-    // (System TTS and eSpeak) speaks readable text — the Gateway path is cleaned
-    // server-side and passes through here with file != null, so it's unaffected.
-    val cleanedText = deviceText?.let { cleanTextForTts(it) }
+    // deviceText arrives PRE-CLEANED: cleanTextForTts() now runs in the background
+    // parse blocks (Dispatchers.IO) right after the LLM response is received, so the
+    // Main thread never runs the regex passes (they used to jank on long responses).
+    // The Gateway/Kokoro path is cleaned server-side and passes through here with
+    // file != null, so it's unaffected.
     when (persona.voiceMode) {
         VoiceMode.NONE -> {
             _state.value = AssistantState.IDLE
             updateNotification("Ready to help")
         }
         VoiceMode.SYSTEM_TTS -> {
-            if (cleanedText != null) speakTextOnDevice(cleanedText)
+            if (deviceText != null) speakTextOnDevice(deviceText)
             else {
                 if (file != null) playAudioFile(file)
                 else {
@@ -479,7 +480,7 @@ fun AssistantService.playResponse(persona: Persona, file: File? = null, deviceTe
             }
         }
         VoiceMode.BUNDLED_ESPEAK -> {
-            if (cleanedText != null) speakWithEspeak(cleanedText, persona)
+            if (deviceText != null) speakWithEspeak(deviceText, persona)
             else {
                 if (file != null) playAudioFile(file)
                 else {
@@ -491,7 +492,7 @@ fun AssistantService.playResponse(persona: Persona, file: File? = null, deviceTe
         VoiceMode.GATEWAY -> {
             if (file != null) playAudioFile(file)
             else {
-                if (cleanedText != null) speakTextOnDevice(cleanedText)
+                if (deviceText != null) speakTextOnDevice(deviceText)
                 else {
                     _state.value = AssistantState.IDLE
                     updateNotification("Ready to help")
@@ -505,6 +506,11 @@ fun AssistantService.replayMessageAudio(message: ChatMessage, persona: Persona) 
     if (message.audioFilePath != null && File(message.audioFilePath).exists()) {
         playAudioFile(File(message.audioFilePath))
     } else {
-        playResponse(persona, deviceText = message.text)
+        // The stored text is the original markdown (kept for the chat bubble) — clean
+        // it off-Main, exactly like the live response flows, before speaking.
+        serviceScope.launch(Dispatchers.IO) {
+            val cleaned = cleanTextForTts(message.text)
+            withContext(Dispatchers.Main) { playResponse(persona, deviceText = cleaned) }
+        }
     }
 }

@@ -335,12 +335,19 @@ internal fun AssistantService.sendAudioToServer(file: File, currentPersona: Pers
                                 val rText = json.optString("translated_text", "")
                                 val note = json.optString("note", "")
                                 val finalRText = if (note.isNotEmpty()) "$rText\n\n($note)" else rText
-                                return@withContext listOf(uText, finalRText.ifBlank { "..." }, null, null)
+                                val displayText = finalRText.ifBlank { "..." }
+                                // Fix #5: clean markdown for TTS here, on IO — the cleaned
+                                // variant feeds the on-device engines (5th element); the
+                                // chat bubble/history keep the original markdown.
+                                val cleanedForTts = cleanTextForTts(displayText)
+                                return@withContext listOf(uText, displayText, null, null, cleanedForTts)
                             } else {
                                 val rText = response.decodeTextHeader("X-Translated-Text-B64",
                                     response.decodeTextHeader("X-Response-Text-B64", "..."))
                                 val bytes = response.body.bytes()
-                                return@withContext listOf(uText, rText, null, if (useDeviceVoice) null else bytes)
+                                // Fix #5: clean markdown for TTS on IO (see the JSON branch).
+                                val cleanedForTts = cleanTextForTts(rText)
+                                return@withContext listOf(uText, rText, null, if (useDeviceVoice) null else bytes, cleanedForTts)
                             }
                         }
                     } catch (e: Exception) {
@@ -384,7 +391,7 @@ internal fun AssistantService.sendAudioToServer(file: File, currentPersona: Pers
                 android.util.Log.d("AssistantService", "Chat response discarded — active persona changed (gen $generation)")
                 return@launch
             }
-            val (uText, rText, reasoning, bytes) = responseData as List<Any?>
+            val (uText, rText, reasoning, bytes, cleanedForTts) = responseData as List<Any?>
             val responseTimeMs = System.currentTimeMillis() - startTime
             val audioPath = if (bytes != null && !useDeviceVoice) {
                 val outFile = File(cacheDir, "response_${System.currentTimeMillis()}.wav")
@@ -398,7 +405,7 @@ internal fun AssistantService.sendAudioToServer(file: File, currentPersona: Pers
             saveSettings()
 
             if (useDeviceVoice) {
-                playResponse(currentPersona, deviceText = rText as String)
+                playResponse(currentPersona, deviceText = cleanedForTts as String)
             } else if (audioPath != null) {
                 playResponse(currentPersona, file = File(audioPath))
             }
@@ -482,14 +489,17 @@ internal fun AssistantService.sendTextMessageToServer(inputText: String, current
                      val ollamaBase = _ollamaBaseUrls.value.find { it.name == displayServer }?.url
                      if (ollamaBase != null) {
                          val directRes = performDirectOllamaChat(ollamaBase, actualModel, inputText, currentPersona, attachments = attachments, currentTurnInHistory = true)
+                         // Fix #5: clean markdown for TTS on IO — the cleaned variant feeds
+                         // the on-device engines; the chat bubble/history keep the original.
+                         val cleanedForTts = cleanTextForTts(directRes.first)
 
                          // If it's a gateway voice mode, we need to fetch audio separately
                          if (currentPersona.voiceMode == VoiceMode.GATEWAY) {
                              val audioBytes = synthesizeWithGateway(directRes.first, currentPersona)
-                             return@withContext Triple(directRes.first, directRes.second, audioBytes)
+                             return@withContext listOf(directRes.first, directRes.second, audioBytes, cleanedForTts)
                          }
 
-                         return@withContext directRes
+                         return@withContext listOf(directRes.first, directRes.second, directRes.third, cleanedForTts)
                      }
                 }
 
@@ -622,12 +632,18 @@ internal fun AssistantService.sendTextMessageToServer(inputText: String, current
                                 } else {
                                     response.decodeTextHeader("X-Response-Text-B64", "...")
                                 }
-                                return@withContext Triple(rText, null, null)
+                                // Fix #5: clean markdown for TTS on IO — the cleaned variant
+                                // feeds the on-device engines (4th element); the chat
+                                // bubble/history keep the original markdown.
+                                val cleanedForTts = cleanTextForTts(rText)
+                                return@withContext listOf(rText, null, null, cleanedForTts)
                             } else {
                                 val rText = response.decodeTextHeader("X-Translated-Text-B64",
                                     response.decodeTextHeader("X-Response-Text-B64", "..."))
                                 val bytes = response.body.bytes()
-                                return@withContext Triple(rText, null, if (useDeviceVoice) null else bytes)
+                                // Fix #5: clean markdown for TTS on IO (see the JSON branch).
+                                val cleanedForTts = cleanTextForTts(rText)
+                                return@withContext listOf(rText, null, if (useDeviceVoice) null else bytes, cleanedForTts)
                             }
                         }
                     } catch (e: Exception) {
@@ -671,19 +687,19 @@ internal fun AssistantService.sendTextMessageToServer(inputText: String, current
                 android.util.Log.d("AssistantService", "Chat response discarded — active persona changed (gen $generation)")
                 return@launch
             }
-            val (rText, reasoning, bytes) = responseData as Triple<String, String?, ByteArray?>
+            val (rText, reasoning, bytes, cleanedForTts) = responseData as List<Any?>
             val responseTimeMs = System.currentTimeMillis() - startTime
             val audioPath = if (bytes != null && !useDeviceVoice) {
                 val outFile = File(cacheDir, "response_${System.currentTimeMillis()}.wav")
-                outFile.writeBytes(bytes)
+                outFile.writeBytes(bytes as ByteArray)
                 outFile.absolutePath
             } else null
 
-            _messages.value = _messages.value + ChatMessage("assistant", rText, reasoning, audioFilePath = audioPath, responseTimeMs = responseTimeMs)
+            _messages.value = _messages.value + ChatMessage("assistant", rText as String, reasoning as? String, audioFilePath = audioPath, responseTimeMs = responseTimeMs)
             saveSettings()
 
             if (useDeviceVoice) {
-                playResponse(currentPersona, deviceText = rText)
+                playResponse(currentPersona, deviceText = cleanedForTts as String)
             } else if (audioPath != null) {
                 playResponse(currentPersona, file = File(audioPath))
             }
@@ -856,7 +872,11 @@ private fun AssistantService.performCloudChat(text: String, persona: Persona, us
                             _totalCost.value += usage.cost
                             saveSettings()
                         }
-                        responseText to reasonText
+                        // Fix #5: clean markdown for TTS here, on IO — the cleaned variant
+                        // feeds the on-device engines (3rd element); the chat bubble/history
+                        // keep the original markdown.
+                        val cleanedForTts = cleanTextForTts(responseText)
+                        Triple(responseText, reasonText, cleanedForTts)
                     }
                 } finally {
                     // A6: clear the in-flight reference on success AND failure — but only
@@ -877,7 +897,7 @@ private fun AssistantService.performCloudChat(text: String, persona: Persona, us
             if (useDeviceVoice) {
                 _messages.value = _messages.value + ChatMessage("assistant", responseData.first, responseData.second, responseTimeMs = responseTimeMs)
                 saveSettings()
-                playResponse(persona, deviceText = responseData.first)
+                playResponse(persona, deviceText = responseData.third)
             } else if (persona.voiceMode == VoiceMode.GATEWAY) {
                 val audioBytes = synthesizeWithGateway(responseData.first, persona)
                 val audioPath = if (audioBytes != null) {
