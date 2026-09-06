@@ -1,5 +1,6 @@
 package com.nikosm.voiceassistant
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.Request
@@ -52,6 +53,8 @@ internal suspend fun AssistantService.fetchWebSearchContext(query: String): Stri
                 res
             }
         }
+    } catch (e: CancellationException) {
+        throw e
     } catch (e: Exception) {
         android.util.Log.e("AssistantService", "Web search failed", e)
         ""
@@ -97,6 +100,8 @@ internal suspend fun AssistantService.fetchNewsContext(): String {
                 sb.toString()
             }
         }
+    } catch (e: CancellationException) {
+        throw e
     } catch (e: Exception) {
         android.util.Log.e("AssistantService", "News fetch failed", e)
         ""

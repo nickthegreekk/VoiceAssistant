@@ -512,6 +512,8 @@ class AssistantService : Service() {
                         ServerConnectionResult(success = false, httpCode = response.code, detail = response.message.ifBlank { null })
                     }
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 ServerConnectionResult(success = false, httpCode = null, detail = e.message ?: e.javaClass.simpleName)
             }
@@ -838,6 +840,8 @@ class AssistantService : Service() {
                     }
                 }
                 Toast.makeText(applicationContext, "Backup exported successfully", Toast.LENGTH_SHORT).show()
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 Toast.makeText(applicationContext, "Export failed: ${e.message}", Toast.LENGTH_LONG).show()
             }
@@ -858,6 +862,8 @@ class AssistantService : Service() {
                         Toast.LENGTH_SHORT
                     ).show()
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 Toast.makeText(applicationContext, "Import failed: ${e.message}", Toast.LENGTH_LONG).show()
             }
@@ -1154,6 +1160,8 @@ class AssistantService : Service() {
                     _fetchedCloudModels.value = current
                     _serverStatus.value = statusMap
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 statusMap[api.name] = e.message ?: "Cloud fetch failed"
                 withContext(Dispatchers.Main) { _serverStatus.value = statusMap }

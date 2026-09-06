@@ -147,6 +147,8 @@ internal fun AssistantService.testGatewayVoice(text: String, url: String, langua
                 outFile.writeBytes(bytes)
                 playAudioFile(outFile)
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             android.util.Log.e("AssistantService", "Gateway test failed", e)
         } finally {
@@ -226,6 +228,8 @@ internal suspend fun AssistantService.synthesizeWithGateway(text: String, person
                 if (currentCall === call) currentCall = null
             }
         }
+    } catch (e: CancellationException) {
+        throw e
     } catch (e: Exception) {
         android.util.Log.e("AssistantService", "Gateway synthesis failed", e)
         null
@@ -316,6 +320,8 @@ internal suspend fun AssistantService.transcribeWithGateway(file: File, persona:
 
             if (result.isNotBlank()) return result
             throw Exception("Empty transcription result")
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             // Mark failed with cooldown
             withContext(Dispatchers.Main) {
@@ -386,6 +392,8 @@ internal suspend fun AssistantService.uploadKnowledgeDocument(
                 RagResult.Success(Unit)
             }
         }
+    } catch (e: CancellationException) {
+        throw e
     } catch (e: Exception) {
         RagResult.Failure(Exception("Failed to upload document to RAG server: ${e.message}", e))
     }
@@ -434,6 +442,8 @@ internal suspend fun AssistantService.getKnowledgeCount(
                 RagResult.Success(count)
             }
         }
+    } catch (e: CancellationException) {
+        throw e
     } catch (e: Exception) {
         RagResult.Failure(Exception("Failed to query RAG server: ${e.message}", e))
     }
@@ -475,6 +485,8 @@ internal suspend fun AssistantService.fetchRagContext(query: String): String {
                 if (currentCall === call) currentCall = null
             }
         }
+    } catch (e: CancellationException) {
+        throw e
     } catch (e: Exception) {
         android.util.Log.e("AssistantService", "RAG retrieval failed", e)
         ""

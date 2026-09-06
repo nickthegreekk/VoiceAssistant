@@ -3,6 +3,7 @@ package com.nikosm.voiceassistant
 import android.net.Uri
 import android.util.Base64
 import androidx.compose.ui.graphics.Color
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -178,6 +179,8 @@ internal fun AssistantService.sendAudioToServer(file: File, currentPersona: Pers
                     val transcribedText = transcribeWithGateway(file, currentPersona)
                         ?: throw Exception("Could not transcribe audio. Check Gateway connection.")
                     performCloudChat(transcribedText, currentPersona, useDeviceVoice, startTime, currentTurnInHistory = false, generation = generation)
+                } catch (e: CancellationException) {
+                    throw e
                 } catch (e: Exception) {
                     if (!isChatRequestCurrent(generation)) {
                         android.util.Log.d("AssistantService", "Voice chat request superseded by a newer request — discarding failure: ${e.message}")
@@ -399,6 +402,8 @@ internal fun AssistantService.sendAudioToServer(file: File, currentPersona: Pers
             } else if (audioPath != null) {
                 playResponse(currentPersona, file = File(audioPath))
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             if (!isChatRequestCurrent(generation)) {
                 android.util.Log.d("AssistantService", "Chat request superseded by a newer request — discarding failure: ${e.message}")
@@ -682,6 +687,8 @@ internal fun AssistantService.sendTextMessageToServer(inputText: String, current
             } else if (audioPath != null) {
                 playResponse(currentPersona, file = File(audioPath))
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             if (!isChatRequestCurrent(generation)) {
                 android.util.Log.d("AssistantService", "Chat request superseded by a newer request — discarding failure: ${e.message}")
@@ -889,6 +896,8 @@ private fun AssistantService.performCloudChat(text: String, persona: Persona, us
                 _messages.value = _messages.value + ChatMessage("assistant", responseData.first, responseData.second, responseTimeMs = responseTimeMs)
                 saveSettings()
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             if (!isChatRequestCurrent(generation)) {
                 android.util.Log.d("AssistantService", "Cloud chat request superseded — discarding failure: ${e.message}")
@@ -1355,6 +1364,8 @@ fun AssistantService.syncOpenRouterPricing(force: Boolean = false) {
                 
                 android.util.Log.d("PricingSync", "Synced ${newPricing.size} models from OpenRouter")
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             android.util.Log.e("PricingSync", "Sync failed", e)
         }
