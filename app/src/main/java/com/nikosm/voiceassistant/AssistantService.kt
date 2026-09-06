@@ -975,7 +975,14 @@ class AssistantService : Service() {
         // AudioFocusRequest when the field is null (and legally re-requests focus
         // on a reused one), so the normal record -> playback flow is unaffected.
         abandonAssistantFocus()
-        outputFile?.let { sendAudioToServer(it, currentPersona) }
+        // Fix #10: claim and clear the field BEFORE sending. stopRecording() can run
+        // twice (double-tap on the stop control, or a state race re-invoking it) —
+        // without this, every call after the first re-sent the same previously
+        // recorded file as if it were a new user turn. A repeat call now finds a
+        // null field and has nothing left to send.
+        val fileToSend = outputFile
+        outputFile = null
+        fileToSend?.let { sendAudioToServer(it, currentPersona) }
     }
 
     fun testAudio(text: String, mode: VoiceMode, backendUrl: String, targetLanguage: String, isTranslator: Boolean, engine: String = "kokoro", kokoroVoice: String = "af_heart") {
