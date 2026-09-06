@@ -571,11 +571,6 @@ class AssistantService : Service() {
             switchPersona(loadedPersonas[0])
         }
 
-        settingsManager.getMessages()?.let {
-            // Optional: Migrate global messages to the first persona if it has no history?
-            // For now, just keep per-persona logic clean.
-        }
-
         _ollamaBaseUrls.value = settingsManager.getOllamaBases() ?: emptyList()
         _totalCost.value = settingsManager.getTotalCost()
         _favoriteModels.value = settingsManager.getFavoriteModels() ?: emptyList()
@@ -1069,8 +1064,6 @@ class AssistantService : Service() {
         currentPersonaName?.let { settingsManager.savePersonaMessages(it, emptyList()) }
         saveSettings() 
     }
-    fun removeMessagesFrom(index: Int) { _messages.value = _messages.value.take(index); saveSettings() }
-    
     fun updateMessage(index: Int, newText: String) {
         val current = _messages.value.toMutableList()
         if (index in current.indices) {

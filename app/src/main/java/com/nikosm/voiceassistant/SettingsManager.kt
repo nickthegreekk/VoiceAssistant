@@ -363,8 +363,14 @@ class SettingsManager(context: Context) {
     }
 
     private fun importLegacyBackup(jsonString: String): Boolean {
+        // Fix #14: report whether anything was ACTUALLY imported. This used to return
+        // true for any valid JSON object (and even for real legacy backups it only
+        // restores server_bases), so the UI showed "Import successful" for no-op and
+        // partial imports alike. Legacy keys beyond server_bases have no known schema —
+        // they are skipped rather than guessed at.
         return try {
             val backup = JSONObject(jsonString)
+            var imported = false
             if (backup.has("server_bases")) {
                 val array = backup.getJSONArray("server_bases")
                 val bases = mutableListOf<ServerConfig>()
@@ -373,10 +379,14 @@ class SettingsManager(context: Context) {
                     if (item is String) bases.add(ServerConfig("Server ${i + 1}", item))
                     else if (item is JSONObject) bases.add(ServerConfig(item.optString("name", "Server $i"), item.getString("url")))
                 }
-                saveServerBases(bases)
+                // An explicitly empty list restores nothing — don't clobber the current
+                // servers with it and don't claim success either.
+                if (bases.isNotEmpty()) {
+                    saveServerBases(bases)
+                    imported = true
+                }
             }
-            // ... (rest of legacy import if needed, but above handles the main part)
-            true
+            imported
         } catch (e: Exception) { false }
     }
 

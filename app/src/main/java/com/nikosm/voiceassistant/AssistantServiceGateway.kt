@@ -408,7 +408,13 @@ internal suspend fun AssistantService.uploadKnowledgeDocument(
 internal fun AssistantService.uploadKnowledgeDocumentsToRag(uris: List<Uri>, ragUrl: String) {
     uris.forEach { uri ->
         serviceScope.launch {
-            val name = uri.path?.substringAfterLast("/", "document")?.substringAfterLast(".") ?: "document"
+            // Fix #15: the knowledge-base source label must be the document's file NAME
+            // ("notes.txt"). The old chain (…substringAfterLast('/')…substringAfterLast('.'))
+            // additionally stripped the extension, labelling every upload "txt".
+            val name = (uri.lastPathSegment ?: uri.path ?: "")
+                .substringAfterLast('/')
+                .takeIf { it.isNotBlank() }
+                ?: "document"
             try {
                 _knowledgeUploadStatus.value = "Uploading $name..."
                 val text = readAttachmentText(uri)

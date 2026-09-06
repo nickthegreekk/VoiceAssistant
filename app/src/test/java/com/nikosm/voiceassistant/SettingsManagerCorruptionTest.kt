@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.content.SharedPreferences
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -216,5 +217,47 @@ class SettingsManagerCorruptionTest {
         val pricing = mapOf("llama3" to ModelPricing(prompt = 0.1, completion = 0.2))
         manager.saveModelPricing(pricing)
         assertEquals(pricing, manager.getModelPricing())
+    }
+
+    // ---- Fix #14: legacy/no-op imports must not be reported as successes
+
+    @Test fun `legacy backup with server_bases imports and reports success`() {
+        val (manager, _) = newManagerWithPlainPrefs()
+        val legacy = "{\"server_bases\":[\"http://10.0.0.2:11434\",\"http://10.0.0.3:11434\"]}"
+        assertTrue(manager.importBackup(legacy))
+        assertEquals(
+            listOf(ServerConfig("Server 1", "http://10.0.0.2:11434"), ServerConfig("Server 2", "http://10.0.0.3:11434")),
+            manager.getServerBases()
+        )
+    }
+
+    @Test fun `arbitrary json object is not reported as a successful import`() {
+        val (manager, prefs) = newManagerWithPlainPrefs()
+        assertFalse(manager.importBackup("{\"unrelated\":\"value\"}"))
+        assertNull(manager.getServerBases())
+        assertFalse(prefs.getAll().containsKey("server_bases_v2"))
+    }
+
+    @Test fun `garbage input fails import`() {
+        val (manager, _) = newManagerWithPlainPrefs()
+        assertFalse(manager.importBackup("not json at all"))
+    }
+
+    @Test fun `explicitly empty legacy server_bases imports nothing`() {
+        val (manager, prefs) = newManagerWithPlainPrefs()
+        assertFalse(manager.importBackup("{\"server_bases\":[]}"))
+        assertFalse(prefs.getAll().containsKey("server_bases_v2"))
+    }
+
+    @Test fun `new-format backup round-trips`() {
+        val (manager, _) = newManagerWithPlainPrefs()
+        manager.saveServerBases(listOf(ServerConfig("S1", "http://10.0.0.2:11434")))
+        manager.saveTotalCost(1.25)
+        val export = manager.exportBackup()
+
+        val (manager2, _) = newManagerWithPlainPrefs()
+        assertTrue(manager2.importBackup(export))
+        assertEquals(listOf(ServerConfig("S1", "http://10.0.0.2:11434")), manager2.getServerBases())
+        assertEquals(1.25, manager2.getTotalCost(), 0.0)
     }
 }

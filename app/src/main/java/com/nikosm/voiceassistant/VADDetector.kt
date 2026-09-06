@@ -56,35 +56,38 @@ class VADDetector(context: Context) {
         container["sr"] = srTensor
 
         return try {
-            val result = s.run(container)
+            // OrtSession.Result is AutoCloseable and holds native memory: wrap it in
+            // use {} so EVERY path closes it — the previous code only closed it after
+            // a fully successful inference, leaking the native result on the
+            // missing-output early return and on any cast/class-shape exception.
+            s.run(container).use { result ->
+                val outputObj = result.get("output").orElse(null)
+                val stateNObj = result.get("stateN").orElse(null)
 
-            @Suppress("UNCHECKED_CAST")
-            val outputObj = result.get("output").orElse(null)
-            @Suppress("UNCHECKED_CAST")
-            val stateNObj = result.get("stateN").orElse(null)
-            
-            if (outputObj == null || stateNObj == null) return 0f
+                if (outputObj == null || stateNObj == null) return@use 0f
 
-            val rawOutput = (outputObj.value as Array<FloatArray>)[0][0]
-            
-            // If the model returns a value outside [0, 1], it's likely a logit and needs sigmoid.
-            val prob = if (rawOutput < 0f || rawOutput > 1f) {
-                1.0f / (1.0f + kotlin.math.exp(-rawOutput.toDouble()).toFloat())
-            } else {
-                rawOutput
-            }
+                @Suppress("UNCHECKED_CAST")
+                val rawOutput = (outputObj.value as Array<FloatArray>)[0][0]
 
-            val newState = stateNObj.value as Array<Array<FloatArray>>
-            var idx = 0
-            for (i in 0 until 2) {
-                for (k in 0 until 128) {
-                    state[idx] = newState[i][0][k]
-                    idx++
+                // If the model returns a value outside [0, 1], it's likely a logit and needs sigmoid.
+                val prob = if (rawOutput < 0f || rawOutput > 1f) {
+                    1.0f / (1.0f + kotlin.math.exp(-rawOutput.toDouble()).toFloat())
+                } else {
+                    rawOutput
                 }
-            }
 
-            result.close()
-            prob
+                @Suppress("UNCHECKED_CAST")
+                val newState = stateNObj.value as Array<Array<FloatArray>>
+                var idx = 0
+                for (i in 0 until 2) {
+                    for (k in 0 until 128) {
+                        state[idx] = newState[i][0][k]
+                        idx++
+                    }
+                }
+
+                prob
+            }
         } catch (e: Exception) {
             Log.e("VADDetector", "Inference failed: ${e.message}")
             0f

@@ -77,6 +77,11 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:5.5.0")
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.19.2")
     testImplementation(libs.junit)
+    // Real org.json for JVM tests: the android.jar stub's JSONObject returns default
+    // values under returnDefaultValues, which would make importLegacyBackup's parsing
+    // untestable (has() always false). The real artifact shadows it on the test
+    // classpath only.
+    testImplementation("org.json:json:20240303")
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
     androidTestImplementation(libs.androidx.espresso.core)
