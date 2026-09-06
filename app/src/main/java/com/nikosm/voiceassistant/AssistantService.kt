@@ -306,7 +306,22 @@ class AssistantService : Service() {
                 }
                 currentAudioTrack = null
                 tts.stop()
-                _state.value = AssistantState.IDLE
+                // Fix #13 part 1: only fall back to IDLE when the state is genuinely a
+                // playback state. A transient loss while focus is held by an active
+                // recording/processing phase (LISTENING/THINKING) must not reset the
+                // state — the recorder/pipeline keeps running and would end up
+                // desynced from the UI if an unrelated transient loss IDLE'd it.
+                if (_state.value == AssistantState.SPEAKING) {
+                    _state.value = AssistantState.IDLE
+                }
+                // Fix #13 part 2: stopAudio()-style routing cleanup. The
+                // IN_COMMUNICATION mode + earpiece communication device set for the
+                // (now stopped) playback used to survive the loss and fight the
+                // telephony stack (e.g. an incoming call) for the audio path. The
+                // GAIN branch below re-establishes routing when a paused playback
+                // resumes.
+                audioManager.mode = AudioManager.MODE_NORMAL
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) audioManager.clearCommunicationDevice()
             }
             AudioManager.AUDIOFOCUS_LOSS -> {
                 // A8: permanent loss — stop all three engines and abandon the focus
@@ -319,6 +334,25 @@ class AssistantService : Service() {
                     currentPlayer?.start()
                     pausedByFocusLoss = false
                     _state.value = AssistantState.SPEAKING
+                    // Fix #13 part 2 (continued): the transient-loss branch reset the
+                    // audio mode/communication device, so re-establish the routing the
+                    // paused playback was using before it was interrupted (mirrors the
+                    // GRANTED branch of requestAssistantFocus) — otherwise a resumed
+                    // earpiece playback would come out of the speaker.
+                    if (earpieceMode.value) {
+                        audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+                        @Suppress("DEPRECATION")
+                        audioManager.isSpeakerphoneOn = false
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                            val earpiece = audioManager.availableCommunicationDevices.find { it.type == AudioDeviceInfo.TYPE_BUILTIN_EARPIECE }
+                            if (earpiece != null) {
+                                audioManager.setCommunicationDevice(earpiece)
+                            }
+                        }
+                    } else {
+                        audioManager.mode = AudioManager.MODE_NORMAL
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) audioManager.clearCommunicationDevice()
+                    }
                 }
             }
         }

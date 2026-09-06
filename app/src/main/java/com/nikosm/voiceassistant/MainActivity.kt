@@ -109,11 +109,38 @@ private val EditingPersonaSaver = Saver<Pair<Int, Persona>?, String>(
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         Intent(this, AssistantService::class.java).also { intent ->
-            startForegroundService(intent)
+            // FGS-timeout hardening: startForegroundService() puts the system on a
+            // ~10s clock requiring startForeground() — but onStartCommand can only
+            // legally do that once RECORD_AUDIO is granted (the manifest FGS type is
+            // microphone), so a fresh install whose permission dialogs took longer
+            // than the clock had its whole process killed mid-flow. Start the
+            // service as a plain started service while the mic permission is still
+            // missing (no deadline — the dialogs may take as long as the user
+            // needs); the permission result callback promotes it to foreground the
+            // moment RECORD_AUDIO lands (see MainVoiceScreen.permissionLauncher and
+            // onResume below).
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+                startForegroundService(intent)
+            } else {
+                startService(intent)
+            }
             bindService(intent, connection, BIND_AUTO_CREATE)
         }
         enableEdgeToEdge()
         setContent { VoiceAssistantTheme { MainScreen(assistantService) } }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // Hardening companion: no in-app result callback fires when RECORD_AUDIO is
+        // granted from system Settings (or after a process recreation mid-dialog
+        // flow), so the service could otherwise stay a plain started service while
+        // the mic is already usable. Promote on every resume when the service is
+        // idle — promoteToForeground() is mic-guarded and startForeground() is
+        // idempotent; the IDLE guard avoids clobbering a "Listening..."/"Thinking..."
+        // notification with the idle one.
+        val svc = assistantService ?: return
+        if (svc._state.value == AssistantState.IDLE) svc.promoteToForeground()
     }
 
     override fun onDestroy() {

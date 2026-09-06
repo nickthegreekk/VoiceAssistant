@@ -135,9 +135,16 @@ fun MainScreen(service: AssistantService?) {
         attachedFiles = (attachedFiles + uris).distinct()
     }
 
-    val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+    // Fix #12: RECORD_AUDIO and POST_NOTIFICATIONS must be requested through ONE
+    // multi-permission launcher. Launching two single-permission requests back-to-back
+    // on the same ActivityResultLauncher displaces the first request before its result
+    // callback fires — the mic grant/deny result was lost and promoteToForeground()
+    // (which depends on that result) never ran until the flow was manually retriggered.
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { grants ->
         // Promote the service to foreground once RECORD_AUDIO is granted
-        if (granted) {
+        if (grants[Manifest.permission.RECORD_AUDIO] == true) {
             service?.promoteToForeground()
         }
     }
@@ -260,8 +267,20 @@ fun MainScreen(service: AssistantService?) {
     LaunchedEffect(textModeOpen) { if (textModeOpen) focusRequester.requestFocus() }
 
     LaunchedEffect(Unit) {
-        if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) permissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        // Fix #12: collect every still-missing runtime permission and request them all
+        // in a single launch (see the comment on permissionLauncher — two sequential
+        // single-permission launches displace each other's results).
+        val needed = buildList {
+            if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                add(Manifest.permission.RECORD_AUDIO)
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+            ) {
+                add(Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }
+        if (needed.isNotEmpty()) permissionLauncher.launch(needed.toTypedArray())
     }
 
     // Service still binding — first-run status isn't knowable yet (isFirstRun's
