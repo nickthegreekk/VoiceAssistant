@@ -238,17 +238,51 @@ class AssistantService : Service() {
     lateinit var tts: TextToSpeech
     var ttsReady = false
     private var _espeakEngine: EspeakEngine? = null
+    // espeak-ng keeps its state in process-global natives, so EspeakEngine construction
+    // must be exactly-once: two concurrent constructors (e.g. the warm-up racing a first
+    // playback, or the two warm-up entry points firing within the same onCreate) call
+    // espeak_Initialize twice on different threads and the native side aborts with
+    // "pthread_mutex_lock called on a destroyed mutex" (observed on device). The fast
+    // path stays lock-free; the lock is only ever held while constructing/releasing —
+    // synthesis runs on the returned reference outside any lock, as before.
+    private val espeakLock = Any()
+
     val espeakEngine: EspeakEngine?
         get() {
-            if (_espeakEngine == null) {
-                try {
-                    _espeakEngine = EspeakEngine(this)
+            _espeakEngine?.let { return it }
+            synchronized(espeakLock) {
+                _espeakEngine?.let { return it }
+                return try {
+                    EspeakEngine(this).also { _espeakEngine = it }
                 } catch (e: Throwable) {
                     android.util.Log.e("AssistantService", "Failed to init eSpeak NG: ${e.message}")
+                    null
                 }
             }
-            return _espeakEngine
         }
+
+    // Proactively builds the eSpeak engine on Dispatchers.IO so the first BUNDLED_ESPEAK
+    // playback never pays EspeakEngine construction on Main (native lib load, the
+    // first-launch ~13MB/439-file espeak-ng-data asset copy, and espeak_Initialize —
+    // historically a noticeable stall on the first playResponse -> speakWithEspeak of
+    // each session). No-op unless at least one configured persona actually voices
+    // through BUNDLED_ESPEAK, so SYSTEM_TTS/GATEWAY/NONE-only setups pay nothing.
+    // Idempotent: construction happens at most once per service instance (the getter
+    // backs onto _espeakEngine), and a failed construction keeps returning null exactly
+    // as before — playback then bails with the existing "engine unavailable" path.
+    internal fun warmUpEspeakEngine() {
+        if (_espeakEngine != null) return
+        if (_personas.value.none { it.voiceMode == VoiceMode.BUNDLED_ESPEAK }) return
+        serviceScope.launch(Dispatchers.IO) {
+            val start = System.currentTimeMillis()
+            if (espeakEngine != null) {
+                android.util.Log.i(
+                    "AssistantService",
+                    "eSpeak engine warmed up in ${System.currentTimeMillis() - start}ms"
+                )
+            }
+        }
+    }
 
     lateinit var audioManager: AudioManager
     var audioFocusRequest: AudioFocusRequest? = null
@@ -395,6 +429,12 @@ class AssistantService : Service() {
                 delay(30000) // Every 30 seconds
             }
         }
+
+        // eSpeak warm-up: build the engine off-Main now (persona list is loaded above by
+        // loadSettings()) so the first BUNDLED_ESPEAK playback of this session finds it
+        // ready instead of stalling Main on lazy construction. Self-guards inside —
+        // see warmUpEspeakEngine().
+        warmUpEspeakEngine()
     }
 
     fun forceCheckHealth(target: ServerConfig, isGateway: Boolean) {
@@ -857,14 +897,20 @@ class AssistantService : Service() {
         tts.shutdown()
         vadRecorder?.stop()
         vadDetector?.close()
-        // A13: release the eSpeak NG native engine (espeak_Terminate + frees its static
-        // output buffer). Previously this was dropped on every service teardown, leaking
-        // the native engine (and its allocation) for the process lifetime. The native
-        // side stays valid until nativeTerminate(); a subsequent espeakEngine accessor
-        // call lazily reinitializes a fresh engine. Deliberately placed AFTER
-        // serviceScope.cancel()/stopAudio() so any in-flight kotlinx blocking synthesize
-        // coroutine has been cancelled — see the documented limitation below.
-        espeakEngine?.release()
+        // Released under espeakLock so teardown can never race an in-flight warm-up
+        // construction (release-then-assign would strand a live native engine).
+        // Backing field, NOT the espeakEngine getter — the getter would construct an
+        // engine here just to release it, i.e. main-thread init at teardown for every
+        // user, which would also defeat warmUpEspeakEngine()'s zero-cost guarantee for
+        // setups without a BUNDLED_ESPEAK persona. Nulling afterwards means any
+        // straggler accessor lazily builds a fresh engine instead of getting the
+        // terminated one. Deliberately placed AFTER serviceScope.cancel()/stopAudio()
+        // so any in-flight kotlinx blocking synthesize coroutine has been cancelled —
+        // see the documented limitation below.
+        synchronized(espeakLock) {
+            _espeakEngine?.release()
+            _espeakEngine = null
+        }
     }
 
     private fun createNotificationChannel() {
@@ -957,6 +1003,10 @@ class AssistantService : Service() {
         
         currentPersonaName = persona.name
         _messages.value = settingsManager.getPersonaMessages(persona.name) ?: emptyList()
+        // Just activated a persona mid-session — if it voices through bundled eSpeak,
+        // start building that engine now on Dispatchers.IO instead of paying lazy init
+        // on Main at the first playback. Idempotent (no-op if already warmed/built).
+        if (persona.voiceMode == VoiceMode.BUNDLED_ESPEAK) warmUpEspeakEngine()
     }
 
     // The persona the service currently considers active. The UI seeds itself from
