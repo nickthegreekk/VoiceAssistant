@@ -21,7 +21,7 @@ android {
         applicationId = "com.nikosm.voiceassistant"
         minSdk = 31
         targetSdk = 37
-        versionCode = 3
+        versionCode = 4
         versionName = "1.0.4.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
