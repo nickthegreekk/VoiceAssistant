@@ -1,4 +1,4 @@
-# Celeste VoiceAssistant
+# VoiceAssistant
 
 A privacy-focused, open-source Android voice assistant that connects to multiple LLM providers. Features hands-free voice interaction, on-device voice activity detection, and support for both local (Ollama) and cloud-based AI models.
 
@@ -25,7 +25,7 @@ Pre-configured personas for different use cases:
 - **Assistant** - General helpful assistant
 - **Friend** - Conversational and warm personality
 - **Claude, GPT-4o, DeepSeek, Gemini** - Cloud provider personas
-- **Translator** - Multi-language translation support (16 languages)
+- **Translator** - Real-time speech translation, 16 languages (see below)
 - **Custom LLM** - Connect to any OpenAI-compatible server
 
 ### Translator Mode
@@ -59,6 +59,10 @@ This is genuinely fast enough for real use. Tested live with a native Spanish sp
 - **Certificate pinning** - TOFU (Trust On First Use) with user approval for self-signed certs
 - **No account required** - Direct connection to your chosen LLM provider
 
+### Update Checks
+
+Celeste checks GitHub's public Releases API once per day and shows a small, dismissible banner if a newer version is available — it never downloads or installs anything automatically. Tapping "View" opens the release page in your browser so you can review the changes and download the new APK yourself, the same way as the initial install. This works regardless of how you installed the app (direct APK or F-Droid), though F-Droid users will typically get updates through F-Droid's own mechanism first.
+
 ## Requirements
 
 - Android 12+ (API 31+)
@@ -87,7 +91,8 @@ Once running, add your Gateway's URL in Settings → Servers, and select it as t
 1. Install Ollama on your server
 2. Pull your desired model: `ollama pull llama3`
 3. In the app, add your Ollama server URL (e.g., `http://192.168.1.100:11434`)
-4. Select a persona and start chatting
+4. Choose an **Auth Type** for the server — None (default, for an open local server on your own trusted network), Username + Password, or API Key — matching whatever (if anything) protects your server
+5. Select a persona and start chatting
 
 ### Cloud Provider
 1. Go to Settings → Cloud APIs
@@ -98,8 +103,8 @@ Once running, add your Gateway's URL in Settings → Servers, and select it as t
 ### RAG (Optional)
 1. Set up a RAG server with your knowledge base
 2. In Settings, configure:
-    - RAG Server URL
-    - Username and Password
+   - RAG Server URL
+   - Username and Password
 3. Enable RAG in the persona settings
 
 ### Web Search (Optional)
@@ -152,8 +157,3 @@ This app connects to third-party AI services. You are responsible for:
 - Any costs incurred from API usage
 
 The developers of this app are not responsible for any data shared with third-party services.
-
-
-### App screenshots
-<img width="300" height="667" alt="Screenshot_20260902-102433_Celeste" src="https://github.com/user-attachments/assets/9ea57b8f-f966-499a-af5e-77e59ef3c41a" />
-<img width="300" height="667" alt="Screenshot_20260902-103927_Celeste" src="https://github.com/user-attachments/assets/90466b2c-3fb7-4f70-8908-a378331fb407" />
