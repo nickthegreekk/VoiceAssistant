@@ -523,6 +523,24 @@ class SettingsManager(context: Context) {
     fun getLastPriceSyncTimestamp(): Long {
         return prefs.getLong("last_price_sync_ts", 0L)
     }
+
+    // ---- App-update check (Fix: update banner) — plain prefs, no JSON, no guards needed
+
+    fun saveLastUpdateCheckTimestamp(timestamp: Long) {
+        prefs.edit().putLong("last_update_check_ts", timestamp).apply()
+    }
+
+    fun getLastUpdateCheckTimestamp(): Long {
+        return prefs.getLong("last_update_check_ts", 0L)
+    }
+
+    fun saveDismissedUpdateVersion(version: String) {
+        prefs.edit().putString("dismissed_update_version", version).apply()
+    }
+
+    fun getDismissedUpdateVersion(): String? {
+        return prefs.getString("dismissed_update_version", null)
+    }
 }
 
 @kotlinx.serialization.Serializable

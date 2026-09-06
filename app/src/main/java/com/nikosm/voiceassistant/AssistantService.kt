@@ -232,6 +232,11 @@ class AssistantService : Service() {
     internal val _pendingCertApproval = MutableStateFlow<CertApprovalRequest?>(null)
     val pendingCertApproval = _pendingCertApproval.asStateFlow()
 
+    // Update-check result (see checkForAppUpdate): non-null only while a newer
+    // version is available AND the user hasn't dismissed that specific version.
+    private val _updateAvailable = MutableStateFlow<UpdateInfo?>(null)
+    val updateAvailable = _updateAvailable.asStateFlow()
+
     private val _handsFreeMode = MutableStateFlow(false)
     val handsFreeMode = _handsFreeMode.asStateFlow()
 
@@ -282,6 +287,82 @@ class AssistantService : Service() {
                 )
             }
         }
+    }
+
+    // ---- Update check (once per day, silent on any failure) ----------------------------
+
+    // Runs on serviceScope/IO at service start. Throttled by a last-check timestamp in
+    // SettingsManager so GitHub's API is hit at most ~once a day regardless of how
+    // often the app launches. Uses standardClient — GitHub is genuine third-party
+    // infrastructure with CA-validated TLS, unlike the self-hosted gateways that use
+    // `client`. Failures (offline, GitHub down, rate-limited) are swallowed by design:
+    // this is a nice-to-have and must never surface an error to the user.
+    private fun checkForAppUpdate() {
+        serviceScope.launch(Dispatchers.IO) {
+            try {
+                val now = System.currentTimeMillis()
+                if (now - settingsManager.getLastUpdateCheckTimestamp() < UPDATE_CHECK_INTERVAL_MS) {
+                    if (BuildConfig.DEBUG) android.util.Log.d("AssistantService", "Update check skipped (checked within the last 24h)")
+                    return@launch
+                }
+                // Saved before the request: the daily cap holds even when the call
+                // fails, so an offline launch never retries until tomorrow.
+                settingsManager.saveLastUpdateCheckTimestamp(now)
+
+                val request = Request.Builder()
+                    .url("https://api.github.com/repos/nickthegreekk/VoiceAssistant/releases/latest")
+                    .header("Accept", "application/vnd.github+json")
+                    .build()
+                standardClient.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) {
+                        if (BuildConfig.DEBUG) android.util.Log.d("AssistantService", "Update check: HTTP ${response.code}")
+                        return@launch
+                    }
+                    val json = JSONObject(response.body.string())
+                    val tag = json.optString("tag_name").trim()
+                    val releaseUrl = json.optString("html_url").trim()
+                    if (tag.isEmpty() || releaseUrl.isEmpty()) return@launch
+
+                    val latest = tag.removePrefix("v").removePrefix("V")
+                    if (!isNewerVersion(latest, BuildConfig.VERSION_NAME)) return@launch
+                    // Dismissal memory: a dismissed TAG stays hidden until a NEWER
+                    // version is published (keyed on the raw tag, so a future "v"-prefixed
+                    // tag counts as a different release).
+                    if (settingsManager.getDismissedUpdateVersion() == tag) return@launch
+
+                    _updateAvailable.value = UpdateInfo(latest, releaseUrl)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // Silent by design (nice-to-have check); debug-only log for diagnosability.
+                if (BuildConfig.DEBUG) android.util.Log.d("AssistantService", "Update check failed: ${e.message}")
+            }
+        }
+    }
+
+    // Proper numeric comparison, not string equality: 1.0.10 > 1.0.9, "v"/"V" prefixes
+    // and "-beta"-style suffixes are tolerated (non-numeric segments count as 0).
+    private fun isNewerVersion(latest: String, current: String): Boolean {
+        fun segments(version: String): List<Int> =
+            version.trim().removePrefix("v").removePrefix("V")
+                .substringBefore('-')
+                .split('.')
+                .map { seg -> seg.takeWhile { ch -> ch.isDigit() }.toIntOrNull() ?: 0 }
+        val a = segments(latest)
+        val b = segments(current)
+        for (i in 0 until maxOf(a.size, b.size)) {
+            val x = a.getOrElse(i) { 0 }
+            val y = b.getOrElse(i) { 0 }
+            if (x != y) return x > y
+        }
+        return false
+    }
+
+    /** Remembers the dismissed release tag and hides the banner for this session. */
+    fun dismissUpdate(version: String) {
+        settingsManager.saveDismissedUpdateVersion(version)
+        _updateAvailable.value = null
     }
 
     lateinit var audioManager: AudioManager
@@ -469,6 +550,9 @@ class AssistantService : Service() {
         // ready instead of stalling Main on lazy construction. Self-guards inside —
         // see warmUpEspeakEngine().
         warmUpEspeakEngine()
+
+        // Update check: throttled to once per day, silent on any failure.
+        checkForAppUpdate()
     }
 
     fun forceCheckHealth(target: ServerConfig, isGateway: Boolean) {
@@ -1300,3 +1384,8 @@ class AssistantService : Service() {
         updateNotification("Ready to help")
     }
 }
+
+private const val UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000L
+
+/** Latest GitHub release advertised by the update check (AssistantService.checkForAppUpdate). */
+data class UpdateInfo(val version: String, val url: String)
