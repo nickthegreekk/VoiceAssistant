@@ -52,6 +52,14 @@ android {
         compose = true
         buildConfig = true // S4: BuildConfig.DEBUG gates conversation-content logging
     }
+    // JVM unit tests (SettingsManagerCorruptionTest) exercise the real SettingsManager,
+    // whose init-recovery and JSON-corruption guards call android.util.Log, and whose
+    // encrypted-prefs branch needs AndroidKeyStore to be unavailable so the constructor
+    // falls back to plaintext prefs. Stubbed framework calls must return defaults
+    // instead of throwing "not mocked".
+    testOptions {
+        unitTests.isReturnDefaultValues = true
+    }
 }
 
 dependencies {

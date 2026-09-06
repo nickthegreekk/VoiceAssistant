@@ -95,7 +95,17 @@ class SettingsManager(context: Context) {
 
     fun getServerBases(): List<ServerConfig>? {
         val data = prefs.getString("server_bases_v2", null)
-        if (data != null) return json.decodeFromString(data)
+        if (data != null) {
+            return runCatching { json.decodeFromString<List<ServerConfig>>(data) }
+                .onFailure { e ->
+                    Log.w(
+                        "SettingsManager",
+                        "Corrupted/unreadable JSON in server_bases_v2 — ignoring entry, returning null",
+                        e
+                    )
+                }
+                .getOrNull()
+        }
 
         // Legacy Migration
         val oldJson = prefs.getString("server_bases", null) ?: return null
@@ -111,7 +121,17 @@ class SettingsManager(context: Context) {
 
     fun getOllamaBases(): List<ServerConfig>? {
         val data = prefs.getString("ollama_bases_v2", null)
-        if (data != null) return json.decodeFromString(data)
+        if (data != null) {
+            return runCatching { json.decodeFromString<List<ServerConfig>>(data) }
+                .onFailure { e ->
+                    Log.w(
+                        "SettingsManager",
+                        "Corrupted/unreadable JSON in ollama_bases_v2 — ignoring entry, returning null",
+                        e
+                    )
+                }
+                .getOrNull()
+        }
 
         // Legacy Migration
         val oldJson = prefs.getString("ollama_bases", null) ?: return null
@@ -127,7 +147,17 @@ class SettingsManager(context: Context) {
 
     fun getCloudApis(): List<CloudApiSetting>? {
         val data = prefs.getString("cloud_apis_v2", null)
-        if (data != null) return json.decodeFromString(data)
+        if (data != null) {
+            return runCatching { json.decodeFromString<List<CloudApiSetting>>(data) }
+                .onFailure { e ->
+                    Log.w(
+                        "SettingsManager",
+                        "Corrupted/unreadable JSON in cloud_apis_v2 — ignoring entry, returning null",
+                        e
+                    )
+                }
+                .getOrNull()
+        }
 
         // Legacy Migration
         val oldJson = prefs.getString("cloud_apis", null) ?: return null
@@ -153,7 +183,17 @@ class SettingsManager(context: Context) {
 
     fun getCustomCloudApis(): List<CloudApiSetting>? {
         val data = prefs.getString("custom_cloud_apis_v1", null)
-        if (data != null) return json.decodeFromString(data)
+        if (data != null) {
+            return runCatching { json.decodeFromString<List<CloudApiSetting>>(data) }
+                .onFailure { e ->
+                    Log.w(
+                        "SettingsManager",
+                        "Corrupted/unreadable JSON in custom_cloud_apis_v1 — ignoring entry, returning null",
+                        e
+                    )
+                }
+                .getOrNull()
+        }
         return null
     }
 
@@ -163,7 +203,17 @@ class SettingsManager(context: Context) {
 
     fun getPersonas(): List<Persona>? {
         val data = prefs.getString("personas_v2", null)
-        if (data != null) return json.decodeFromString(data)
+        if (data != null) {
+            return runCatching { json.decodeFromString<List<Persona>>(data) }
+                .onFailure { e ->
+                    Log.w(
+                        "SettingsManager",
+                        "Corrupted/unreadable JSON in personas_v2 — ignoring entry, returning null",
+                        e
+                    )
+                }
+                .getOrNull()
+        }
 
         // Legacy Migration
         val oldJson = prefs.getString("personas", null) ?: return null
@@ -193,7 +243,17 @@ class SettingsManager(context: Context) {
 
     fun getMessages(): List<ChatMessage>? {
         val data = prefs.getString("chat_history_v2", null)
-        if (data != null) return json.decodeFromString(data)
+        if (data != null) {
+            return runCatching { json.decodeFromString<List<ChatMessage>>(data) }
+                .onFailure { e ->
+                    Log.w(
+                        "SettingsManager",
+                        "Corrupted/unreadable JSON in chat_history_v2 — ignoring entry, returning null",
+                        e
+                    )
+                }
+                .getOrNull()
+        }
 
         // Legacy Migration
         val oldJson = prefs.getString("chat_history", null) ?: return null
@@ -224,7 +284,18 @@ class SettingsManager(context: Context) {
 
     fun getPersonaMessages(personaName: String): List<ChatMessage>? {
         val data = prefs.getString("persona_messages_$personaName", null)
-        return if (data != null) json.decodeFromString(data) else null
+        return if (data != null) {
+            runCatching { json.decodeFromString<List<ChatMessage>>(data) }
+                .onFailure { e ->
+                    Log.w(
+                        "SettingsManager",
+                        "Corrupted/unreadable JSON in persona history for '$personaName' — "
+                            + "ignoring entry, returning null",
+                        e
+                    )
+                }
+                .getOrNull()
+        } else null
     }
 
     // Rename support: history is persisted keyed by persona NAME, so a rename must
@@ -324,7 +395,17 @@ class SettingsManager(context: Context) {
 
     fun getFavoriteModels(): List<String>? {
         val data = prefs.getString("favorite_models_v2", null)
-        if (data != null) return json.decodeFromString(data)
+        if (data != null) {
+            return runCatching { json.decodeFromString<List<String>>(data) }
+                .onFailure { e ->
+                    Log.w(
+                        "SettingsManager",
+                        "Corrupted/unreadable JSON in favorite_models_v2 — ignoring entry, returning null",
+                        e
+                    )
+                }
+                .getOrNull()
+        }
         
         val oldJson = prefs.getString("favorite_models", null) ?: return null
         return try {
@@ -339,7 +420,17 @@ class SettingsManager(context: Context) {
 
     fun getTrustedCertificates(): Map<String, String> {
         val data = prefs.getString("trusted_certs_v2", null)
-        if (data != null) return json.decodeFromString(data)
+        if (data != null) {
+            return runCatching { json.decodeFromString<Map<String, String>>(data) }
+                .onFailure { e ->
+                    Log.w(
+                        "SettingsManager",
+                        "Corrupted/unreadable JSON in trusted_certs_v2 — ignoring entry, returning empty map",
+                        e
+                    )
+                }
+                .getOrElse { emptyMap() }
+        }
         
         val oldJson = prefs.getString("trusted_certs", null) ?: return emptyMap()
         return try {
@@ -404,7 +495,15 @@ class SettingsManager(context: Context) {
 
     fun getModelPricing(): Map<String, ModelPricing> {
         val data = prefs.getString("model_pricing_v1", null) ?: return emptyMap()
-        return try { json.decodeFromString(data) } catch (e: Exception) { emptyMap() }
+        return runCatching { json.decodeFromString<Map<String, ModelPricing>>(data) }
+            .onFailure { e ->
+                Log.w(
+                    "SettingsManager",
+                    "Corrupted/unreadable JSON in model_pricing_v1 — ignoring entry, returning empty map",
+                    e
+                )
+            }
+            .getOrElse { emptyMap() }
     }
 
     fun saveLastPriceSyncTimestamp(timestamp: Long) {
