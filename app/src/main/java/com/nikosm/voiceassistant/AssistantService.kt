@@ -42,6 +42,11 @@ import java.io.File
 import java.io.IOException
 import java.security.SecureRandom
 import java.security.cert.X509Certificate
+import javax.crypto.Cipher
+import javax.crypto.SecretKeyFactory
+import javax.crypto.spec.GCMParameterSpec
+import javax.crypto.spec.PBEKeySpec
+import javax.crypto.spec.SecretKeySpec
 import java.util.concurrent.TimeUnit
 import javax.net.ssl.SSLContext
 import javax.net.ssl.TrustManager
@@ -1000,20 +1005,101 @@ class AssistantService : Service() {
         return success
     }
 
+    // ── Backup encryption (Fix #7) ───────────────────────────────────────────────
+    // API keys, server credentials and RAG passwords used to leave the app as
+    // plaintext JSON. Encrypted backups now wrap that JSON in an envelope:
+    //   {"encrypted": true, "salt": b64, "iv": b64, "iterations": N, "ciphertext": b64}
+    // Key derivation: PBKDF2WithHmacSHA256 (never the raw password as key), 16-byte
+    // random salt unique per export. Cipher: AES-256-GCM with a 12-byte random IV —
+    // the same AES-GCM family the app already uses for its encrypted preferences.
+    // GCM's built-in authentication means a wrong password fails the tag check
+    // (AEADBadTagException) instead of decrypting to garbage, which the import path
+    // surfaces as a clear "Incorrect password" error.
+    private val backupSecureRandom = SecureRandom()
+    private val backupKdfIterations = 210_000
+
+    private fun deriveBackupKey(password: String, salt: ByteArray, iterations: Int): SecretKeySpec {
+        val factory = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
+        val spec = PBEKeySpec(password.toCharArray(), salt, iterations, 256)
+        return SecretKeySpec(factory.generateSecret(spec).encoded, "AES")
+    }
+
+    private fun encryptBackupJson(plainJson: String, password: String): String {
+        val salt = ByteArray(16).also { backupSecureRandom.nextBytes(it) }
+        val iv = ByteArray(12).also { backupSecureRandom.nextBytes(it) }
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.ENCRYPT_MODE, deriveBackupKey(password, salt, backupKdfIterations), GCMParameterSpec(128, iv))
+        val ciphertext = cipher.doFinal(plainJson.toByteArray(Charsets.UTF_8))
+        return JSONObject()
+            .put("encrypted", true)
+            .put("salt", Base64.encodeToString(salt, Base64.NO_WRAP))
+            .put("iv", Base64.encodeToString(iv, Base64.NO_WRAP))
+            .put("iterations", backupKdfIterations)
+            .put("ciphertext", Base64.encodeToString(ciphertext, Base64.NO_WRAP))
+            .toString()
+    }
+
+    private fun decryptBackupJson(envelopeJson: String, password: String): String {
+        val envelope = JSONObject(envelopeJson)
+        val salt = Base64.decode(envelope.getString("salt"), Base64.NO_WRAP)
+        val iv = Base64.decode(envelope.getString("iv"), Base64.NO_WRAP)
+        val ciphertext = Base64.decode(envelope.getString("ciphertext"), Base64.NO_WRAP)
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(
+            Cipher.DECRYPT_MODE,
+            deriveBackupKey(password, salt, envelope.optInt("iterations", backupKdfIterations)),
+            GCMParameterSpec(128, iv)
+        )
+        return String(cipher.doFinal(ciphertext), Charsets.UTF_8)
+    }
+
+    private fun isEncryptedBackup(json: String): Boolean = try {
+        JSONObject(json).optBoolean("encrypted", false)
+    } catch (e: Exception) {
+        false // not JSON at all — the plain-import path will report the format error
+    }
+
+    // Encrypted-import handshake: when importBackupFromFile() hits an encrypted
+    // envelope it needs the password, and only the UI can collect one. The pending
+    // flag drives the UI's password prompt; the answer arrives via
+    // submitBackupPassword()/cancelBackupPasswordPrompt() and resumes the SAME
+    // serviceScope coroutine that read the file — so detection, decryption and the
+    // import itself all stay in the dialog-closure-safe scope even while the prompt
+    // is on screen. The identity guard in the finally block keeps a stale waiter
+    // from clobbering a newer prompt's flag/deferred.
+    private var backupPasswordDeferred: CompletableDeferred<String?>? = null
+    private val _backupPasswordRequested = MutableStateFlow(false)
+    val backupPasswordRequested = _backupPasswordRequested.asStateFlow()
+
+    fun submitBackupPassword(password: String?) {
+        backupPasswordDeferred?.complete(password)
+    }
+
+    fun cancelBackupPasswordPrompt() {
+        backupPasswordDeferred?.complete(null)
+    }
+
     // Backup export/import run on serviceScope — not the Settings dialog's UI scope —
     // so closing the dialog mid-operation can no longer cancel them and leave a
     // truncated export file or a half-applied import. Toasts work from the foreground
     // service regardless of what's on screen.
-    fun exportBackupToFile(uri: Uri) {
+    fun exportBackupToFile(uri: Uri, password: String? = null) {
         serviceScope.launch {
             try {
                 val backup = exportBackup()
+                val output = if (password.isNullOrBlank()) backup
+                else withContext(Dispatchers.IO) { encryptBackupJson(backup, password) }
                 withContext(Dispatchers.IO) {
                     contentResolver.openOutputStream(uri)?.use { out ->
-                        out.write(backup.toByteArray())
+                        out.write(output.toByteArray())
                     }
                 }
-                Toast.makeText(applicationContext, "Backup exported successfully", Toast.LENGTH_SHORT).show()
+                Toast.makeText(
+                    applicationContext,
+                    if (password.isNullOrBlank()) "Backup exported successfully"
+                    else "Encrypted backup exported successfully",
+                    Toast.LENGTH_SHORT
+                ).show()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -1025,17 +1111,59 @@ class AssistantService : Service() {
     fun importBackupFromFile(uri: Uri) {
         serviceScope.launch {
             try {
+                // Retire any stale password waiter from an abandoned import — it resumes
+                // with null, and its finally's identity guard leaves this import's
+                // prompt state alone.
+                backupPasswordDeferred?.complete(null)
                 val json = withContext(Dispatchers.IO) {
                     contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
                 }
-                if (json != null) {
+                if (json == null) return@launch
+
+                // Fix #7: auto-detect the envelope. Plain backups (and legacy ones)
+                // import exactly as before; encrypted ones pause here for the UI to
+                // collect the password, then resume in this same coroutine.
+                if (!isEncryptedBackup(json)) {
                     val success = importBackup(json)
                     Toast.makeText(
                         applicationContext,
                         if (success) "Import successful" else "Import failed: Invalid format",
                         Toast.LENGTH_SHORT
                     ).show()
+                    return@launch
                 }
+
+                val deferred = CompletableDeferred<String?>()
+                backupPasswordDeferred = deferred
+                _backupPasswordRequested.value = true
+                val password = try {
+                    deferred.await()
+                } finally {
+                    if (backupPasswordDeferred === deferred) {
+                        _backupPasswordRequested.value = false
+                        backupPasswordDeferred = null
+                    }
+                }
+                if (password.isNullOrBlank()) {
+                    Toast.makeText(applicationContext, "Import cancelled", Toast.LENGTH_SHORT).show()
+                    return@launch
+                }
+
+                val plainJson = try {
+                    withContext(Dispatchers.IO) { decryptBackupJson(json, password) }
+                } catch (e: Exception) {
+                    // GCM authentication failure — wrong password (or a corrupted
+                    // file). Never garbage data, never a partial import.
+                    Toast.makeText(applicationContext, "Import failed: Incorrect password", Toast.LENGTH_LONG).show()
+                    return@launch
+                }
+
+                val success = importBackup(plainJson)
+                Toast.makeText(
+                    applicationContext,
+                    if (success) "Import successful" else "Import failed: Invalid format",
+                    Toast.LENGTH_SHORT
+                ).show()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {

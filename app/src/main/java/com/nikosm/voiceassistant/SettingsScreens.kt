@@ -32,6 +32,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.material3.Checkbox
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.automirrored.filled.VolumeOff
@@ -57,6 +58,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -201,16 +204,40 @@ fun SettingsDialog(service: AssistantService?, onDismiss: () -> Unit, personaCol
 @Composable
 fun GeneralSettings(service: AssistantService, totalCost: Double, onDismiss: () -> Unit) {
 
+    // Fix #7: optional password encryption for exported backups. The password is
+    // collected HERE (checkbox + fields + validation below), but the actual
+    // encryption/decryption runs service-side on serviceScope — see
+    // exportBackupToFile/importBackupFromFile — so it stays dialog-closure-safe.
+    var encryptExport by remember { mutableStateOf(false) }
+    var exportPassword by remember { mutableStateOf("") }
+    var exportConfirmPassword by remember { mutableStateOf("") }
+    var exportPasswordError by remember { mutableStateOf<String?>(null) }
+    var pendingExportPassword by remember { mutableStateOf<String?>(null) }
+
     val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
         // Runs on serviceScope (inside the service) so closing the Settings dialog can
         // no longer cancel the export mid-write and leave a truncated file.
-        uri?.let { service.exportBackupToFile(it) }
+        uri?.let { service.exportBackupToFile(it, pendingExportPassword) }
+        pendingExportPassword = null
     }
 
     val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         // Runs on serviceScope (inside the service) so closing the Settings dialog can
-        // no longer cancel a half-applied import.
+        // no longer cancel a half-applied import. Encrypted backups pause that coroutine
+        // on a password prompt (backupPasswordRequested below). A single "*/*" type is
+        // used deliberately: some OEM pickers (MIUI) fail to match real files when a
+        // multi-type list is passed, hiding existing backups — the service already
+        // validates the format and reports "Invalid format" for wrong files.
         uri?.let { service.importBackupFromFile(it) }
+    }
+
+    var showImportPasswordDialog by remember { mutableStateOf(false) }
+    var importPassword by remember { mutableStateOf("") }
+    LaunchedEffect(Unit) {
+        service.backupPasswordRequested.collect { requested ->
+            showImportPasswordDialog = requested
+            if (requested) importPassword = ""
+        }
     }
 
     LazyColumn(verticalArrangement = Arrangement.spacedBy(16.dp)) {
@@ -310,9 +337,69 @@ fun GeneralSettings(service: AssistantService, totalCost: Double, onDismiss: () 
             SettingsSectionHeader(title = "Backup & Recovery", icon = Icons.Default.CloudSync)
             SettingsSection {
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(
+                            checked = encryptExport,
+                            onCheckedChange = {
+                                encryptExport = it
+                                exportPasswordError = null
+                            }
+                        )
+                        Text("Encrypt backup with password")
+                    }
+                    if (encryptExport) {
+                        OutlinedTextField(
+                            value = exportPassword,
+                            onValueChange = {
+                                exportPassword = it
+                                exportPasswordError = null
+                            },
+                            label = { Text("Password") },
+                            visualTransformation = PasswordVisualTransformation(),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        OutlinedTextField(
+                            value = exportConfirmPassword,
+                            onValueChange = {
+                                exportConfirmPassword = it
+                                exportPasswordError = null
+                            },
+                            label = { Text("Confirm password") },
+                            visualTransformation = PasswordVisualTransformation(),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        Text(
+                            "Minimum 8 characters. Encrypts API keys, server credentials and chats (AES-256-GCM, PBKDF2 key derivation).",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                        )
+                        exportPasswordError?.let { err ->
+                            Text(err, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
                     OutlinedButton(
                         onClick = {
-                            exportLauncher.launch("voice_assistant_backup_${System.currentTimeMillis()}.json")
+                            if (encryptExport) {
+                                when {
+                                    exportPassword.length < 8 ->
+                                        exportPasswordError = "Password must be at least 8 characters."
+                                    exportPassword != exportConfirmPassword ->
+                                        exportPasswordError = "Passwords do not match."
+                                    else -> {
+                                        exportPasswordError = null
+                                        pendingExportPassword = exportPassword
+                                        exportLauncher.launch("voice_assistant_backup_${System.currentTimeMillis()}.json")
+                                    }
+                                }
+                            } else {
+                                exportPasswordError = null
+                                pendingExportPassword = null
+                                exportLauncher.launch("voice_assistant_backup_${System.currentTimeMillis()}.json")
+                            }
                         },
                         modifier = Modifier.fillMaxWidth(),
                         shape = RoundedCornerShape(8.dp),
@@ -325,7 +412,7 @@ fun GeneralSettings(service: AssistantService, totalCost: Double, onDismiss: () 
 
                     OutlinedButton(
                         onClick = {
-                            importLauncher.launch(arrayOf("application/json", "application/octet-stream", "*/*"))
+                            importLauncher.launch(arrayOf("*/*"))
                         },
                         modifier = Modifier.fillMaxWidth(),
                         shape = RoundedCornerShape(8.dp),
@@ -338,6 +425,53 @@ fun GeneralSettings(service: AssistantService, totalCost: Double, onDismiss: () 
                 }
             }
         }
+    }
+
+    // Fix #7: prompt for the password of an encrypted backup. Shown when the
+    // service-side import detects the encrypted envelope; the answer resumes the
+    // import coroutine on serviceScope (dialog-closure-safe).
+    if (showImportPasswordDialog) {
+        AlertDialog(
+            onDismissRequest = {
+                showImportPasswordDialog = false
+                service.cancelBackupPasswordPrompt()
+                importPassword = ""
+            },
+            title = { Text("Encrypted Backup") },
+            text = {
+                Column {
+                    Text("This backup is encrypted. Enter the password it was exported with.")
+                    Spacer(Modifier.height(12.dp))
+                    OutlinedTextField(
+                        value = importPassword,
+                        onValueChange = { importPassword = it },
+                        label = { Text("Password") },
+                        visualTransformation = PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    showImportPasswordDialog = false
+                    service.submitBackupPassword(importPassword)
+                    importPassword = ""
+                }) {
+                    Text("Import")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    showImportPasswordDialog = false
+                    service.cancelBackupPasswordPrompt()
+                    importPassword = ""
+                }) {
+                    Text("Cancel")
+                }
+            }
+        )
     }
 }
 
