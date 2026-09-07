@@ -720,6 +720,15 @@ class AssistantService : Service() {
             _serverBases.value = _serverBases.value + ServerConfig(name, url, username, password, authType, apiKey)
             saveSettings()
             fetchModels()
+        } else {
+            // Fix #6 (parity with the update paths): the duplicate was already rejected
+            // here, but silently — surface it the same way updateServerBase does.
+            val existing = _serverBases.value.first { it.url == url }
+            Toast.makeText(
+                applicationContext,
+                "URL already used by server '${existing.name}' — add rejected",
+                Toast.LENGTH_LONG
+            ).show()
         }
     }
 
@@ -732,6 +741,20 @@ class AssistantService : Service() {
         val current = _serverBases.value.toMutableList()
         val idx = current.indexOf(oldConfig)
         if (idx != -1) {
+            // Fix #6: the add path rejects duplicate URLs (none { it.url == url }), but this
+            // update path skipped the check — editing an entry's URL to one another entry
+            // already owned silently created a duplicate. Reject the edit instead and say
+            // why via toast (the entry being edited is excluded from the check, so saving
+            // with an unchanged URL — name/credential edits only — still works).
+            val duplicate = current.withIndex().firstOrNull { (i, cfg) -> i != idx && cfg.url == newUrl }
+            if (duplicate != null) {
+                Toast.makeText(
+                    applicationContext,
+                    "URL already used by server '${duplicate.value.name}' — edit rejected",
+                    Toast.LENGTH_LONG
+                ).show()
+                return
+            }
             current[idx] = ServerConfig(newName, newUrl, newUsername, newPassword, newAuthType, newApiKey)
             _serverBases.value = current
             saveSettings()
@@ -753,6 +776,15 @@ class AssistantService : Service() {
             _ollamaBaseUrls.value = _ollamaBaseUrls.value + ServerConfig(name, url, username, password, authType, apiKey)
             saveSettings()
             fetchModels()
+        } else {
+            // Fix #6 (parity with the update paths): the duplicate was already rejected
+            // here, but silently — surface it the same way updateOllamaBase does.
+            val existing = _ollamaBaseUrls.value.first { it.url == url }
+            Toast.makeText(
+                applicationContext,
+                "URL already used by Ollama server '${existing.name}' — add rejected",
+                Toast.LENGTH_LONG
+            ).show()
         }
     }
 
@@ -789,6 +821,19 @@ class AssistantService : Service() {
         val current = _ollamaBaseUrls.value.toMutableList()
         val idx = current.indexOf(oldConfig)
         if (idx != -1) {
+            // Fix #6: same dedup the add path enforces (none { it.url == url }) — see
+            // updateServerBase for the full rationale. The edited entry is excluded,
+            // so saving with an unchanged URL still works; a URL another entry owns
+            // is rejected with a toast instead of creating a silent duplicate.
+            val duplicate = current.withIndex().firstOrNull { (i, cfg) -> i != idx && cfg.url == newUrl }
+            if (duplicate != null) {
+                Toast.makeText(
+                    applicationContext,
+                    "URL already used by Ollama server '${duplicate.value.name}' — edit rejected",
+                    Toast.LENGTH_LONG
+                ).show()
+                return
+            }
             current[idx] = ServerConfig(newName, newUrl, newUsername, newPassword, newAuthType, newApiKey)
             _ollamaBaseUrls.value = current
             saveSettings()

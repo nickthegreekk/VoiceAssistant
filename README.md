@@ -112,6 +112,18 @@ Once running, add your Gateway's URL in Settings → Servers, and select it as t
 2. In Settings, enter your SearXNG URL
 3. Enable web search in the persona settings
 
+## Troubleshooting
+
+### Cloud providers (models won't fetch, chat fails) but self-hosted Gateway/RAG work fine
+
+If native Ollama, your Gateway, or RAG all work correctly, but **cloud personas** (Anthropic, DeepSeek, OpenAI, Google) fail to fetch models or respond — with errors like `Unable to resolve host` — and this happens on a specific device while working fine on another running the identical app version, check whether **Tailscale's MagicDNS** is active on the affected device.
+
+Some Android versions/devices handle a VPN app's DNS resolution differently, and Tailscale's DNS resolver can end up failing to resolve *public internet* domains (not just your own Tailscale devices) on certain device/Android-version combinations — while working perfectly on others with the exact same Tailscale app version. Since Celeste's own self-hosted connections (Gateway, RAG, Ollama) are always configured by raw IP, they're unaffected — only lookups for public domains (cloud AI providers, the update-checker, etc.) go through DNS and can be affected.
+
+**To confirm:** open a browser on the affected device, disable "Secure DNS" in its settings (so it stops bypassing the system resolver), and try loading a cloud provider's API domain directly (e.g., `https://api.deepseek.com`). If it fails there too, but works fine over mobile data with WiFi off, this confirms the issue.
+
+**Fix:** in the Tailscale app, disable "Use Tailscale DNS" (Tailscale itself can stay connected — this only affects whether it's used for DNS resolution). You'll need to use raw IP addresses instead of `.ts.net` hostnames for your own Tailscale devices, but this has no effect on Celeste itself, since it never relies on Tailscale hostnames.
+
 ## Architecture
 
 - **Kotlin + Jetpack Compose** - Modern Android UI
