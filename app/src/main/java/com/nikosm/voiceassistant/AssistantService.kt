@@ -665,9 +665,6 @@ class AssistantService : Service() {
 
         // Fetch models for all enabled cloud providers
         (_cloudApis.value + allCustom).forEach { api ->
-            // TEMP DEBUG (model-fetch trace): logs whether each provider is fetched or
-            // silently skipped (a blank key with icon != "C" never reaches the fetch).
-            if (BuildConfig.DEBUG) android.util.Log.d("ModelFetch", "loadSettings loop: api='${api.name}' icon='${api.icon}' keyBlank=${api.apiKey.isBlank()} -> ${if (api.apiKey.isNotBlank() || api.icon == "C") "fetching" else "SKIPPED (blank key, icon != C)"}")
             if (api.apiKey.isNotBlank() || api.icon == "C") {
                 fetchCloudModels(api)
             }
@@ -1185,41 +1182,25 @@ class AssistantService : Service() {
     }
 
 
-    // TEMP DEBUG (model-fetch trace): remove once the Pixel fetch failure is diagnosed.
-    private fun mfTrace(msg: String) {
-        if (BuildConfig.DEBUG) android.util.Log.d("ModelFetch", msg)
-    }
-
     fun fetchCloudModels(api: CloudApiSetting) {
-        // TEMP DEBUG (model-fetch trace)
-        mfTrace("enter api='${api.name}' icon='${api.icon}' baseUrl='${api.baseUrl}' keyLen=${api.apiKey.length} keyBlank=${api.apiKey.isBlank()}")
         if (api.apiKey.isBlank() && api.icon != "C") {
-            // TEMP DEBUG (model-fetch trace): this early return produces NO fetch, NO
-            // status write and NO error — the prime suspect for "zero visible output".
-            mfTrace("EARLY RETURN — blank key and icon != \"C\": silently skipped, api='${api.name}'")
             return
         }
         incrementModelFetchCount()
         val baseUrl = api.baseUrl.trim().removeSuffix("/")
         serviceScope.launch(Dispatchers.IO) {
-            mfTrace("launch: fetching models on Dispatchers.IO for api='${api.name}'")
             val statusMap = _serverStatus.value.toMutableMap()
             statusMap.remove(api.name)
             try {
                 val models = when (api.icon) {
                     "G" -> { // Google
                         val url = "https://generativelanguage.googleapis.com/v1beta/models?key=${api.apiKey}"
-                        // TEMP DEBUG (model-fetch trace): the key query param is masked out.
-                        mfTrace("G branch: GET ${url.substringBefore("?")}")
                         standardClient.newCall(Request.Builder().url(url).build()).execute().use { response ->
-                            mfTrace("G branch: HTTP ${response.code}")
                             if (!response.isSuccessful) {
                                 statusMap[api.name] = "Google API Error: ${response.code}"
                                 return@use emptyList<String>()
                             }
-                            val bodyStr = response.body.string()
-                            mfTrace("G body: ${bodyStr.take(300)}")
-                            val json = JSONObject(bodyStr)
+                            val json = JSONObject(response.body.string())
                             val array = json.getJSONArray("models")
                             val rawModels = mutableListOf<JSONObject>()
                             for (i in 0 until array.length()) {
@@ -1243,22 +1224,17 @@ class AssistantService : Service() {
                     }
                     "A" -> { // Anthropic
                         val url = "$baseUrl/v1/models"
-                        // TEMP DEBUG (model-fetch trace)
-                        mfTrace("A branch: GET $url")
                         val request = Request.Builder()
                             .url(url)
                             .header("x-api-key", api.apiKey)
                             .header("anthropic-version", "2023-06-01")
                             .build()
                         standardClient.newCall(request).execute().use { response ->
-                            mfTrace("A branch: HTTP ${response.code}")
                             if (!response.isSuccessful) {
                                 statusMap[api.name] = "Anthropic Error: ${response.code}"
                                 return@use emptyList<String>()
                             }
-                            val bodyStr = response.body.string()
-                            mfTrace("A body: ${bodyStr.take(300)}")
-                            val json = JSONObject(bodyStr)
+                            val json = JSONObject(response.body.string())
                             val array = json.getJSONArray("data")
                             val rawModels = mutableListOf<JSONObject>()
                             for (i in 0 until array.length()) {
@@ -1272,10 +1248,7 @@ class AssistantService : Service() {
                     }
                     else -> { // OpenAI, DeepSeek, Custom
                         val url = if (baseUrl.endsWith("/models")) baseUrl else "$baseUrl/models"
-                        // TEMP DEBUG (model-fetch trace)
-                        mfTrace("else branch: GET $url")
                         standardClient.newCall(Request.Builder().url(url).header("Authorization", "Bearer ${api.apiKey}").build()).execute().use { response ->
-                            mfTrace("else branch: HTTP ${response.code}")
                             if (!response.isSuccessful) {
                                 statusMap[api.name] = when(response.code) {
                                     401 -> "Invalid API Key"
@@ -1284,9 +1257,7 @@ class AssistantService : Service() {
                                 }
                                 return@use emptyList<String>()
                             }
-                            val bodyStr = response.body.string()
-                            mfTrace("else body: ${bodyStr.take(300)}")
-                            val json = JSONObject(bodyStr)
+                            val json = JSONObject(response.body.string())
                             val array = json.getJSONArray("data")
                             val rawModels = mutableListOf<JSONObject>()
                             for (i in 0 until array.length()) {
@@ -1316,20 +1287,13 @@ class AssistantService : Service() {
                     current[api.name] = models
                     _fetchedCloudModels.value = current
                     _serverStatus.value = statusMap
-                    // TEMP DEBUG (model-fetch trace): models.size == 0 with no status
-                    // entry means the provider returned HTTP 200 with an empty list.
-                    mfTrace("SUCCESS applied: api='${api.name}' models=${models.size} status='${statusMap[api.name] ?: "<none (removed on success)>"}'")
                 }
             } catch (e: CancellationException) {
-                mfTrace("CATCH CancellationException — rethrowing (job cancellation path)")
                 throw e
             } catch (e: Exception) {
-                android.util.Log.e("ModelFetch", "CATCH ${e.javaClass.name}: ${e.message}", e)
-                mfTrace("CATCH ${e.javaClass.name}: ${e.message} — writing statusMap['${api.name}']")
                 statusMap[api.name] = e.message ?: "Cloud fetch failed"
                 withContext(Dispatchers.Main) { _serverStatus.value = statusMap }
             } finally {
-                mfTrace("finally: decrementing fetch count (api='${api.name}')")
                 decrementModelFetchCount()
             }
         }
