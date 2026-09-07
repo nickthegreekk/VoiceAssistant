@@ -229,14 +229,20 @@ internal fun AssistantService.sendAudioToServer(file: File, currentPersona: Pers
 
                          // 2. Chat with Ollama
                          val directRes = performDirectOllamaChat(ollamaBase, actualModel, transcribedText, currentPersona, currentTurnInHistory = false)
+                         // Fix #5 (voice-flow follow-up): clean markdown for TTS on IO —
+                         // the cleaned variant feeds the on-device engines (5th element);
+                         // the chat bubble/history keep the original markdown. This branch
+                         // was missed when the consumer gained its 5th element, crashing
+                         // every voice turn to a direct-Ollama persona on the destructuring.
+                         val cleanedForTts = cleanTextForTts(directRes.first)
 
-                         // 3. Handle Voice via Gateway if needed
-                         var audioBytes: ByteArray? = null
+                         // If it's a gateway voice mode, we need to fetch audio separately
                          if (currentPersona.voiceMode == VoiceMode.GATEWAY) {
-                             audioBytes = synthesizeWithGateway(directRes.first, currentPersona)
+                             val audioBytes = synthesizeWithGateway(directRes.first, currentPersona)
+                             return@withContext listOf(transcribedText, directRes.first, directRes.second, audioBytes, cleanedForTts)
                          }
 
-                         return@withContext listOf(transcribedText, directRes.first, directRes.second, audioBytes)
+                         return@withContext listOf(transcribedText, directRes.first, directRes.second, directRes.third, cleanedForTts)
                      }
                 }
 

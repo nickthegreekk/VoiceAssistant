@@ -430,7 +430,16 @@ fun AssistantService.stopEverything() {
     outputFile?.delete()
     outputFile = null
     stopAudio()
-    if (assistantState.value == AssistantState.THINKING || assistantState.value == AssistantState.LISTENING) {
+    // Fix: SPEAKING belongs in the reset set — Stop from an active playback must
+    // return to IDLE. stopAudio() above already resets SPEAKING when it observes
+    // it, but the eSpeak path flips _state to SPEAKING from a background synthesis
+    // coroutine whose only exit is the AudioTrack marker callback — a callback that
+    // never fires once stopAudio() has released the track. A state flip landing
+    // after stopAudio()'s internal check used to strand the UI on SPEAKING, where
+    // the mic tap is a dead no-op (it only acts on IDLE/LISTENING). Re-checking
+    // here, after teardown, closes that window: Stop from ANY active state
+    // deterministically lands on IDLE.
+    if (assistantState.value == AssistantState.THINKING || assistantState.value == AssistantState.LISTENING || assistantState.value == AssistantState.SPEAKING) {
         _state.value = AssistantState.IDLE
         updateNotification("Ready to help")
     }

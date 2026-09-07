@@ -409,6 +409,19 @@ class AssistantService : Service() {
                 // request itself rather than leaving it dangling (a GAIN may never come).
                 stopAudio()
                 pausedByFocusLoss = false
+                // Fix: explicit IDLE fallback, matching #13's transient-loss pattern —
+                // this branch was missed when #13 was applied. stopAudio() has released
+                // every engine, so the engines' own completion callbacks (eSpeak's
+                // AudioTrack marker, MediaPlayer onCompletion, TTS onDone) can never
+                // run their cleanup themselves. A SPEAKING state left behind by a
+                // background state flip racing this handler must not survive a
+                // permanent loss. LISTENING/THINKING stay put, same as #13 part 1:
+                // their recorder/pipeline keeps running and must not be desynced
+                // from the UI by a focus event.
+                if (_state.value == AssistantState.SPEAKING) {
+                    _state.value = AssistantState.IDLE
+                    updateNotification("Ready to help")
+                }
             }
             AudioManager.AUDIOFOCUS_GAIN -> {
                 if (pausedByFocusLoss) {
