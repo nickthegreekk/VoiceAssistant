@@ -420,6 +420,15 @@ fun AssistantService.stopEverything() {
     // eventually produces — no history append and, critically, no playResponse —
     // even when the underlying network work completes after Stop was pressed.
     nextChatRequestSeq()
+    // Fix: stop an active manual recording — the red STOP button is reachable during
+    // LISTENING, and this used to leave the MediaRecorder running: the mic stayed hot
+    // after an explicit Stop, the partial file grew unbounded, and the next
+    // startRecording() replaced the recorder reference without releasing the
+    // orphaned one. The partial file is DELETED here (an explicit user-initiated
+    // stop is not a completed turn — it must never be transcribed or sent).
+    stopActiveRecording()
+    outputFile?.delete()
+    outputFile = null
     stopAudio()
     if (assistantState.value == AssistantState.THINKING || assistantState.value == AssistantState.LISTENING) {
         _state.value = AssistantState.IDLE
