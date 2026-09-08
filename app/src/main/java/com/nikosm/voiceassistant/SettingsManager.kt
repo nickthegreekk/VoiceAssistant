@@ -373,6 +373,21 @@ class SettingsManager(context: Context) {
             backup.ragServerUrl?.let { saveRagServerUrl(it) }
             backup.ragUsername?.let { saveRagUsername(it) }
             backup.ragPassword?.let { saveRagPassword(it) }
+            // M2: the restore overwrites the persona LIST, but persona_messages_<name>
+            // entries belonging to personas that existed before the restore and aren't
+            // in this backup would survive as orphans — invisible forever and
+            // accumulating across restores (the import-path sibling of the deletion-path
+            // orphan deletePersonaHistory removes). Enumerate every stored history entry
+            // via prefs.all (a decrypted snapshot; the filter materializes it before any
+            // mutation, so removal during iteration is safe) and drop the ones whose
+            // persona isn't in the restored list — reusing deletePersonaHistory so any
+            // referenced audio cache files are cleaned up too.
+            val restoredNames = backup.personas.map { it.name }.toSet()
+            prefs.all.keys
+                .filter { it.startsWith("persona_messages_") }
+                .map { it.removePrefix("persona_messages_") }
+                .filter { it !in restoredNames }
+                .forEach { deletePersonaHistory(it) }
             true
         } catch (e: Exception) {
             // Try legacy import if new format fails
