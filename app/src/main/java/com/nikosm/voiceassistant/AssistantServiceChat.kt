@@ -178,6 +178,13 @@ internal fun AssistantService.sendAudioToServer(file: File, currentPersona: Pers
                 try {
                     val transcribedText = transcribeWithGateway(file, currentPersona)
                         ?: throw Exception("Could not transcribe audio. Check Gateway connection.")
+                    if (transcribedText.isBlank()) {
+                        // M3: the gateway responded fine — the audio just had no
+                        // detectable speech. Caller-level concern: surface the
+                        // empty-turn error without penalizing the server's
+                        // health/cooldown status.
+                        throw Exception("Empty transcription result")
+                    }
                     performCloudChat(transcribedText, currentPersona, useDeviceVoice, startTime, currentTurnInHistory = false, generation = generation)
                 } catch (e: CancellationException) {
                     throw e
@@ -226,6 +233,11 @@ internal fun AssistantService.sendAudioToServer(file: File, currentPersona: Pers
                          // 1. Transcribe via Gateway
                          val transcribedText = transcribeWithGateway(file, currentPersona)
                              ?: throw Exception("Could not transcribe audio. Check Gateway connection.")
+                         if (transcribedText.isBlank()) {
+                             // M3: gateway healthy, audio had no detectable speech —
+                             // caller-level error, no server health penalty.
+                             throw Exception("Empty transcription result")
+                         }
 
                          // 2. Chat with Ollama
                          val directRes = performDirectOllamaChat(ollamaBase, actualModel, transcribedText, currentPersona, currentTurnInHistory = false)

@@ -318,8 +318,15 @@ internal suspend fun AssistantService.transcribeWithGateway(file: File, persona:
                 _serverStatus.value = statusMap
             }
 
-            if (result.isNotBlank()) return result
-            throw Exception("Empty transcription result")
+            // M3: an HTTP 200 with empty text is a SUCCESSFUL server interaction — the
+            // audio just contained no detectable speech (silence/ambient noise). The
+            // "Online" status was already applied above; returning the blank result
+            // here (instead of throwing) keeps this gateway off the failed-list and
+            // out of the failure cooldown, and ends the failover loop — other gateways
+            // would return the same empty result for the same quiet audio, and under
+            // the old throw each of them got failure-marked for it. The caller
+            // distinguishes blank from real text and surfaces the empty-turn message.
+            return result
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
