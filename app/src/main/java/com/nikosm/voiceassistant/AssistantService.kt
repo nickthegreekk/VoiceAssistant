@@ -1259,6 +1259,15 @@ class AssistantService : Service() {
         tts.shutdown()
         vadRecorder?.stop()
         vadDetector?.close()
+        // vadDetector is a file-level static, so it survives this destroy and would be
+        // seen non-null by a recreated service's startVadListening() — silently reusing
+        // this closed detector (isSpeech() would throw on the closed session on every
+        // chunk, get caught, and return 0f forever: hands-free dead without any error
+        // surface until the process dies). Null after close so a same-process restart
+        // builds a fresh detector and session. (OrtEnvironment.getEnvironment() is a
+        // process-wide singleton whose close() is a no-op in ORT 1.11+, so recreating
+        // the detector is safe and cheap — only the session is genuinely per-instance.)
+        vadDetector = null
         // Released under espeakLock so teardown can never race an in-flight warm-up
         // construction (release-then-assign would strand a live native engine).
         // Backing field, NOT the espeakEngine getter — the getter would construct an
