@@ -985,6 +985,34 @@ class AssistantService : Service() {
                 }
             }
             _personas.value = current
+            // Followup to Fix #4: the removal must also drop the persona's persisted
+            // history — a genuine deletion leaves no persona_messages_<name> entry
+            // behind on disk. (Rename is handled by migratePersonaHistory in
+            // updatePersona and MIGRATES rather than deletes, so this only ever fires
+            // on true removal. Removing a name with no saved entry is a no-op.)
+            settingsManager.deletePersonaHistory(removedName)
+            saveSettings()
+        }
+    }
+
+    fun movePersonaUp(index: Int) {
+        val current = _personas.value.toMutableList()
+        if (index in 1 until current.size) {
+            val temp = current[index]
+            current[index] = current[index - 1]
+            current[index - 1] = temp
+            _personas.value = current
+            saveSettings()
+        }
+    }
+
+    fun movePersonaDown(index: Int) {
+        val current = _personas.value.toMutableList()
+        if (index != -1 && index < current.size - 1) {
+            val temp = current[index]
+            current[index] = current[index + 1]
+            current[index + 1] = temp
+            _personas.value = current
             saveSettings()
         }
     }

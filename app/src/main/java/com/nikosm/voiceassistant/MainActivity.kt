@@ -201,6 +201,15 @@ fun PersonaSettings(service: AssistantService, personas: List<Persona>, currentT
                                 Text(persona.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                                 Text(persona.model, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f), maxLines = 1, overflow = TextOverflow.Ellipsis)
                             }
+                            // Reorder controls — same up/down pattern as the server and
+                            // cloud-API lists. Order is user-visible: the persona selector
+                            // and the deletion fallback ("first remaining persona") follow it.
+                            IconButton(onClick = { service.movePersonaUp(index) }, enabled = index > 0, modifier = Modifier.size(28.dp)) {
+                                Icon(Icons.Default.KeyboardArrowUp, null, modifier = Modifier.size(20.dp))
+                            }
+                            IconButton(onClick = { service.movePersonaDown(index) }, enabled = index < personas.size - 1, modifier = Modifier.size(28.dp)) {
+                                Icon(Icons.Default.KeyboardArrowDown, null, modifier = Modifier.size(20.dp))
+                            }
                             Icon(Icons.Default.ChevronRight, null, tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f))
                         }
                     }

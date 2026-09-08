@@ -311,6 +311,24 @@ class SettingsManager(context: Context) {
             .remove("persona_messages_$oldName").apply()
     }
 
+    // Removal support: a genuine persona deletion must also drop its name-keyed
+    // history entry — otherwise it stays on disk forever, orphaned (nothing can ever
+    // display it again, and it leaks forever). Rename is the only other history-entry
+    // lifecycle event and it deliberately MIGRATES (migratePersonaHistory above)
+    // rather than deletes, so this is never reached on a rename. Before removing the
+    // entry, delete the audio cache files its messages reference — same as eviction
+    // in savePersonaMessages — otherwise those WAVs would be orphaned in the entry's
+    // place. A corrupted (unparseable) entry is still removed; its audio files are
+    // unrecoverable anyway.
+    fun deletePersonaHistory(personaName: String) {
+        getPersonaMessages(personaName)?.forEach { msg ->
+            msg.audioFilePath?.let { path ->
+                try { File(path).delete() } catch (_: Exception) { /* already gone */ }
+            }
+        }
+        prefs.edit().remove("persona_messages_$personaName").apply()
+    }
+
     fun exportBackup(): String {
         val personas = getPersonas() ?: emptyList()
         val personaMessages = personas.associate { it.name to (getPersonaMessages(it.name) ?: emptyList()) }
