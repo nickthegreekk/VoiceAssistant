@@ -957,7 +957,33 @@ class AssistantService : Service() {
     fun removePersona(index: Int) {
         val current = _personas.value.toMutableList()
         if (index in current.indices) {
+            val removedName = current[index].name
             current.removeAt(index)
+            // Fix #4: deleting the ACTIVE persona used to leave currentPersonaName
+            // pointing at a name that no longer existed — currentPersona then returned
+            // null, sends ran on the UI's stale cached persona object, and the debounced
+            // persistSettings() (plus switchPersona's outgoing-history save) re-persisted
+            // the in-memory conversation under the deleted persona's now-orphaned
+            // storage key. Re-point the selection BEFORE publishing the shrunken list
+            // (same re-pointing precedent as updatePersona's rename handling above), so
+            // at every observation point the active name exists in the list.
+            if (currentPersonaName == removedName) {
+                val fallback = current.firstOrNull()
+                if (fallback != null) {
+                    // Detach first: switchPersona saves the outgoing persona's in-memory
+                    // history under currentPersonaName — with the removed persona still
+                    // selected that would write it to the deleted persona's orphaned key.
+                    // Detached, that save is skipped: the deleted conversation dies with
+                    // its persona, and the fallback loads its OWN saved history.
+                    currentPersonaName = null
+                    switchPersona(fallback)
+                } else {
+                    // Removed the last persona: the documented no-selection state.
+                    // The UI re-seeds the default personas on its next bind.
+                    currentPersonaName = null
+                    _messages.value = emptyList()
+                }
+            }
             _personas.value = current
             saveSettings()
         }
