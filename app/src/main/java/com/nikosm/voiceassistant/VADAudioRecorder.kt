@@ -45,6 +45,22 @@ class VADAudioRecorder(
     // deadlock cycle exists with VADDetector's own internal state lock.
     private val dataLock = Any()
 
+    // M-pre-roll: ring buffer of the most recent raw chunks, captured continuously in
+    // the idle/pre-detection phase. The trigger needs ~3 chunks (~100ms) of consistent
+    // speech before isRecording flips — without this, the first two of those chunks
+    // (the actual onset of a short word: "Hi", "Go") were physically discarded,
+    // clipping short utterances enough to confuse STT. Capacity 3 (~96ms) covers the
+    // trigger latency plus one jitter frame. On trigger the buffered chunks are
+    // PREPENDED to recordedData (the capture happens after the live-append, so the
+    // trigger chunk itself is never doubled), then the ring clears and live appending
+    // continues. Shares dataLock with recordedData rather than a separate lock: both
+    // buffers are "audio of the current utterance", they are mutated at exactly the
+    // same points (trigger-prepend, speech-end, stop, mute/pause reset), and one lock
+    // keeps a single consistent snapshot boundary — with the same rules as before
+    // (tiny in-memory ops only, never held across suspension or file I/O).
+    private val preRollChunks = ArrayDeque<ShortArray>()
+    private val preRollCapacity = 3
+
     
     // M4-adjacent: written from Main (toggleMicMute / the state watcher's pause()),
     // read on the IO recording loop — @Volatile removes the visibility lag.
@@ -86,7 +102,10 @@ class VADAudioRecorder(
                     if (isPaused || muted) {
                         if (isRecording) {
                             isRecording = false
-                            synchronized(dataLock) { recordedData.clear() }
+                            synchronized(dataLock) {
+                                recordedData.clear()
+                                preRollChunks.clear()
+                            }
                             detector.reset()
                         }
                         delay(200)
@@ -112,7 +131,15 @@ class VADAudioRecorder(
                         if (!isRecording && speechFrames >= speechThreshold) {
                             isRecording = true
                             withContext(Dispatchers.Main) { onSpeechStart() }
-                            synchronized(dataLock) { recordedData.clear() }
+                            synchronized(dataLock) {
+                                // Prepend the pre-trigger chunks — they include the
+                                // onset that actually caused the detection — ahead of
+                                // the live append below, so nothing before isRecording
+                                // is lost. Clearing the ring afterwards lets it refill
+                                // with fresh audio for the next utterance.
+                                recordedData.addAll(0, preRollChunks)
+                                preRollChunks.clear()
+                            }
                         }
                         
                         if (isRecording) {
@@ -122,10 +149,24 @@ class VADAudioRecorder(
                                 val file = saveToWav()
                                 isPaused = true // Pause until resumed by service (e.g. after response)
                                 withContext(Dispatchers.Main) { onSpeechEnd(file) }
-                                synchronized(dataLock) { recordedData.clear() }
+                                synchronized(dataLock) {
+                                    recordedData.clear()
+                                    preRollChunks.clear()
+                                }
                                 detector.reset()
                                 speechFrames = 0
                                 silenceFrames = 0
+                            }
+                        }
+
+                        // M-pre-roll capture: while not recording, continuously keep the
+                        // most recent chunks (oldest evicted at capacity). Captured AFTER
+                        // the append block above so the chunk that trips the threshold is
+                        // appended live exactly once and never duplicated in the ring.
+                        if (!isRecording) {
+                            synchronized(dataLock) {
+                                if (preRollChunks.size >= preRollCapacity) preRollChunks.removeFirst()
+                                preRollChunks.addLast(buffer.copyOf())
                             }
                         }
                     }
@@ -149,7 +190,10 @@ class VADAudioRecorder(
         // atomic against add() and saveToWav()'s snapshot (the CME source). The loop can
         // still append one orphan chunk if it already passed its flag check — harmless,
         // the next start()/speech-start clears it.
-        synchronized(dataLock) { recordedData.clear() }
+        synchronized(dataLock) {
+            recordedData.clear()
+            preRollChunks.clear()
+        }
         detector.reset()
         Log.d("VADAudioRecorder", "VAD monitoring stopped")
     }
