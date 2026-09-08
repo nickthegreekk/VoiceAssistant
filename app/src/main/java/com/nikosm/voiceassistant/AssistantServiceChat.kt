@@ -1405,8 +1405,6 @@ fun AssistantService.syncOpenRouterPricing(force: Boolean = false) {
                 }
                 
                 android.util.Log.d("PricingSync", "Synced ${newPricing.size} models from OpenRouter")
-                
-                android.util.Log.d("PricingSync", "Synced ${newPricing.size} models from OpenRouter")
             }
         } catch (e: CancellationException) {
             throw e

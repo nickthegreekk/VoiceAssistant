@@ -28,6 +28,7 @@ import androidx.annotation.RequiresPermission
 import androidx.compose.ui.graphics.Color
 import androidx.core.app.NotificationCompat
 import kotlinx.coroutines.*
+import kotlin.concurrent.Volatile
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -250,6 +251,11 @@ class AssistantService : Service() {
 
     lateinit var tts: TextToSpeech
     var ttsReady = false
+    // DCL visibility (review): @Volatile is REQUIRED here — the espeakEngine getter's
+    // fast path reads this field outside espeakLock, so without it a racing thread
+    // could see a non-null but stale/partially-constructed reference on multi-core
+    // (DCL without @Volatile on the backing field is the classic broken form).
+    @Volatile
     private var _espeakEngine: EspeakEngine? = null
     // espeak-ng keeps its state in process-global natives, so EspeakEngine construction
     // must be exactly-once: two concurrent constructors (e.g. the warm-up racing a first
@@ -466,6 +472,12 @@ class AssistantService : Service() {
     // the recorder leaked when STOP was pressed during an active recording).
     internal var outputFile: File? = null
     var currentPlayer: MediaPlayer? = null
+
+    // M4-adjacent: written on Dispatchers.IO by the chat/gateway flows, cancelled/read
+    // on Main by the Stop button — @Volatile guarantees the Main thread sees the
+    // in-flight call instead of a stale null (a missed cancel is still harmless —
+    // stopEverything()'s generation bump discards the turn — but visibility is free).
+    @Volatile
     var currentCall: Call? = null
     var currentAudioTrack: AudioTrack? = null
     // A3: utterance ID issued by the most recent speakTextOnDevice() call. TTS

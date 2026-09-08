@@ -5,6 +5,7 @@ import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.util.Log
+import kotlin.concurrent.Volatile
 import kotlinx.coroutines.*
 import java.io.File
 import java.io.FileOutputStream
@@ -45,7 +46,12 @@ class VADAudioRecorder(
     private val dataLock = Any()
 
     
+    // M4-adjacent: written from Main (toggleMicMute / the state watcher's pause()),
+    // read on the IO recording loop — @Volatile removes the visibility lag.
+    @Volatile
     var muted = false
+
+    @Volatile
     var isPaused = false
         private set
 
