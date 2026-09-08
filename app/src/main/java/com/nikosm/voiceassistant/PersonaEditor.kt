@@ -141,12 +141,45 @@ fun PersonaEditor(
 
     // Flush-on-close: the debounce's delay(500) is cancelled when the composable
     // leaves composition, so closing within 500ms of an edit silently discards it.
-    // This ref always holds the latest onSave (in "add" mode it switches from
-    // addPersona to updatePersona after the first save), and lastSavedPersona
-    // lets the dispose-time flush skip a save the debounce already made.
+    // These refs always hold the latest values (re-assigned on every recomposition,
+    // exactly like onSaveRef below): onSave switches from addPersona to updatePersona
+    // after the first save, lastSavedPersona lets the dispose-time flush skip a save
+    // the debounce already made, and disposeSnapshotRef carries the current persona
+    // plus the live local field values into the flush — which matters because
+    // DisposableEffect(Unit) itself never re-keys: without the ref its closure would
+    // stay bound to the FIRST composition's persona and field states forever, and in
+    // the add flow the first debounced save swaps the persona instance (add→edit)
+    // and re-keys every remember(persona) state, so a close-time flush built from the
+    // frozen originals reverted the persona to its pre-transition values, discarding
+    // everything typed after that point (the "new persona name doesn't stick" bug).
     val onSaveRef = remember { mutableStateOf(onSave) }
     onSaveRef.value = onSave
     var lastSavedPersona by remember { mutableStateOf(persona) }
+    val disposeSnapshotRef = remember { mutableStateOf(persona) }
+    disposeSnapshotRef.value = persona.copy(
+        name = name,
+        model = model.trim(),
+        systemPrompt = systemPrompt,
+        themeColor = themeColor,
+        isCloud = persona.isCloud,
+        providerIcon = persona.providerIcon,
+        temperature = temp,
+        topP = topP,
+        topK = topK,
+        repeatPenalty = repeatPenalty,
+        maxTokens = maxTokens,
+        numCtx = numCtx,
+        enableThinking = enableThinking,
+        webSearchEnabled = webSearchEnabled,
+        ragEnabled = ragEnabled,
+        allowGatewayFailover = allowGatewayFailover,
+        isTranslator = isTranslator,
+        targetLanguage = targetLanguage,
+        voiceMode = voiceMode,
+        voiceEngine = voiceEngine,
+        kokoroVoice = kokoroVoice,
+        backendUrl = backendUrl
+    )
 
     val initialConnection = remember(persona) {
         if (model.startsWith("[") && model.contains("] ")) {
@@ -240,36 +273,13 @@ fun PersonaEditor(
         }
     }
 
-    // Flush any pending edit on dispose. Captures the latest local state at close
-    // time and saves it — but only if it differs from what the debounce already
-    // saved, so a normal close (debounce already fired) doesn't double-save.
+    // Flush any pending edit on dispose. Reads everything through the refs above, so
+    // it sees the live persona and field values at close time regardless of the
+    // add→edit transition — and only saves if it differs from what the debounce
+    // already saved, so a normal close doesn't double-save.
     DisposableEffect(Unit) {
         onDispose {
-            val trimmedModel = model.trim()
-            val updated = persona.copy(
-                name = name,
-                model = trimmedModel,
-                systemPrompt = systemPrompt,
-                themeColor = themeColor,
-                isCloud = persona.isCloud,
-                providerIcon = persona.providerIcon,
-                temperature = temp,
-                topP = topP,
-                topK = topK,
-                repeatPenalty = repeatPenalty,
-                maxTokens = maxTokens,
-                numCtx = numCtx,
-                enableThinking = enableThinking,
-                webSearchEnabled = webSearchEnabled,
-                ragEnabled = ragEnabled,
-                allowGatewayFailover = allowGatewayFailover,
-                isTranslator = isTranslator,
-                targetLanguage = targetLanguage,
-                voiceMode = voiceMode,
-                voiceEngine = voiceEngine,
-                kokoroVoice = kokoroVoice,
-                backendUrl = backendUrl
-            )
+            val updated = disposeSnapshotRef.value
             if (updated != lastSavedPersona) {
                 onSaveRef.value(updated)
             }
