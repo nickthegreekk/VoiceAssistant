@@ -17,6 +17,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import org.json.JSONObject
 import java.io.File
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
 // ---- Plain-text attachment support ----
@@ -142,8 +143,13 @@ private fun isUserCancellation(e: Throwable): Boolean =
 // A3: a failed server becomes eligible for retry after a cooldown (e.g. 60 s) instead
 // of being excluded until a manual refresh. Server URL -> epoch ms of when the next
 // attempt is allowed. Held in a plain (non-reactive) field because the retry pool only
-// needs the most recent mark; UI display/logic are unaffected.
-internal val serverFailCooldownUntilMillis = mutableMapOf<String, Long>()
+// needs the most recent mark; UI display/logic are unaffected. M4: ConcurrentHashMap —
+// it is READ on Dispatchers.IO (isServerHealthyForRetry, from the failover pools built
+// inside withContext(IO) blocks) and WRITTEN on Main (the failure handlers), so the
+// map type itself provides the cross-thread safety a HashMap would lack. Values are
+// never null (epoch-ms stamps) and keys are non-null URLs, so ConcurrentHashMap's
+// null restrictions don't apply.
+internal val serverFailCooldownUntilMillis = ConcurrentHashMap<String, Long>()
 
 // A3: returns true if the server is currently OK to try. A server is allowed back once
 // FAILED_COOLDOWN_MS has elapsed since it was marked failed, and a status that isn't a
