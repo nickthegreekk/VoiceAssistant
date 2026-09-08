@@ -215,10 +215,13 @@ class AssistantService : Service() {
     // B3 (chat): concurrent model fetches must not let one finishing call leave
     // _isLoadingModels=false while another is still in flight. A single boolean can't
     // represent that; track the number of in-flight fetches instead and only clear the
-    // flag when the count returns to zero. Both callers (fetchModels/fetchCloudModels)
-    // update the count on the Main dispatcher, so it's only ever touched there — no
-    // lock needed. Validate with a hard floor at 0 so a defensive decrement can never
-    // go negative.
+    // flag when the count returns to zero. The counter is only ever touched on the
+    // Main dispatcher: increments run on the callers' thread (always Main), and both
+    // fetchers decrement inside withContext(Dispatchers.Main) — fetchModels in its
+    // completion block, fetchCloudModels in its finally (which would otherwise run on
+    // Dispatchers.IO). That Main confinement is the thread-safety contract for this
+    // plain Int — no lock/atomic needed. Hard floor at 0 so a defensive decrement can
+    // never go negative.
     private var modelFetchInFlightCount = 0
 
     internal fun incrementModelFetchCount() {
@@ -1561,7 +1564,10 @@ class AssistantService : Service() {
                     _serverStatus.value = statusMap
                 }
             } finally {
-                decrementModelFetchCount()
+                // M1: the counter is Main-confined (see the block comment above) — this
+                // finally runs on Dispatchers.IO, so hop back to Main before
+                // decrementing. Matches how fetchModels decrements.
+                withContext(Dispatchers.Main) { decrementModelFetchCount() }
             }
         }
     }
