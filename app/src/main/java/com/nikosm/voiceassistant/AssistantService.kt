@@ -1375,15 +1375,22 @@ class AssistantService : Service() {
         incrementModelFetchCount()
         val baseUrl = api.baseUrl.trim().removeSuffix("/")
         serviceScope.launch(Dispatchers.IO) {
-            val statusMap = _serverStatus.value.toMutableMap()
-            statusMap.remove(api.name)
+            // #3 (cloud) fix: do NOT snapshot _serverStatus at coroutine start and write
+            // it back wholesale at the end — multiple cloud providers fetch concurrently
+            // (one coroutine per provider from loadSettings), so the last provider to
+            // finish would clobber every sibling's status entry with its own stale
+            // snapshot. Same stale-snapshot bug the B3 fix removed from fetchModels.
+            // Track JUST this provider's own outcome, and at write-time update only that
+            // one entry in the LIVE map (read-modify-write), leaving concurrent updates
+            // from other providers untouched.
+            var status: String? = null
             try {
                 val models = when (api.icon) {
                     "G" -> { // Google
                         val url = "https://generativelanguage.googleapis.com/v1beta/models?key=${api.apiKey}"
                         standardClient.newCall(Request.Builder().url(url).build()).execute().use { response ->
                             if (!response.isSuccessful) {
-                                statusMap[api.name] = "Google API Error: ${response.code}"
+                                status = "Google API Error: ${response.code}"
                                 return@use emptyList<String>()
                             }
                             val json = JSONObject(response.body.string())
@@ -1417,7 +1424,7 @@ class AssistantService : Service() {
                             .build()
                         standardClient.newCall(request).execute().use { response ->
                             if (!response.isSuccessful) {
-                                statusMap[api.name] = "Anthropic Error: ${response.code}"
+                                status = "Anthropic Error: ${response.code}"
                                 return@use emptyList<String>()
                             }
                             val json = JSONObject(response.body.string())
@@ -1436,7 +1443,7 @@ class AssistantService : Service() {
                         val url = if (baseUrl.endsWith("/models")) baseUrl else "$baseUrl/models"
                         standardClient.newCall(Request.Builder().url(url).header("Authorization", "Bearer ${api.apiKey}").build()).execute().use { response ->
                             if (!response.isSuccessful) {
-                                statusMap[api.name] = when(response.code) {
+                                status = when(response.code) {
                                     401 -> "Invalid API Key"
                                     429 -> "Rate limit exceeded"
                                     else -> "Fetch failed: ${response.code}"
@@ -1472,13 +1479,24 @@ class AssistantService : Service() {
                     val current = _fetchedCloudModels.value.toMutableMap()
                     current[api.name] = models
                     _fetchedCloudModels.value = current
+                    // #3: apply ONLY this provider's entry into the LIVE status map —
+                    // success clears it (as the old start-of-fetch snapshot.remove did),
+                    // an error records it. Never a wholesale write: a sibling provider
+                    // finishing concurrently keeps its own entry untouched.
+                    val statusMap = _serverStatus.value.toMutableMap()
+                    val ownStatus = status
+                    if (ownStatus != null) statusMap[api.name] = ownStatus else statusMap.remove(api.name)
                     _serverStatus.value = statusMap
                 }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                statusMap[api.name] = e.message ?: "Cloud fetch failed"
-                withContext(Dispatchers.Main) { _serverStatus.value = statusMap }
+                // #3: read-modify-write the LIVE map here too — only our own entry.
+                withContext(Dispatchers.Main) {
+                    val statusMap = _serverStatus.value.toMutableMap()
+                    statusMap[api.name] = e.message ?: "Cloud fetch failed"
+                    _serverStatus.value = statusMap
+                }
             } finally {
                 decrementModelFetchCount()
             }
