@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import android.media.audiofx.AcousticEchoCanceler
 import android.util.Log
 import kotlin.concurrent.Volatile
 import kotlinx.coroutines.*
@@ -20,6 +21,14 @@ class VADAudioRecorder(
     private val onSpeechEnd: (File) -> Unit
 ) {
     private var job: Job? = null
+
+    // VoV step 1 (standalone AEC wiring test): the native AcousticEchoCanceler attached
+    // to the current AudioRecord's session, or null when unavailable / attach failed.
+    // Created in start() on the IO loop, released in that loop's finally — same lifecycle
+    // as the AudioRecord itself. @Volatile matches muted/isPaused: the attach happens on
+    // one IO worker, the finally release may run on another after a suspension point.
+    @Volatile
+    private var acousticEchoCanceler: AcousticEchoCanceler? = null
     
     private val sampleRate = 16000
     private val chunkSize = 512
@@ -90,6 +99,43 @@ class VADAudioRecorder(
                 isMonitoring = false
                 Log.e("VADAudioRecorder", "AudioRecord initialization failed")
                 return@launch
+            }
+
+            // VoV step 1: attach Android's native AcousticEchoCanceler to this
+            // AudioRecord's session. Hardware/software AEC support varies per device,
+            // so this is a pure availability + attach test: log the outcome and keep
+            // going either way. The whole block is best-effort — an AEC problem must
+            // never take VAD monitoring down, we simply continue without AEC.
+            acousticEchoCanceler = try {
+                val aecAvailable = AcousticEchoCanceler.isAvailable()
+                Log.d("VADAudioRecorder", "AEC available: $aecAvailable")
+                if (aecAvailable) {
+                    val aec = AcousticEchoCanceler.create(audioRecord.audioSessionId)
+                    if (aec != null) {
+                        val enableResult = aec.setEnabled(true)
+                        Log.d(
+                            "VADAudioRecorder",
+                            "AEC attached to session ${audioRecord.audioSessionId}: " +
+                                "setEnabled(true) result=$enableResult, enabled=${aec.enabled}"
+                        )
+                        aec
+                    } else {
+                        Log.w(
+                            "VADAudioRecorder",
+                            "AEC reported available but create() returned null — continuing without AEC"
+                        )
+                        null
+                    }
+                } else {
+                    Log.d(
+                        "VADAudioRecorder",
+                        "AEC not available on this device — continuing without AEC"
+                    )
+                    null
+                }
+            } catch (e: Exception) {
+                Log.w("VADAudioRecorder", "AEC attach failed (continuing without AEC): ${e.message}")
+                null
             }
             
             try {
@@ -174,6 +220,18 @@ class VADAudioRecorder(
             } catch (e: Exception) {
                 Log.e("VADAudioRecorder", "Recording error: ${e.message}")
             } finally {
+                // VoV step 1: release the AEC together with the AudioRecord it is
+                // attached to — the effect must be released before its audio session
+                // goes away. Never fatal: release problems are logged, not thrown.
+                try {
+                    if (acousticEchoCanceler != null) {
+                        acousticEchoCanceler?.release()
+                        acousticEchoCanceler = null
+                        Log.d("VADAudioRecorder", "AEC released")
+                    }
+                } catch (e: Exception) {
+                    Log.w("VADAudioRecorder", "AEC release failed: ${e.message}")
+                }
                 try { audioRecord.stop() } catch (e: Exception) {}
                 audioRecord.release()
                 isMonitoring = false
