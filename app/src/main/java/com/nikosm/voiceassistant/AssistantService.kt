@@ -14,6 +14,13 @@ import android.media.AudioDeviceInfo
 import android.media.AudioFormat
 import android.media.AudioFocusRequest
 import android.media.AudioManager
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
+import android.os.Handler
+import android.os.Looper
+import android.telephony.TelephonyManager
 import android.media.AudioTrack
 import android.media.MediaPlayer
 import android.media.MediaRecorder
@@ -383,6 +390,180 @@ class AssistantService : Service() {
     var audioFocusRequest: AudioFocusRequest? = null
     private var pausedByFocusLoss = false
 
+    // -----------------------------------------------------------------------
+    // Proximity barge-in (SPEAKING only): waving a hand over the phone during
+    // playback interrupts it via the SAME mechanism as the physical STOP
+    // button — stopEverything() — just gesture-triggered instead of tapped.
+    //
+    // Lifecycle: the state watcher below registers the listener exactly when
+    // _state enters SPEAKING and unregisters on leaving it (natural completion,
+    // Stop, or the gesture itself — any path that leaves SPEAKING), so the
+    // sensor is never listened to outside actual playback.
+    //
+    // Debounce: a single near reading arms a 200ms confirmation on the main
+    // handler. A FAR reading arriving inside that window (a phone being set
+    // down / picked up, a hand passing through in a fraction of a second)
+    // disarms it — only a sustained hover (near held for 200ms with no far
+    // transition) triggers. 200ms was chosen as the balance point: deliberate
+    // hand-over gestures naturally exceed it by a wide margin, while
+    // incidental passes (a wave past the phone, handling the device) typically
+    // complete in well under 150ms. It is also imperceptible as barge-in
+    // latency.
+    //
+    // Near detection: proximity hardware is one of two families — binary
+    // (reports 0 = near, maximumRange = far) or short-range distance in cm
+    // (0..5..8cm max). A threshold at half the sensor's maximum range classifies
+    // "near" correctly for both families and both wave-over and hover gestures.
+    //
+    // Graceful degradation: no TYPE_PROXIMITY sensor (getDefaultSensor null) →
+    // never registered, logged once, zero effect — the feature simply doesn't
+    // exist on that device.
+    //
+    // Call guard: the trigger is skipped when the phone is RINGING or OFFHOOK
+    // (checked at trigger time via the permission-free coarse callState) —
+    // holding the phone to your ear for a real call must not fire the gesture.
+    // -----------------------------------------------------------------------
+    private val sensorManager: SensorManager? by lazy {
+        getSystemService(SENSOR_SERVICE) as? SensorManager
+    }
+    private val telephonyManager: TelephonyManager? by lazy {
+        getSystemService(TELEPHONY_SERVICE) as? TelephonyManager
+    }
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var proximitySensor: Sensor? = null
+    private var proximityRegistered = false
+    private var proximityNearArmed = false
+    private var proximityUnavailableLogged = false
+    // Logged once (not per playback) — the earpiece-mode skip is the expected
+    // steady state for users who prefer earpiece routing.
+    private var proximityEarpieceSkipLogged = false
+
+    private val proximityConfirmRunnable = Runnable {
+        if (!proximityRegistered || !proximityNearArmed) return@Runnable
+        if (earpieceMode.value) {
+            // Earpiece mode was toggled on after this playback started (the
+            // listener was armed under speaker mode). Phone-to-ear is normal
+            // usage there — same rule as the registration-time gate.
+            android.util.Log.i(
+                "ProximityBargeIn",
+                "Near reading sustained but earpiece mode is active — skipping trigger"
+            )
+            disarmProximityConfirm()
+            return@Runnable
+        }
+        if (isPhoneCallActive()) {
+            // A sustained near reading during an active/ringing call is most
+            // likely the phone against the ear, not a wave-to-interrupt
+            // gesture. Skip — and disarm so the next hand movement re-arms
+            // naturally rather than triggering the instant the call ends.
+            android.util.Log.i(
+                "ProximityBargeIn",
+                "Near reading sustained but a phone call is active — skipping trigger"
+            )
+            disarmProximityConfirm()
+            return@Runnable
+        }
+        android.util.Log.i(
+            "ProximityBargeIn",
+            "Sustained near reading during playback — interrupting via stopEverything()"
+        )
+        stopEverything()
+    }
+
+    // Point-in-time check at trigger time via the non-deprecated
+    // TelephonyManager.callState property (API 31+, correct for this project's
+    // minSdk 31 — PhoneStateListener is deprecated and CallStateListener is a
+    // continuous monitor we don't need). The coarse call state requires NO
+    // permission: READ_PHONE_STATE is only needed for precise per-subscription
+    // state, which this deliberately avoids. On any unexpected failure, treat
+    // as "no call" so the barge-in feature itself never breaks.
+    private fun isPhoneCallActive(): Boolean = try {
+        val state = telephonyManager?.callState
+        val active =
+            state == TelephonyManager.CALL_STATE_OFFHOOK || state == TelephonyManager.CALL_STATE_RINGING
+        if (active) {
+            android.util.Log.d("ProximityBargeIn", "Call state=$state — treating as active call")
+        }
+        active
+    } catch (e: Exception) {
+        android.util.Log.d(
+            "ProximityBargeIn",
+            "Call-state check unavailable (${e.javaClass.simpleName}) — assuming no active call"
+        )
+        false
+    }
+
+    private val proximityListener = object : SensorEventListener {
+        override fun onSensorChanged(event: SensorEvent) {
+            val value = event.values.firstOrNull() ?: return
+            val near = value < event.sensor.maximumRange * 0.5f
+            if (near) {
+                if (!proximityNearArmed) {
+                    proximityNearArmed = true
+                    mainHandler.postDelayed(proximityConfirmRunnable, PROXIMITY_DEBOUNCE_MS)
+                }
+            } else {
+                disarmProximityConfirm()
+            }
+        }
+
+        override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+    }
+
+    private fun registerProximityBargeIn() {
+        // Earpiece mode: bringing the phone to the ear is the normal way to
+        // listen in this routing, so a sustained "near" reading is expected
+        // usage, not a wave-to-interrupt gesture. Keep the proximity barge-in
+        // disarmed for the whole playback (the Stop button and the wave
+        // gesture in speaker mode still cover interrupting).
+        if (earpieceMode.value) {
+            if (!proximityEarpieceSkipLogged) {
+                proximityEarpieceSkipLogged = true
+                android.util.Log.i("ProximityBargeIn", "Earpiece mode — proximity barge-in not armed (phone-to-ear is normal usage there)")
+            }
+            return
+        }
+        val manager = sensorManager
+        if (manager == null) {
+            if (!proximityUnavailableLogged) {
+                proximityUnavailableLogged = true
+                android.util.Log.d("ProximityBargeIn", "SensorManager unavailable — proximity barge-in disabled")
+            }
+            return
+        }
+        val sensor = proximitySensor
+            ?: manager.getDefaultSensor(Sensor.TYPE_PROXIMITY)?.also { proximitySensor = it }
+        if (sensor == null) {
+            if (!proximityUnavailableLogged) {
+                proximityUnavailableLogged = true
+                android.util.Log.i("ProximityBargeIn", "No proximity sensor on this device — barge-in disabled (graceful)")
+            }
+            return
+        }
+        if (!proximityRegistered) {
+            proximityRegistered = true
+            manager.registerListener(proximityListener, sensor, SensorManager.SENSOR_DELAY_NORMAL)
+            android.util.Log.d("ProximityBargeIn", "Armed for SPEAKING (maxRange=${sensor.maximumRange})")
+        }
+    }
+
+    private fun unregisterProximityBargeIn() {
+        disarmProximityConfirm()
+        if (proximityRegistered) {
+            proximityRegistered = false
+            sensorManager?.unregisterListener(proximityListener)
+            android.util.Log.d("ProximityBargeIn", "Disarmed (left SPEAKING)")
+        }
+    }
+
+    private fun disarmProximityConfirm() {
+        if (proximityNearArmed) {
+            proximityNearArmed = false
+            mainHandler.removeCallbacks(proximityConfirmRunnable)
+        }
+    }
+
+
     val audioFocusChangeListener = AudioManager.OnAudioFocusChangeListener { focusChange ->
         when (focusChange) {
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT,
@@ -568,6 +749,14 @@ class AssistantService : Service() {
                     AssistantState.IDLE -> vadRecorder?.resume()
                     AssistantState.SPEAKING -> vadRecorder?.pause()
                     else -> {}
+                }
+                // Proximity barge-in: listen ONLY during actual playback. Any
+                // transition out of SPEAKING — natural completion, Stop, or the
+                // gesture itself — unregisters immediately.
+                if (state == AssistantState.SPEAKING) {
+                    registerProximityBargeIn()
+                } else {
+                    unregisterProximityBargeIn()
                 }
             }
         }
@@ -1272,6 +1461,9 @@ class AssistantService : Service() {
         stopAudio()
         tts.stop()
         tts.shutdown()
+        // Safety: release the proximity listener with the service (normally
+        // already unregistered by the state watcher's SPEAKING-exit path).
+        unregisterProximityBargeIn()
         vadRecorder?.stop()
         vadDetector?.close()
         // vadDetector is a file-level static, so it survives this destroy and would be
@@ -1637,6 +1829,10 @@ class AssistantService : Service() {
 
 
     companion object {
+        // Proximity barge-in debounce window (see the comment block on the
+        // proximity fields above).
+        private const val PROXIMITY_DEBOUNCE_MS = 200L
+
         private const val CHANNEL_ID = "assistant_service_channel"
         private const val NOTIFICATION_ID = 1
         private const val SAVE_DEBOUNCE_MS = 400L
