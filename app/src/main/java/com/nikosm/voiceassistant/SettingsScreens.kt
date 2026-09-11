@@ -140,12 +140,16 @@ fun SettingsDialog(service: AssistantService?, onDismiss: () -> Unit, personaCol
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        modifier = Modifier.fillMaxWidth().fillMaxHeight(0.9f),
+        // Fullscreen settings: fill the whole screen (the previous 90%-height
+        // window with 16dp gutters wasted space on dense tabs like Servers).
+        // Scoped to the dialog only — the system back gesture/button still
+        // dismisses via onDismissRequest.
+        modifier = Modifier.fillMaxSize(),
         properties = DialogProperties(usePlatformDefaultWidth = false)
     ) {
         Surface(
-            modifier = Modifier.padding(16.dp),
-            shape = MaterialTheme.shapes.large,
+            modifier = Modifier.fillMaxSize(),
+            shape = androidx.compose.ui.graphics.RectangleShape,
             color = MaterialTheme.colorScheme.surface,
             tonalElevation = 6.dp
         ) {
@@ -204,6 +208,13 @@ fun SettingsDialog(service: AssistantService?, onDismiss: () -> Unit, personaCol
 @Composable
 fun GeneralSettings(service: AssistantService, totalCost: Double, onDismiss: () -> Unit) {
 
+    // Celestial UI toggle state (collected from the service so the switch
+    // reflects the live value and flips reactively when changed).
+    var celestialUi by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        service.celestialUi.collect { celestialUi = it }
+    }
+
     // Fix #7: optional password encryption for exported backups. The password is
     // collected HERE (checkbox + fields + validation below), but the actual
     // encryption/decryption runs service-side on serviceScope — see
@@ -241,6 +252,31 @@ fun GeneralSettings(service: AssistantService, totalCost: Double, onDismiss: () 
     }
 
     LazyColumn(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+        item {
+            SettingsSectionHeader(title = "Appearance", icon = Icons.Default.Palette)
+            SettingsSection {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Celestial UI (beta)", style = MaterialTheme.typography.titleMedium)
+                        Text(
+                            "Starfield + planet voice screen with HUD transcript. " +
+                                "Text mode keeps the classic layout. Toggle back anytime.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                        )
+                    }
+                    Switch(
+                        checked = celestialUi,
+                        onCheckedChange = { service.setCelestialUi(it) }
+                    )
+                }
+            }
+        }
+
         item {
             SettingsSectionHeader(title = "Data & Usage", icon = Icons.Default.Analytics)
             SettingsSection {

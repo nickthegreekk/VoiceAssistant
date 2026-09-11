@@ -217,6 +217,9 @@ internal fun AssistantService.sendAudioToServer(file: File, currentPersona: Pers
             return@launch
         }
 
+        // Hoisted so the Stage-1 streaming cancellation catch can persist the
+        // transcribed text alongside the kept partial response (D2).
+        var transcribedText: String = ""
         try {
             val responseData = withContext(Dispatchers.IO) {
                 val rawModel = currentPersona.model
@@ -237,7 +240,7 @@ internal fun AssistantService.sendAudioToServer(file: File, currentPersona: Pers
                      val ollamaBase = _ollamaBaseUrls.value.find { it.name == displayServer }?.url
                      if (ollamaBase != null) {
                          // 1. Transcribe via Gateway
-                         val transcribedText = transcribeWithGateway(file, currentPersona)
+                         transcribedText = transcribeWithGateway(file, currentPersona)
                              ?: throw Exception("Could not transcribe audio. Check Gateway connection.")
                          if (transcribedText.isBlank()) {
                              // M3: gateway healthy, audio had no detectable speech —
@@ -246,7 +249,7 @@ internal fun AssistantService.sendAudioToServer(file: File, currentPersona: Pers
                          }
 
                          // 2. Chat with Ollama
-                         val directRes = performDirectOllamaChat(ollamaBase, actualModel, transcribedText, currentPersona, currentTurnInHistory = false)
+                         val directRes = performDirectOllamaChat(ollamaBase, actualModel, transcribedText, currentPersona, currentTurnInHistory = false, generation = generation)
                          // Fix #5 (voice-flow follow-up): clean markdown for TTS on IO —
                          // the cleaned variant feeds the on-device engines (5th element);
                          // the chat bubble/history keep the original markdown. This branch
@@ -423,9 +426,23 @@ internal fun AssistantService.sendAudioToServer(file: File, currentPersona: Pers
                 outFile.absolutePath
             } else null
 
-            _messages.value = _messages.value +
-                ChatMessage("user", uText as String) +
-                ChatMessage("assistant", rText as String, reasoning as? String, audioFilePath = audioPath, responseTimeMs = responseTimeMs)
+            // Stage-1 streaming: when this turn streamed, the trailing assistant
+            // placeholder is already in the list (content built up during the
+            // stream) but the user turn is NOT (voice flow appends user+assistant
+            // together at apply). Swap: drop the placeholder, append user+final.
+            val streamedIdx = streamedPlaceholderIndex
+            streamedPlaceholderIndex = null
+            _streamingText.value = null
+            if (streamedIdx != null && streamedIdx < _messages.value.size) {
+                val base = _messages.value.toMutableList().also { it.removeAt(streamedIdx) }.toList()
+                _messages.value = base +
+                    ChatMessage("user", uText as String) +
+                    ChatMessage("assistant", rText as String, reasoning as? String, audioFilePath = audioPath, responseTimeMs = responseTimeMs)
+            } else {
+                _messages.value = _messages.value +
+                    ChatMessage("user", uText as String) +
+                    ChatMessage("assistant", rText as String, reasoning as? String, audioFilePath = audioPath, responseTimeMs = responseTimeMs)
+            }
             saveSettings()
 
             if (useDeviceVoice) {
@@ -435,6 +452,33 @@ internal fun AssistantService.sendAudioToServer(file: File, currentPersona: Pers
             }
         } catch (e: CancellationException) {
             throw e
+        } catch (e: StreamCancelledByUserException) {
+            // D2: Stop interrupted a mid-stream voice turn — keep the partial as
+            // genuine history: user turn + partial assistant message (the voice
+            // flow's apply would have appended both).
+            if (currentPersonaName == personaName && e.partialContent.isNotBlank()) {
+                val streamedIdx = streamedPlaceholderIndex
+                val base = if (streamedIdx != null && streamedIdx < _messages.value.size) {
+                    _messages.value.toMutableList().also { it.removeAt(streamedIdx) }.toList()
+                } else _messages.value
+                _messages.value = base +
+                    ChatMessage("user", transcribedText) +
+                    ChatMessage("assistant", e.partialContent, e.partialThinking.ifBlank { null })
+                saveSettings()
+            } else {
+                removeBlankPlaceholderSvc()
+            }
+            streamedPlaceholderIndex = null
+            _streamingText.value = null
+            android.util.Log.d("AssistantService", "Voice stream cancelled by user — partial kept (${e.partialContent.length} chars)")
+            currentCall = null
+        } catch (e: StreamPersonaChangedException) {
+            // Partial already written back into the previous persona's persisted
+            // history inside performDirectOllamaChat — nothing to apply here.
+            streamedPlaceholderIndex = null
+            _streamingText.value = null
+            android.util.Log.d("AssistantService", "Voice stream cancelled — persona changed; partial kept in previous persona history")
+            currentCall = null
         } catch (e: Exception) {
             if (!isChatRequestCurrent(generation)) {
                 android.util.Log.d("AssistantService", "Chat request superseded by a newer request — discarding failure: ${e.message}")
@@ -452,6 +496,9 @@ internal fun AssistantService.sendAudioToServer(file: File, currentPersona: Pers
                 currentCall = null
             }
         } finally {
+            removeBlankPlaceholderSvc()
+            streamedPlaceholderIndex = null
+            _streamingText.value = null
             if (_state.value == AssistantState.THINKING && isChatRequestCurrent(generation)) {
                 _state.value = AssistantState.IDLE
                 updateNotification("Ready to help")
@@ -512,7 +559,7 @@ internal fun AssistantService.sendTextMessageToServer(inputText: String, current
                 if (displayServer != null) {
                      val ollamaBase = _ollamaBaseUrls.value.find { it.name == displayServer }?.url
                      if (ollamaBase != null) {
-                         val directRes = performDirectOllamaChat(ollamaBase, actualModel, inputText, currentPersona, attachments = attachments, currentTurnInHistory = true)
+                         val directRes = performDirectOllamaChat(ollamaBase, actualModel, inputText, currentPersona, attachments = attachments, currentTurnInHistory = true, generation = generation)
                          // Fix #5: clean markdown for TTS on IO — the cleaned variant feeds
                          // the on-device engines; the chat bubble/history keep the original.
                          val cleanedForTts = cleanTextForTts(directRes.first)
@@ -719,7 +766,27 @@ internal fun AssistantService.sendTextMessageToServer(inputText: String, current
                 outFile.absolutePath
             } else null
 
-            _messages.value = _messages.value + ChatMessage("assistant", rText as String, reasoning as? String, audioFilePath = audioPath, responseTimeMs = responseTimeMs)
+            // Stage-1 streaming: when this turn streamed, the trailing assistant
+            // placeholder is already in the list with the content built up —
+            // finalize it IN PLACE (single final write; never a second append).
+            val streamedIdx = streamedPlaceholderIndex
+            streamedPlaceholderIndex = null
+            _streamingText.value = null
+            if (streamedIdx != null && streamedIdx < _messages.value.size) {
+                _messages.value = _messages.value.mapIndexed { i, m ->
+                    if (i == streamedIdx) m.copy(
+                        text = rText as String,
+                        reasoning = reasoning as? String,
+                        audioFilePath = audioPath,
+                        responseTimeMs = responseTimeMs
+                    ) else m
+                }
+            } else {
+                _messages.value = _messages.value + ChatMessage(
+                    "assistant", rText as String, reasoning as? String,
+                    audioFilePath = audioPath, responseTimeMs = responseTimeMs
+                )
+            }
             saveSettings()
 
             if (useDeviceVoice) {
@@ -729,6 +796,26 @@ internal fun AssistantService.sendTextMessageToServer(inputText: String, current
             }
         } catch (e: CancellationException) {
             throw e
+        } catch (e: StreamCancelledByUserException) {
+            // D2: Stop interrupted a mid-stream text turn — the trailing
+            // placeholder already holds the partial text (updated per chunk);
+            // persist it as genuine history. No TTS (partial only).
+            if (currentPersonaName == personaName && e.partialContent.isNotBlank()) {
+                saveSettings()
+            } else {
+                removeBlankPlaceholderSvc()
+            }
+            streamedPlaceholderIndex = null
+            _streamingText.value = null
+            android.util.Log.d("AssistantService", "Stream cancelled by user — partial kept (${e.partialContent.length} chars)")
+            currentCall = null
+        } catch (e: StreamPersonaChangedException) {
+            // Partial already written back into the previous persona's persisted
+            // history inside performDirectOllamaChat — nothing to apply here.
+            streamedPlaceholderIndex = null
+            _streamingText.value = null
+            android.util.Log.d("AssistantService", "Stream cancelled — persona changed; partial kept in previous persona history")
+            currentCall = null
         } catch (e: Exception) {
             if (!isChatRequestCurrent(generation)) {
                 android.util.Log.d("AssistantService", "Chat request superseded by a newer request — discarding failure: ${e.message}")
@@ -746,6 +833,9 @@ internal fun AssistantService.sendTextMessageToServer(inputText: String, current
                 currentCall = null
             }
         } finally {
+            removeBlankPlaceholderSvc()
+            streamedPlaceholderIndex = null
+            _streamingText.value = null
             if (_state.value == AssistantState.THINKING && isChatRequestCurrent(generation)) {
                 _state.value = AssistantState.IDLE
                 updateNotification("Ready to help")
@@ -964,7 +1054,7 @@ private fun AssistantService.performCloudChat(text: String, persona: Persona, us
     }
 }
 
-private suspend fun AssistantService.performDirectOllamaChat(baseUrl: String, model: String, text: String, persona: Persona, currentTurnInHistory: Boolean, attachments: List<Uri> = emptyList()): Triple<String, String?, ByteArray?> {
+private suspend fun AssistantService.performDirectOllamaChat(baseUrl: String, model: String, text: String, persona: Persona, currentTurnInHistory: Boolean, generation: Long, attachments: List<Uri> = emptyList()): Triple<String, String?, ByteArray?> {
     // Resolve backend URL: fallback if empty or mistakenly pointing to a gateway (8880)
     val stripped = baseUrl.trim()
     val resolvedBackend = if (stripped.isBlank() || stripped.contains(":8880")) {
@@ -978,7 +1068,10 @@ private suspend fun AssistantService.performDirectOllamaChat(baseUrl: String, mo
     val url = if (resolvedBackend.endsWith("/api/chat")) resolvedBackend else "${resolvedBackend.trimEnd('/')}/api/chat"
     val json = JSONObject()
     json.put("model", model)
-    json.put("stream", false)
+    // Stage-1 streaming: NDJSON deltas so the UI can render the response as it
+    // is generated. Each line carries message.content (and message.thinking
+    // for reasoning models); the final line carries done=true plus usage stats.
+    json.put("stream", true)
 
     // A-attachments: the model-facing prompt includes extracted file content. The
     // original `text` is still used for search/news below.
@@ -1085,12 +1178,125 @@ private suspend fun AssistantService.performDirectOllamaChat(baseUrl: String, mo
     try {
         call.execute().use { response ->
             if (!response.isSuccessful) throw Exception("Ollama error: ${response.code}")
-            val body = response.body.string()
-            val message = JSONObject(body).getJSONObject("message")
-            val rText = message.getString("content")
-            val reasoning = if (persona.enableThinking && message.has("thinking")) message.getString("thinking").ifBlank { null } else null
 
-            return Triple(rText, reasoning, null)
+            // Stage-1 streaming: read the NDJSON line by line. Each line carries
+            // an incremental message.content delta (and message.thinking deltas
+            // for reasoning models); the final line carries done=true plus
+            // usage stats (eval_count / prompt_eval_count / total_duration).
+            // Those stats are logged only — nothing in the app currently
+            // consumes them (context budget is client-side estimateTokens;
+            // cost tracking is cloud-API-only), so moving them to the last
+            // NDJSON line breaks nothing.
+            val source = response.body.source()
+            val content = StringBuilder()
+            val thinkingBuf = StringBuilder()
+            var placeholderAppended = false
+
+            fun appendPlaceholderIfNeeded() {
+                if (placeholderAppended) return
+                _messages.value = _messages.value + ChatMessage("assistant", "")
+                streamedPlaceholderIndex = _messages.value.size - 1
+                placeholderAppended = true
+            }
+
+            fun updatePlaceholder() {
+                val idx = streamedPlaceholderIndex ?: return
+                val current = _messages.value.toMutableList()
+                if (idx in current.indices) {
+                    current[idx] = current[idx].copy(
+                        text = content.toString(),
+                        reasoning = thinkingBuf.toString().ifBlank { null }
+                    )
+                    _messages.value = current
+                }
+            }
+
+            fun removeBlankPlaceholder() {
+                val idx = streamedPlaceholderIndex ?: return
+                val current = _messages.value.toMutableList()
+                if (idx in current.indices && current[idx].text.isBlank()) {
+                    current.removeAt(idx)
+                    _messages.value = current
+                }
+                streamedPlaceholderIndex = null
+            }
+
+            try {
+                while (true) {
+                    val line = source.readUtf8Line() ?: break
+                    if (line.isBlank()) continue
+                    val obj = JSONObject(line)
+                    if (obj.optBoolean("done", false)) {
+                        if (BuildConfig.DEBUG) android.util.Log.d(
+                            "AssistantService",
+                            "Ollama stream done: eval_count=${obj.optInt("eval_count", -1)}, " +
+                                "prompt_eval_count=${obj.optInt("prompt_eval_count", -1)}, " +
+                                "total_duration_ms=${obj.optLong("total_duration", -1L) / 1_000_000L}"
+                        )
+                        break
+                    }
+                    val msgObj = obj.optJSONObject("message") ?: continue
+                    val chunk = msgObj.optString("content", "")
+                    val thinkChunk = if (persona.enableThinking) msgObj.optString("thinking", "") else ""
+                    if (chunk.isEmpty() && thinkChunk.isEmpty()) continue
+
+                    // Per-chunk generation guard: Stop pressed or a newer request
+                    // started mid-stream — cancel and surface the partial to the
+                    // caller (D2: the partial is kept as real history).
+                    if (!isChatRequestCurrent(generation)) {
+                        call.cancel()
+                        throw StreamCancelledByUserException(content.toString(), thinkingBuf.toString())
+                    }
+                    // Per-chunk persona guard: persona switched mid-stream —
+                    // cancel; the partial is written back into the OLD persona's
+                    // persisted history so no empty stub is stranded there.
+                    if (!isChatContextCurrent(generation, persona.name)) {
+                        call.cancel()
+                        val idx = streamedPlaceholderIndex
+                        if (idx != null) {
+                            val saved = settingsManager.getPersonaMessages(persona.name) ?: emptyList()
+                            if (idx < saved.size) {
+                                if (content.isBlank()) {
+                                    settingsManager.savePersonaMessages(persona.name, saved.filterIndexed { i, _ -> i != idx })
+                                } else {
+                                    settingsManager.savePersonaMessages(persona.name, saved.mapIndexed { i, m ->
+                                        if (i == idx) m.copy(text = content.toString(), reasoning = thinkingBuf.toString().ifBlank { null }) else m
+                                    })
+                                }
+                            }
+                        }
+                        streamedPlaceholderIndex = null
+                        _streamingText.value = null
+                        throw StreamPersonaChangedException(content.toString(), thinkingBuf.toString())
+                    }
+
+                    content.append(chunk)
+                    if (thinkChunk.isNotEmpty()) thinkingBuf.append(thinkChunk)
+
+                    // Progressive display: update the overlay AND the in-place
+                    // trailing message. NOTE: _messages updates here are the
+                    // streaming placeholder only — the single final append still
+                    // happens in the caller's apply block, guarded as always.
+                    appendPlaceholderIfNeeded()
+                    updatePlaceholder()
+                    _streamingText.value = content.toString()
+                }
+            } catch (e: java.io.IOException) {
+                if (call.isCanceled()) {
+                    // Stop pressed mid-read: hand the partial back so the
+                    // caller's cancellation branch can persist it (D2).
+                    _streamingText.value = null
+                    throw StreamCancelledByUserException(content.toString(), thinkingBuf.toString())
+                }
+                // Generic stream failure (network drop mid-generation): drop a
+                // blank placeholder, keep any partial text in place, and let
+                // the error-bubble flow handle the failure.
+                removeBlankPlaceholder()
+                _streamingText.value = null
+                throw e
+            }
+
+            return Triple(content.toString(), thinkingBuf.toString().ifBlank { null }, null)
         }
     } finally {
         // A6: clear the in-flight reference on success AND failure — but only if it's
@@ -1098,6 +1304,14 @@ private suspend fun AssistantService.performDirectOllamaChat(baseUrl: String, mo
         if (currentCall === call) currentCall = null
     }
 }
+
+// Stage-1 streaming: the NDJSON loop surfaces these instead of a bare
+// IOException so the caller can persist the partial response (D2) — user-stop
+// keeps the partial (persona-unchanged guard applies at the catch site);
+// persona-switch writes the partial back into the previous persona's persisted
+// history inside performDirectOllamaChat and discards here.
+internal class StreamCancelledByUserException(val partialContent: String, val partialThinking: String) : java.io.IOException("Cancelled")
+internal class StreamPersonaChangedException(val partialContent: String, val partialThinking: String) : java.io.IOException("Persona changed mid-stream")
 
 private suspend fun AssistantService.buildCloudRequest(api: CloudApiSetting, persona: Persona, text: String, currentTurnInHistory: Boolean, attachments: List<Uri> = emptyList()): Request {
     val mediaType = "application/json; charset=utf-8".toMediaType()

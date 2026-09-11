@@ -492,6 +492,17 @@ class SettingsManager(context: Context) {
         prefs.edit().putBoolean("is_first_run", false).apply()
     }
 
+    // Celestial UI (optional HUD voice-screen, Option-2 toggle): persisted like
+    // is_first_run — a plain boolean in the same prefs file. Default OFF so the
+    // existing UI is untouched until explicitly enabled in Settings.
+    fun getCelestialUi(): Boolean {
+        return prefs.getBoolean("celestial_ui", false)
+    }
+
+    fun saveCelestialUi(enabled: Boolean) {
+        prefs.edit().putBoolean("celestial_ui", enabled).apply()
+    }
+
     fun saveSearxngUrl(url: String) {
         prefs.edit().putString("searxng_url", url).apply()
     }

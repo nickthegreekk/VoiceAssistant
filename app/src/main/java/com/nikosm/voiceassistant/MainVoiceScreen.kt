@@ -148,6 +148,10 @@ fun MainScreen(service: AssistantService?) {
     var muted by remember { mutableStateOf(false) }
     var silenced by remember { mutableStateOf(false) }
     var handsFreeMode by remember { mutableStateOf(false) }
+    // Celestial UI toggle (Settings > General > Appearance) — collected from the
+    // service so flipping it in settings swaps the voice screen reactively.
+    var celestialUi by remember { mutableStateOf(false) }
+    var streamingText by remember { mutableStateOf<String?>(null) }
     var pendingCert by remember { mutableStateOf<CertApprovalRequest?>(null) }
     var updateInfo by remember { mutableStateOf<UpdateInfo?>(null) }
 
@@ -162,6 +166,8 @@ fun MainScreen(service: AssistantService?) {
             launch { service.micMuted.collect { muted = it } }
             launch { service.silenced.collect { silenced = it } }
             launch { service.handsFreeMode.collect { handsFreeMode = it } }
+            launch { service.celestialUi.collect { celestialUi = it } }
+            launch { service.streamingText.collect { streamingText = it } }
             launch { service.pendingCertApproval.collect { pendingCert = it } }
             launch { service.updateAvailable.collect { updateInfo = it } }
         }
@@ -238,7 +244,21 @@ fun MainScreen(service: AssistantService?) {
         }
     }
 
-    LaunchedEffect(messages.size, state, voiceDuration) {
+    LaunchedEffect(messages.size, state, voiceDuration, streamingText) {
+        // Stage-1 streaming gate: while a Direct-Ollama stream is in flight, the
+        // fake typewriter must NOT run — the overlay carries the progressive
+        // text (shown in full as it arrives; the HUD/classic render it with a
+        // typing cursor). Streaming completion re-triggers this effect via the
+        // streamingText key change, and the normal TTS-synced reveal then runs
+        // over the complete final text. Non-streaming paths (cloud/gateway)
+        // never see a non-null streamingText → unchanged behavior.
+        if (streamingText != null) {
+            messages.lastOrNull()?.let { streamingMsg ->
+                if (streamingMsg.role == "assistant") revealedChars = streamingMsg.text.length
+            }
+            lastAnimatedMessageId = ""
+            return@LaunchedEffect
+        }
         val lastMsg = messages.lastOrNull()
         if (lastMsg != null && lastMsg.role == "assistant") {
             val text = lastMsg.text
@@ -290,7 +310,7 @@ fun MainScreen(service: AssistantService?) {
     }
 
     // Combined Auto-scroll logic
-    LaunchedEffect(messages.size, revealedChars, textModeOpen) {
+    LaunchedEffect(messages.size, revealedChars, textModeOpen, streamingText) {
         if (messages.isNotEmpty()) {
             // Scroll the main chat list
             if (textModeOpen) {
@@ -383,6 +403,13 @@ fun MainScreen(service: AssistantService?) {
                 )
             }
         ) { innerPadding ->
+            // Celestial UI (Option-2 toggle, Settings > General > Appearance):
+            // when enabled AND in voice mode, the classic body below is replaced
+            // by the HUD voice screen (starfield + planet + HUD transcript).
+            // Text mode ALWAYS renders the unchanged classic ControlBar (chat
+            // list + input), and the classic body is byte-identical when the
+            // toggle is off — full runtime reversibility.
+            val celestialActive = celestialUi && !textModeOpen
             Column(
                 modifier = Modifier
                     .fillMaxSize()
@@ -417,7 +444,33 @@ fun MainScreen(service: AssistantService?) {
                     )
                 }
 
-                ControlBar(
+                if (celestialActive) {
+                    CelestialHudBody(
+                        state = state,
+                        personaColor = personaColor,
+                        voiceDuration = voiceDuration,
+                        muted = muted,
+                        silenced = silenced,
+                        handsFreeMode = handsFreeMode,
+                        sessionUsage = sessionUsage,
+                        messages = messages,
+                        revealedChars = revealedChars,
+                        streamingText = streamingText,
+                        onMicClick = {
+                            if (state == AssistantState.IDLE) service?.startRecording()
+                            else if (state == AssistantState.LISTENING) service?.stopRecording(currentPersona)
+                        },
+                        onStopClick = { service?.stopEverything() },
+                        onTextModeToggle = { textModeOpen = !textModeOpen },
+                        onMuteToggle = { service?.toggleMicMute() },
+                        onSilenceToggle = { service?.toggleSilence() },
+                        onHandsFreeToggle = {
+                            if (service?.handsFreeMode?.value == true) service.stopVadListening()
+                            else service?.startVadListening()
+                        }
+                    )
+                } else {
+                    ControlBar(
                     textModeOpen = textModeOpen,
                     textInput = textInput,
                     onTextInputChange = { textInput = it },
@@ -467,12 +520,14 @@ fun MainScreen(service: AssistantService?) {
                     },
                     messages = messages,
                     revealedChars = revealedChars,
+                    streamingText = streamingText,
                     miniScrollState = miniScrollState,
                     listState = listState,
                     onEditMessage = { idx, txt -> service?.updateMessage(idx, txt) },
                     onDeleteMessage = { idx -> service?.deleteMessage(idx) },
                     onReplayAudio = { msg -> service?.replayMessageAudio(msg, currentPersona) }
-                )
+                    )
+                } // end celestial-if/else (HUD body vs classic ControlBar)
             }
         }
     }
@@ -635,6 +690,11 @@ fun ControlBar(
     onHandsFreeToggle: () -> Unit,
     messages: List<ChatMessage>,
     revealedChars: Int,
+    // Stage-1 streaming overlay: non-null while a Direct-Ollama stream is in
+    // flight. Rendered as a trailing in-progress bubble with a typing cursor
+    // in the voice-mode mini box; text mode streams into the chat list the
+    // same way.
+    streamingText: String?,
     miniScrollState: ScrollState,
     listState: LazyListState,
     onEditMessage: (Int, String) -> Unit,
@@ -650,6 +710,7 @@ fun ControlBar(
                 state = state,
                 personaColor = personaColor,
                 revealedChars = revealedChars,
+                streamingText = streamingText,
                 onEditMessage = onEditMessage,
                 onDeleteMessage = onDeleteMessage,
                 onReplayAudio = onReplayAudio
@@ -747,6 +808,19 @@ fun ControlBar(
                             }
                             if (state == AssistantState.THINKING) {
                                 Text("...", color = personaColor.copy(alpha = 0.7f), style = MaterialTheme.typography.bodyMedium, modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center)
+                            }
+                            // Stage-1 streaming overlay: trailing in-progress
+                            // message with a typing cursor while a Direct-Ollama
+                            // stream is in flight (full auto-scroll handled by
+                            // the shared scroll LaunchedEffect above).
+                            streamingText?.let { st ->
+                                Text(
+                                    text = st + " ▌",
+                                    color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.9f),
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    lineHeight = MaterialTheme.typography.bodyMedium.lineHeight,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
                             }
                         }
                     }

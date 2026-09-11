@@ -185,6 +185,9 @@ fun ChatList(
     state: AssistantState,
     personaColor: Color,
     revealedChars: Int,
+    // Stage-1 streaming overlay (Direct-Ollama): rendered as a trailing
+    // in-progress assistant bubble with a typing cursor while non-null.
+    streamingText: String? = null,
     onEditMessage: (Int, String) -> Unit,
     onDeleteMessage: (Int) -> Unit,
     onReplayAudio: (ChatMessage) -> Unit
@@ -267,6 +270,25 @@ fun ChatList(
             }
             if (state == AssistantState.THINKING) {
                 item { Text("Thinking...", style = MaterialTheme.typography.bodySmall, color = personaColor.copy(alpha = 0.5f)) }
+            }
+            // Stage-1 streaming overlay: trailing in-progress assistant bubble
+            // with a typing cursor while a Direct-Ollama stream is in flight.
+            streamingText?.let { st ->
+                item {
+                    Box(
+                        modifier = Modifier.fillMaxWidth(),
+                        contentAlignment = Alignment.CenterStart
+                    ) {
+                        ChatMessageBubble(
+                            message = ChatMessage("assistant", st + " ▌"),
+                            displayText = st + " ▌",
+                            personaColor = personaColor,
+                            isCompact = false,
+                            horizontalAlignment = Alignment.Start,
+                            modifier = Modifier.fillMaxWidth(0.85f)
+                        )
+                    }
+                }
             }
         }
 

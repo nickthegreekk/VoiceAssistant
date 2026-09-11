@@ -138,13 +138,37 @@ class AssistantService : Service() {
     val _messages = MutableStateFlow<List<ChatMessage>>(emptyList())
     val messages = _messages.asStateFlow()
 
+    // Stage-1 streaming (Direct-Ollama only): the progressive response text
+    // while a stream is in flight. The UI renders this as a trailing
+    // in-progress message (typing cursor). _messages is touched exactly ONCE
+    // per turn — at genuine completion, a single final append — never during
+    // the stream. Nulled on completion-apply, on any guard failure, and in the
+    // chat flows' finally as a belt-and-braces reset.
+    val _streamingText = MutableStateFlow<String?>(null)
+    val streamingText = _streamingText.asStateFlow()
+
+    // Index of the in-flight Direct-Ollama streaming placeholder inside
+    // _messages (appended on the stream's first chunk, replaced by the final
+    // message at apply, removed if it ended up blank). Nullable — null when no
+    // stream is in flight or the placeholder was already resolved.
+    internal var streamedPlaceholderIndex: Int? = null
+
+    internal fun removeBlankPlaceholderSvc() {
+        val idx = streamedPlaceholderIndex ?: return
+        val current = _messages.value.toMutableList()
+        if (idx in current.indices && current[idx].text.isBlank()) {
+            current.removeAt(idx)
+            _messages.value = current
+        }
+    }
+
     // RAG knowledge-base upload progress/outcome. Hoisted to the service (instead of
     // dialog-local remember state) so it survives Settings-dialog closure: the uploads
     // run on serviceScope and the dialog just collects this flow for display.
     val _knowledgeUploadStatus = MutableStateFlow("")
     val knowledgeUploadStatus = _knowledgeUploadStatus.asStateFlow()
 
-    private var currentPersonaName: String? = null
+    internal var currentPersonaName: String? = null
 
     // A2/B1: monotonically increasing chat request sequence. Bumped every time a new
     // chat request starts; a response may only be APPLIED if it belongs to the most
@@ -183,6 +207,18 @@ class AssistantService : Service() {
 
     val _micMuted = MutableStateFlow(false)
     val micMuted = _micMuted.asStateFlow()
+
+    // Celestial UI (optional HUD voice-screen): a UI-choice toggle, not a voice
+    // behavior — persisted in SettingsManager, exposed as a StateFlow so the
+    // main screen can branch between the classic body and the HUD body
+    // reactively. Default OFF.
+    val _celestialUi = MutableStateFlow(false)
+    val celestialUi = _celestialUi.asStateFlow()
+
+    fun setCelestialUi(enabled: Boolean) {
+        _celestialUi.value = enabled
+        settingsManager.saveCelestialUi(enabled)
+    }
 
     internal val _serverBases = MutableStateFlow<List<ServerConfig>>(emptyList())
     val serverBases = _serverBases.asStateFlow()
@@ -438,6 +474,12 @@ class AssistantService : Service() {
     // steady state for users who prefer earpiece routing.
     private var proximityEarpieceSkipLogged = false
 
+    private val proximityArmRunnable = Runnable {
+        if (assistantState.value == AssistantState.SPEAKING) {
+            registerProximityBargeIn()
+        }
+    }
+
     private val proximityConfirmRunnable = Runnable {
         if (!proximityRegistered || !proximityNearArmed) return@Runnable
         if (earpieceMode.value) {
@@ -548,6 +590,10 @@ class AssistantService : Service() {
     }
 
     private fun unregisterProximityBargeIn() {
+        // Cancel any pending delayed arm so a SPEAKING->exit transition can't
+        // arm the listener after the fact (e.g. natural completion during the
+        // grace window).
+        mainHandler.removeCallbacks(proximityArmRunnable)
         disarmProximityConfirm()
         if (proximityRegistered) {
             proximityRegistered = false
@@ -754,7 +800,10 @@ class AssistantService : Service() {
                 // transition out of SPEAKING — natural completion, Stop, or the
                 // gesture itself — unregisters immediately.
                 if (state == AssistantState.SPEAKING) {
-                    registerProximityBargeIn()
+                    // Grace period: arm the sensor only after the playback has
+                    // been running a moment - the hand that started it is still
+                    // near the screen right now.
+                    mainHandler.postDelayed(proximityArmRunnable, PROXIMITY_ARM_DELAY_MS)
                 } else {
                     unregisterProximityBargeIn()
                 }
@@ -884,6 +933,7 @@ class AssistantService : Service() {
         _totalCost.value = settingsManager.getTotalCost()
         _favoriteModels.value = settingsManager.getFavoriteModels() ?: emptyList()
         _lastPriceSyncTimestamp.value = settingsManager.getLastPriceSyncTimestamp()
+        _celestialUi.value = settingsManager.getCelestialUi()
 
         // Fetch models for all enabled cloud providers
         (_cloudApis.value + allCustom).forEach { api ->
@@ -1830,8 +1880,18 @@ class AssistantService : Service() {
 
     companion object {
         // Proximity barge-in debounce window (see the comment block on the
-        // proximity fields above).
-        private const val PROXIMITY_DEBOUNCE_MS = 200L
+        // proximity fields above). 600ms: a deliberate wave-over holds near
+        // well past this; incidental hand-over-sensor while interacting with
+        // the screen (scrolling the transcript, adjusting grip) usually
+        // doesn't. Discovered via the run-4 HUD session: a 200ms window fired
+        // interrupts within seconds of playback starting when the user's hand
+        // rested near the top-edge sensor while using the new UI.
+        private const val PROXIMITY_DEBOUNCE_MS = 600L
+
+        // Grace period: the listener arms this long AFTER SPEAKING begins, so
+        // the hand that just started the response (tapped send/planet/mic and
+        // is still near the top edge) can't trigger an instant interrupt.
+        private const val PROXIMITY_ARM_DELAY_MS = 1200L
 
         private const val CHANNEL_ID = "assistant_service_channel"
         private const val NOTIFICATION_ID = 1
