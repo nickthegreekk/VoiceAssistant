@@ -449,6 +449,13 @@ internal fun AssistantService.sendAudioToServer(file: File, currentPersona: Pers
                 playResponse(currentPersona, deviceText = cleanedForTts as String)
             } else if (audioPath != null) {
                 playResponse(currentPersona, file = File(audioPath))
+            } else if (currentPersona.voiceMode == VoiceMode.GATEWAY) {
+                // Stage-2 streaming TTS: gateway mode with deferred synthesis.
+                // The full text was NOT pre-synthesized; use the chunked
+                // sequential pipeline (synthesize chunk 0, play, synthesize
+                // chunk 1 while playing, etc.) for dramatically lower
+                // first-audio latency on long responses.
+                playChunkedTtsGateway(rText as String, currentPersona, ttsGeneration)
             }
         } catch (e: CancellationException) {
             throw e
@@ -564,10 +571,13 @@ internal fun AssistantService.sendTextMessageToServer(inputText: String, current
                          // the on-device engines; the chat bubble/history keep the original.
                          val cleanedForTts = cleanTextForTts(directRes.first)
 
-                         // If it's a gateway voice mode, we need to fetch audio separately
+                         // If it's a gateway voice mode: Stage-2 streaming TTS
+                         // skips the full-text synthesis here (returning null bytes)
+                         // so the caller can use the chunked sequential pipeline
+                         // (playChunkedTtsGateway) instead of blocking on one
+                         // monolithic Kokoro request.
                          if (currentPersona.voiceMode == VoiceMode.GATEWAY) {
-                             val audioBytes = synthesizeWithGateway(directRes.first, currentPersona)
-                             return@withContext listOf(directRes.first, directRes.second, audioBytes, cleanedForTts)
+                             return@withContext listOf(directRes.first, directRes.second, null, cleanedForTts)
                          }
 
                          return@withContext listOf(directRes.first, directRes.second, directRes.third, cleanedForTts)
@@ -793,6 +803,13 @@ internal fun AssistantService.sendTextMessageToServer(inputText: String, current
                 playResponse(currentPersona, deviceText = cleanedForTts as String)
             } else if (audioPath != null) {
                 playResponse(currentPersona, file = File(audioPath))
+            } else if (currentPersona.voiceMode == VoiceMode.GATEWAY) {
+                // Stage-2 streaming TTS: gateway mode with deferred synthesis.
+                // The full text was NOT pre-synthesized; use the chunked
+                // sequential pipeline (synthesize chunk 0, play, synthesize
+                // chunk 1 while playing, etc.) for dramatically lower
+                // first-audio latency on long responses.
+                playChunkedTtsGateway(rText as String, currentPersona, ttsGeneration)
             }
         } catch (e: CancellationException) {
             throw e

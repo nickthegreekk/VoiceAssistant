@@ -465,7 +465,7 @@ class AssistantService : Service() {
     private val telephonyManager: TelephonyManager? by lazy {
         getSystemService(TELEPHONY_SERVICE) as? TelephonyManager
     }
-    private val mainHandler = Handler(Looper.getMainLooper())
+    internal val mainHandler = Handler(Looper.getMainLooper())
     private var proximitySensor: Sensor? = null
     private var proximityRegistered = false
     private var proximityNearArmed = false
@@ -707,6 +707,13 @@ class AssistantService : Service() {
     @Volatile
     var currentCall: Call? = null
     var currentAudioTrack: AudioTrack? = null
+
+    // Stage-2 streaming TTS: generation counter for the chunked playback
+    // sequence. Bumped by stopAudio() (which is called by Stop, barge-in,
+    // and focus-loss). Each chunked playback captures the generation at
+    // start; every onCompletion checks it. If it has advanced, the entire
+    // sequence is stale and must not continue.
+    internal var ttsGeneration: Long = 0
     // A3: utterance ID issued by the most recent speakTextOnDevice() call. TTS
     // onDone/onError callbacks only run their cleanup when their delivered ID still
     // matches this, so a stale callback from an older utterance can't cut off a

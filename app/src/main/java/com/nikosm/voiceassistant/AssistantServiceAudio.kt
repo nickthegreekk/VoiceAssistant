@@ -388,6 +388,9 @@ internal fun AssistantService.playAudioFile(file: File) {
 }
 
 fun AssistantService.stopAudio() {
+    // Stage-2: bump the TTS generation so all pending chunked-playback
+    // onCompletion callbacks see a stale generation and halt atomically.
+    ttsGeneration++
     currentPlayer?.let {
         val p = it
         currentPlayer = null
@@ -493,6 +496,78 @@ fun cleanTextForTts(text: String): String {
     return cleaned
 }
 
+// ─── Stage-2 streaming TTS: sentence-boundary splitter ─────────────────────
+// Splits accumulated LLM output into TTS-sized chunks at natural sentence
+// boundaries. Runs BEFORE cleanTextForTts() per chunk (cleaning collapses
+// newlines and can join sentences; splitting first preserves boundaries).
+//
+// Guards:
+//   - Decimal points: "3.14" — period followed by a digit, not a sentence end
+//   - Abbreviations: Dr., Mr., Mrs., vs., e.g., i.e., etc., St., Inc., U.S.
+//     (checked against a small blocklist before splitting at a period)
+//   - Double newlines (paragraph breaks) are also valid split points
+//
+// Chunks shorter than minChunkChars are accumulated until they exceed it —
+// avoids the HTTP round-trip overhead of 5-word chunks. The last chunk is
+// always emitted even if short (it's the tail of the response).
+internal fun splitIntoTtsChunks(text: String, minChunkChars: Int = 80): List<String> {
+    if (text.isBlank()) return emptyList()
+
+    // Abbreviations that end in a period but are NOT sentence boundaries.
+    val abbreviations = setOf(
+        "dr", "mr", "mrs", "ms", "vs", "e.g", "i.e", "etc", "st", "inc",
+        "u.s", "no", "vol", "approx", "dept", "est", "fig", "gen", "gov",
+        "sen", "rep", "prof", "rev", "hon", "lt", "col", "sgt", "capt"
+    )
+
+    // Sentence-ending punctuation followed by whitespace and a capital letter
+    // or digit (heuristic for "actually the next sentence"). The lookbehind
+    // allows . ! ? … and the lookahead checks it's a real boundary.
+    val sentenceEnd = Regex(
+        """(?<=[.!?…])\s+(?=[A-Z0-9"'(])""",
+        setOf(RegexOption.MULTILINE)
+    )
+
+    // First: split into candidate sentences (naive split on sentence-end regex)
+    val rawSentences = text.split(sentenceEnd).map { it.trim() }.filter { it.isNotBlank() }
+    if (rawSentences.isEmpty()) return listOf(text.trim())
+
+    // Second: merge adjacent sentences that were falsely split (abbreviation
+    // or decimal guard — if the fragment before the split ends with a known
+    // abbreviation pattern or a digit, it was NOT a sentence boundary)
+    val sentences = mutableListOf<String>()
+    var pending = rawSentences[0]
+    for (i in 1 until rawSentences.size) {
+        val lastWord = pending.substringAfterLast(" ").substringBeforeLast(".")
+        val isAbbrev = lastWord.lowercase() in abbreviations ||
+            pending.endsWith(".") && pending.lastOrNull()?.isDigit() == true
+        if (isAbbrev) {
+            pending = pending + " " + rawSentences[i]
+        } else {
+            sentences.add(pending)
+            pending = rawSentences[i]
+        }
+    }
+    sentences.add(pending)
+
+    // Third: accumulate into chunks of at least minChunkChars
+    val chunks = mutableListOf<String>()
+    var chunk = ""
+    for (sentence in sentences) {
+        val candidate = if (chunk.isEmpty()) sentence else "$chunk $sentence"
+        if (candidate.length >= minChunkChars) {
+            chunks.add(candidate)
+            chunk = ""
+        } else {
+            chunk = candidate
+        }
+    }
+    // Emit the tail chunk even if below minimum (it's the end of the response)
+    if (chunk.isNotBlank()) chunks.add(chunk)
+
+    return chunks.ifEmpty { listOf(text.trim()) }
+}
+
 fun AssistantService.playResponse(persona: Persona, file: File? = null, deviceText: String? = null) {
     // deviceText arrives PRE-CLEANED: cleanTextForTts() now runs in the background
     // parse blocks (Dispatchers.IO) right after the LLM response is received, so the
@@ -534,6 +609,256 @@ fun AssistantService.playResponse(persona: Persona, file: File? = null, deviceTe
                 }
             }
         }
+    }
+}
+
+// ─── Stage-2 streaming TTS: chunked sequential synthesis + playback ────────
+//
+// Sequential pipeline (confirmed decision): synthesize chunk 0, play it while
+// synthesizing chunk 1, play chunk 1 while synthesizing chunk 2, etc.
+// Ordering is inherently guaranteed - each chunk is played immediately after
+// synthesis, before the next one starts. No slot-map complexity needed.
+//
+// SPEAKING lifetime: entered ONCE before chunk 0 starts, exited ONCE after
+// the last chunk finishes. No SPEAKING→IDLE→SPEAKING flickering between
+// chunks - the VAD collector and proximity barge-in both react to state
+// transitions and see a single continuous window.
+//
+// stopAudio() is NEVER called between chunks (it would reset SPEAKING→IDLE
+// mid-sequence and kill the player). Instead, the chunked player swaps the
+// data source on the same MediaPlayer in its onCompletion callback.
+//
+// ttsGeneration counter: bumped by stopAudio() - Stop/barge-in/focus-loss
+// all route through it. Each chunked player captures the generation before
+// it starts; every onCompletion checks it. If the generation has advanced,
+// the entire sequence is stale and must not continue.
+
+// Stage-2 streaming TTS: sequential chunked synthesis + gapless playback.
+// Returns the list of chunk file paths (for debugging) - playback is managed
+// internally. SPEAKING spans the full sequence.
+internal suspend fun AssistantService.playChunkedTtsGateway(
+    fullText: String,
+    persona: Persona,
+    myTtsGeneration: Long
+): List<String> {
+    val chunks = splitIntoTtsChunks(fullText)
+    if (chunks.isEmpty()) return emptyList()
+
+    val chunkFiles = mutableListOf<String>()
+
+    for ((idx, chunkText) in chunks.withIndex()) {
+        // Generation check BEFORE each synthesis: if stopAudio() bumped the
+        // counter, the entire sequence is stale - bail immediately.
+        if (ttsGeneration != myTtsGeneration) return chunkFiles
+
+        // Clean the chunk text (strip markdown that Kokoro reads literally).
+        val cleaned = cleanTextForTts(chunkText)
+        if (cleaned.isBlank()) continue
+
+        // Sequential synthesis: one chunk at a time, via the existing
+        // single-text synthesizeWithGateway (tracks currentCall for Stop).
+        val audioBytes = synthesizeWithGateway(cleaned, persona)
+        if (audioBytes == null || audioBytes.isEmpty()) continue
+
+        // Generation check AFTER synthesis (it may have taken seconds -
+        // Stop could have fired while we were waiting for Kokoro).
+        if (ttsGeneration != myTtsGeneration) return chunkFiles
+
+        // Write chunk to a transient file for the MediaPlayer
+        val chunkFile = File(cacheDir, "tts_chunk_${myTtsGeneration}_${idx}.wav")
+        chunkFile.writeBytes(audioBytes)
+        chunkFiles.add(chunkFile.absolutePath)
+
+        if (idx == 0) {
+            // First chunk: enter SPEAKING and start the player.
+            // Only enter SPEAKING once for the entire sequence.
+            if (!requestAssistantFocus()) {
+                _state.value = AssistantState.IDLE
+                updateNotification("Ready to help")
+                return chunkFiles
+            }
+            _state.value = AssistantState.SPEAKING
+            updateNotification("Speaking (streaming TTS)...")
+            startChunkPlayback(chunkFile, persona, myTtsGeneration, chunks.size)
+        }
+        // Subsequent chunks: just write the file. The onCompletion callback
+        // from the previous chunk picks it up via the file naming convention.
+    }
+
+    return chunkFiles
+}
+
+/** Starts chunk playback - called for chunk 0 and re-invoked per chunk via onCompletion. */
+private fun AssistantService.startChunkPlayback(
+    firstChunkFile: File,
+    persona: Persona,
+    myTtsGeneration: Long,
+    totalChunks: Int
+) {
+    val player = MediaPlayer()
+    try {
+        player.setAudioAttributes(
+            AudioAttributes.Builder()
+                .setUsage(if (earpieceMode.value) AudioAttributes.USAGE_VOICE_COMMUNICATION else AudioAttributes.USAGE_ASSISTANT)
+                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                .build()
+        )
+        player.setDataSource(firstChunkFile.absolutePath)
+
+        var currentChunkIdx = 0
+
+        player.setOnCompletionListener { mp ->
+            if (currentPlayer !== mp) {
+                mp.release()
+                return@setOnCompletionListener
+            }
+            // Generation check: if stopAudio() bumped the counter, the entire
+            // sequence is stale - clean up and do NOT play the next chunk.
+            if (ttsGeneration != myTtsGeneration) {
+                mp.release()
+                currentPlayer = null
+                _state.value = AssistantState.IDLE
+                updateNotification("Ready to help")
+                _voiceDuration.value = 0
+                abandonAssistantFocus()
+                audioManager.mode = AudioManager.MODE_NORMAL
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) audioManager.clearCommunicationDevice()
+                return@setOnCompletionListener
+            }
+
+            currentChunkIdx++
+
+            if (currentChunkIdx >= totalChunks) {
+                // Last chunk finished - full cleanup, exactly like the classic
+                // playAudioFile() onCompletion.
+                _state.value = AssistantState.IDLE
+                updateNotification("Ready to help")
+                mp.release()
+                currentPlayer = null
+                _voiceDuration.value = 0
+                abandonAssistantFocus()
+                audioManager.mode = AudioManager.MODE_NORMAL
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) audioManager.clearCommunicationDevice()
+                return@setOnCompletionListener
+            }
+
+            // More chunks: swap the data source on the SAME player.
+            val nextFile = File(cacheDir, "tts_chunk_${myTtsGeneration}_${currentChunkIdx}.wav")
+            if (nextFile.exists()) {
+                try {
+                    mp.reset()
+                    mp.setAudioAttributes(
+                        AudioAttributes.Builder()
+                            .setUsage(if (earpieceMode.value) AudioAttributes.USAGE_VOICE_COMMUNICATION else AudioAttributes.USAGE_ASSISTANT)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                            .build()
+                    )
+                    mp.setDataSource(nextFile.absolutePath)
+                    mp.prepareAsync()
+                } catch (e: Exception) {
+                    android.util.Log.e("AssistantService", "Chunk playback error: ${e.message}")
+                    mp.release()
+                    currentPlayer = null
+                    _state.value = AssistantState.IDLE
+                    updateNotification("Ready to help")
+                    abandonAssistantFocus()
+                }
+            } else {
+                // Next chunk not yet written - synthesis still in flight. Poll.
+                mainHandler.postDelayed({
+                    if (ttsGeneration != myTtsGeneration || currentPlayer !== mp) {
+                        mp.release()
+                        if (currentPlayer === mp) currentPlayer = null
+                        return@postDelayed
+                    }
+                    if (nextFile.exists()) {
+                        try {
+                            mp.reset()
+                            mp.setAudioAttributes(
+                                AudioAttributes.Builder()
+                                    .setUsage(if (earpieceMode.value) AudioAttributes.USAGE_VOICE_COMMUNICATION else AudioAttributes.USAGE_ASSISTANT)
+                                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                                    .build()
+                            )
+                            mp.setDataSource(nextFile.absolutePath)
+                            mp.prepareAsync()
+                        } catch (e: Exception) {
+                            android.util.Log.e("AssistantService", "Chunk retry error: ${e.message}")
+                            mp.release()
+                            currentPlayer = null
+                            _state.value = AssistantState.IDLE
+                            updateNotification("Ready to help")
+                            abandonAssistantFocus()
+                        }
+                    } else {
+                        mainHandler.postDelayed({
+                            if (ttsGeneration != myTtsGeneration || currentPlayer !== mp) {
+                                mp.release()
+                                if (currentPlayer === mp) currentPlayer = null
+                                return@postDelayed
+                            }
+                            if (nextFile.exists()) {
+                                try {
+                                    mp.reset()
+                                    mp.setAudioAttributes(
+                                        AudioAttributes.Builder()
+                                            .setUsage(if (earpieceMode.value) AudioAttributes.USAGE_VOICE_COMMUNICATION else AudioAttributes.USAGE_ASSISTANT)
+                                            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                                            .build()
+                                    )
+                                    mp.setDataSource(nextFile.absolutePath)
+                                    mp.prepareAsync()
+                                } catch (e: Exception) {
+                                    android.util.Log.e("AssistantService", "Chunk retry-2 error: ${e.message}")
+                                    mp.release()
+                                    currentPlayer = null
+                                    _state.value = AssistantState.IDLE
+                                    updateNotification("Ready to help")
+                                    abandonAssistantFocus()
+                                }
+                            } else {
+                                _state.value = AssistantState.IDLE
+                                updateNotification("Ready to help")
+                                mp.release()
+                                currentPlayer = null
+                                abandonAssistantFocus()
+                            }
+                        }, 200)
+                    }
+                }, 200)
+            }
+        }
+
+        player.setOnPreparedListener { mp ->
+            _voiceDuration.value = mp.duration
+            mp.start()
+        }
+
+        player.setOnErrorListener { mp, what, extra ->
+            android.util.Log.e("AssistantService", "playChunkedTtsGateway: MediaPlayer error what=$what extra=$extra")
+            if (currentPlayer === mp) {
+                _state.value = AssistantState.IDLE
+                updateNotification("Ready to help")
+                mp.release()
+                currentPlayer = null
+                _voiceDuration.value = 0
+                abandonAssistantFocus()
+                audioManager.mode = AudioManager.MODE_NORMAL
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) audioManager.clearCommunicationDevice()
+            } else {
+                mp.release()
+            }
+            true
+        }
+
+        currentPlayer = player
+        player.prepareAsync()
+    } catch (e: Exception) {
+        if (currentPlayer === player) currentPlayer = null
+        _state.value = AssistantState.IDLE
+        updateNotification("Ready to help")
+        player.release()
+        abandonAssistantFocus()
     }
 }
 
