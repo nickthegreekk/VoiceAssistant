@@ -471,6 +471,23 @@ fun cleanTextForTts(text: String): String {
     cleaned = cleaned.replace(Regex("^#{1,6}\\s+", RegexOption.MULTILINE), "")
     // Backtick code markers (single and triple)
     cleaned = cleaned.replace(Regex("`+"), "")
+    // ASCII arrows — eSpeak/System TTS read "->" literally ("hyphen greater
+    // than"). Space replacement so "A -> B" becomes "A B". Mirrors the
+    // server-side clean_text_for_tts() arrow strip.
+    cleaned = cleaned.replace(Regex("-->|->|=>|<-"), " ")
+    // Unicode arrows (→ ← ↔ ⟶ etc., U+2190–21FF)
+    cleaned = cleaned.replace(Regex("[\\u2190-\\u21FF]"), " ")
+    // Emoji + misc symbols/dingbats + variation selectors + ZWJ + keycap +
+    // invisible formatting (U+200B–200F). Surrogate-pair class covers all
+    // astral-plane emoji incl. flags (regional indicators). Kokoro and the
+    // on-device engines read these as garbage or skip them awkwardly.
+    // Mirrors the server-side clean_text_for_tts() emoji strip.
+    cleaned = cleaned.replace(
+        Regex("[\\uD83C-\\uD83E][\\uDC00-\\uDFFF]|[\\u2600-\\u27BF\\u2B00-\\u2BFF\\uFE0E\\uFE0F\\u200B-\\u200F\\u20E3]"),
+        ""
+    )
+    // Collapse leftover multi-spaces from the removals above
+    cleaned = cleaned.replace(Regex(" {2,}"), " ")
     // Collapse 3+ consecutive newlines to a single blank line
     cleaned = cleaned.replace(Regex("\\n{3,}"), "\n\n")
     return cleaned
