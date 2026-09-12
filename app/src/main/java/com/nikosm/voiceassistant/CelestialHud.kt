@@ -393,46 +393,33 @@ private fun HudTranscriptPanel(
                     .verticalScroll(scroll)
             ) {
                 Column {
-                if (messages.isEmpty() && state != AssistantState.THINKING) {
-                    Text(
-                        "STANDBY - awaiting input",
-                        fontFamily = mono, fontSize = 12.sp,
-                        color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.3f)
-                    )
-                } else {
-                    messages.forEachIndexed { index, msg ->
-                        val isLastAssistant = index == messages.size - 1 && msg.role == "assistant"
-                        if (isLastAssistant) {
-                            WordTimedText(
-                                text = msg.text,
-                                durationMs = voiceDuration,
-                                speaking = speaking,
-                                scrollState = scroll,
-                                fontFamily = mono,
-                                color = MaterialTheme.colorScheme.onBackground
-                            )
-                        } else {
-                            Text(
-                                text = msg.text,
-                                fontFamily = mono,
-                                fontSize = 13.sp,
-                                lineHeight = 20.sp,
-                                color = when {
-                                    msg.role == "assistant" -> MaterialTheme.colorScheme.onBackground.copy(alpha = 0.45f)
-                                    else -> MaterialTheme.colorScheme.onBackground.copy(alpha = 0.60f)
-                                },
-                                modifier = Modifier.padding(bottom = 8.dp)
-                            )
-                        }
+                    // Only the CURRENT response - not the conversation history.
+                    // The HUD transcript is a spoken-text display, not a chat log.
+                    val currentAssistant = messages.lastOrNull()?.takeIf {
+                        it.role == "assistant" && !it.isError
                     }
-                    if (state == AssistantState.THINKING && streamingText == null) {
+                    if (currentAssistant != null) {
+                        WordTimedText(
+                            text = currentAssistant.text,
+                            durationMs = voiceDuration,
+                            speaking = speaking,
+                            scrollState = scroll,
+                            fontFamily = mono,
+                            color = MaterialTheme.colorScheme.onBackground
+                        )
+                    } else if (state == AssistantState.THINKING) {
                         Text(
                             "...",
                             fontFamily = mono, fontSize = 13.sp,
                             color = personaColor.copy(alpha = 0.7f)
                         )
+                    } else {
+                        Text(
+                            "STANDBY - awaiting input",
+                            fontFamily = mono, fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.3f)
+                        )
                     }
-                }
                 } // end Column (vertical stacking inside scroll box)
             }
         }
