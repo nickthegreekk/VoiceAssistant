@@ -327,11 +327,23 @@ fun MainScreen(service: AssistantService?) {
 
     LaunchedEffect(service) {
         if (service != null) {
-            if (service.cloudApis.value.isEmpty()) DEFAULT_CLOUD_APIS.forEach { service.updateCloudApi(-1, it) }
+            if (service.cloudApis.value.isEmpty()) {
+                DEFAULT_CLOUD_APIS.forEach { service.updateCloudApi(-1, it) }
+            } else {
+                // Migration: add any new default providers the user doesn't already have
+                val existingNames = service.cloudApis.value.map { it.name }.toSet()
+                DEFAULT_CLOUD_APIS.forEach { api ->
+                    if (api.name !in existingNames) service.updateCloudApi(-1, api)
+                }
+            }
             if (service.personas.value.isEmpty()) {
                 (DEFAULT_PERSONAS + CLOUD_PERSONAS + TRANSLATOR_PERSONA).forEach { service.addPersona(it) }
-            } else if (service.personas.value.none { it.isTranslator }) {
-                service.addPersona(TRANSLATOR_PERSONA)
+            } else {
+                // Migration: add any new default personas the user doesn't already have
+                val existingPersonaNames = service.personas.value.map { it.name }.toSet()
+                (DEFAULT_PERSONAS + CLOUD_PERSONAS + TRANSLATOR_PERSONA).forEach { persona ->
+                    if (persona.name !in existingPersonaNames) service.addPersona(persona)
+                }
             }
             service.saveSettings()
             service.fetchModels()

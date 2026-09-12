@@ -228,19 +228,40 @@ val DEFAULT_CLOUD_APIS = listOf(
 // Cline Bot does not expose a /models endpoint — model fetching for this provider
 // must use this static list instead of hitting the API. Model IDs follow the
 // provider/model-name convention documented at docs.cline.bot/api/models.
+// Free models (no cost) are listed first.
 val CLINE_BOT_MODELS = listOf(
+    // === FREE (no credit usage) ===
+    "minimax/minimax-m2.5",
+    "minimax/minimax-m2.7",
+
+    // === Anthropic (Claude) ===
     "anthropic/claude-sonnet-4-6",
     "anthropic/claude-3-5-sonnet-latest",
     "anthropic/claude-3-5-haiku-latest",
+    "anthropic/claude-3-opus-latest",
+
+    // === OpenAI ===
     "openai/gpt-4o",
     "openai/gpt-4o-mini",
+    "openai/gpt-4-turbo",
+    "openai/gpt-3.5-turbo",
     "openai/o1-preview",
     "openai/o1-mini",
+
+    // === Google (Gemini) ===
     "google/gemini-2.5-pro",
     "google/gemini-2.0-flash",
+    "google/gemini-1.5-pro",
+    "google/gemini-1.5-flash",
+
+    // === DeepSeek ===
     "deepseek/deepseek-chat",
     "deepseek/deepseek-reasoner",
-    "minimax/minimax-m2.5"
+    "deepseek/deepseek-coder",
+
+    // === xAI (Grok) ===
+    "xai/grok-3",
+    "xai/grok-3-mini"
 )
 
 val TRANSLATION_LANGUAGES = listOf(
