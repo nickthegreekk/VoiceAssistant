@@ -679,7 +679,16 @@ internal suspend fun AssistantService.playChunkedTtsGateway(
             }
             _state.value = AssistantState.SPEAKING
             updateNotification("Speaking (streaming TTS)...")
-            startChunkPlayback(chunkFile, persona, myTtsGeneration, chunks.size)
+
+            // Duration scale: full text vs first chunk text. Used to estimate
+            // the total audio duration from chunk 0's actual MediaPlayer
+            // duration, so the word-by-word sync in the HUD covers the FULL
+            // response (not just chunk 0's few seconds).
+            val firstChunkLen = cleaned.length.coerceAtLeast(1)
+            val fullTextLen = fullText.length.coerceAtLeast(firstChunkLen)
+            val durationScale = fullTextLen.toFloat() / firstChunkLen
+
+            startChunkPlayback(chunkFile, persona, myTtsGeneration, chunks.size, durationScale)
         }
         // Subsequent chunks: just write the file. The onCompletion callback
         // from the previous chunk picks it up via the file naming convention.
@@ -693,7 +702,8 @@ private fun AssistantService.startChunkPlayback(
     firstChunkFile: File,
     persona: Persona,
     myTtsGeneration: Long,
-    totalChunks: Int
+    totalChunks: Int,
+    durationScale: Float
 ) {
     val player = MediaPlayer()
     try {
@@ -830,7 +840,10 @@ private fun AssistantService.startChunkPlayback(
         }
 
         player.setOnPreparedListener { mp ->
-            _voiceDuration.value = mp.duration
+            // Estimated full duration = chunk 0's actual audio duration scaled
+            // by the text-length ratio (full text / first chunk). Gives the
+            // word-by-word sync a duration covering the entire response.
+            _voiceDuration.value = (mp.duration * durationScale).toInt()
             mp.start()
         }
 
