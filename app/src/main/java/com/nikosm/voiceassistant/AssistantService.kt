@@ -157,6 +157,14 @@ class AssistantService : Service() {
     val _ttsPlaybackFraction = MutableStateFlow<Float?>(null)
     val ttsPlaybackFraction = _ttsPlaybackFraction.asStateFlow()
 
+    // Stage-2 word timestamps: [{word, start, end}] in absolute seconds (from
+    // the chunked player's synthesis responses, adjusted for cumulative
+    // chunk offsets). Null when no timestamps available (eSpeak/System TTS,
+    // synthesis without timestamps, etc.). Drives the HUD's word-by-word
+    // reveal with REAL Kokoro alignment data when available.
+    val _ttsWordTimestamps = MutableStateFlow<String?>(null)
+    val ttsWordTimestamps = _ttsWordTimestamps.asStateFlow()
+
     // Index of the in-flight Direct-Ollama streaming placeholder inside
     // _messages (appended on the stream's first chunk, replaced by the final
     // message at apply, removed if it ended up blank). Nullable — null when no

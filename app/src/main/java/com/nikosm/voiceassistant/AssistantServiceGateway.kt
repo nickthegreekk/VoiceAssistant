@@ -7,6 +7,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import android.util.Base64
 import okhttp3.Credentials
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
@@ -160,10 +161,10 @@ internal fun AssistantService.testGatewayVoice(text: String, url: String, langua
     }
 }
 
-internal suspend fun AssistantService.synthesizeWithGateway(text: String, persona: Persona): ByteArray? {
-    if (text.isBlank()) return null
+internal suspend fun AssistantService.synthesizeWithGateway(text: String, persona: Persona): Pair<ByteArray?, String?> {
+    if (text.isBlank()) return Pair(null, null)
     val url = persona.backendUrl
-    if (url.isBlank()) return null
+    if (url.isBlank()) return Pair(null, null)
     
     val gw = _serverBases.value.find { it.url == url } ?: ServerConfig("Gateway", url)
     // Non-Translator personas keep targetLanguage at its "English" default no matter
@@ -219,9 +220,14 @@ internal suspend fun AssistantService.synthesizeWithGateway(text: String, person
                         val json = JSONObject(response.body.string())
                         val note = json.optString("note", "Voice unavailable for this language.")
                         android.util.Log.d("AssistantService", "Synthesis skipped: $note")
-                        null
+                        Pair(null, null)
                     } else {
-                        response.body.bytes()
+                        // Stage-2: parse word-level timestamps from the new header
+                        val tsB64 = response.header("X-Word-Timestamps-B64")
+                        val timestampsJson = tsB64?.let {
+                            try { String(Base64.decode(it, Base64.DEFAULT), Charsets.UTF_8) } catch (_: Exception) { null }
+                        }
+                        Pair(response.body.bytes(), timestampsJson)
                     }
                 }
             } finally {
@@ -232,7 +238,7 @@ internal suspend fun AssistantService.synthesizeWithGateway(text: String, person
         throw e
     } catch (e: Exception) {
         android.util.Log.e("AssistantService", "Gateway synthesis failed", e)
-        null
+        Pair(null, null)
     }
 }
 

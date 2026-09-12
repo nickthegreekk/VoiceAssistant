@@ -124,6 +124,96 @@ private fun UpdateBanner(info: UpdateInfo, onView: () -> Unit, onDismiss: () -> 
 }
 
 /**
+ * Real word-timestamp reveal (server-provided): converts Kokoro's per-word
+ * {word,start,end} timestamps into per-word reveal fractions (start / total
+ * speech duration) so word visibility tracks the ACTUAL spoken positions
+ * rather than an estimate.
+ *
+ * Alignment is a greedy match between the raw display words and the spoken
+ * timestamps: tokens that vanish under markdown/emoji cleaning (asterisks,
+ * arrows, emoji) are rendered always-visible and consume no timestamp, while
+ * "inserted" punctuation tokens the SERVER adds during cleaning (e.g. the
+ * period it injects for each paragraph break: "\n{2,}" → ". ") are skipped
+ * because they have no visual counterpart in the raw text.
+ *
+ * Returns null when the sequences can't be aligned (malformed JSON, count
+ * mismatch, content that cleaning changes in unexpected ways) — callers then
+ * fall back to fractionVisibleText().
+ */
+internal data class WordTimestamp(val word: String, val start: Double, val end: Double)
+
+internal fun timestampsRevealedText(text: String, tsJson: String?, fraction: Float): String? {
+    if (tsJson == null || tsJson.isBlank()) return null
+    val timestamps = ArrayList<WordTimestamp>()
+    try {
+        val arr = org.json.JSONArray(tsJson)
+        if (arr.length() == 0) return null
+        for (i in 0 until arr.length()) {
+            val o = arr.getJSONObject(i)
+            val s = o.optDouble("start", -1.0)
+            val e = o.optDouble("end", -1.0)
+            if (s < 0.0 || e < s) return null
+            timestamps.add(WordTimestamp(o.optString("word", ""), s, e))
+        }
+    } catch (_: Exception) { return null }
+    val total = timestamps.lastOrNull()?.end ?: 0.0
+    if (total <= 0.0) return null
+
+    val rawSpans = Regex("\\S+").findAll(text).map { it.range.first to (it.range.last + 1) }.toList()
+    val clamped = fraction.coerceIn(0f, 1f)
+
+    // "Inserted" punctuation: pure-punctuation tokens (e.g. the "." the server
+    // adds per paragraph break). Also treat the final terminal "." as one.
+    fun isPurePunct(w: String): Boolean {
+        val t = w.trim()
+        return t.isNotEmpty() && t.all { !it.isLetterOrDigit() }
+    }
+    // Normalized form for comparing a raw token to a spoken timestamp token:
+    // trim + lowercase, ignoring trailing sentence punctuation.
+    fun normWord(w: String): String =
+        w.trim().lowercase().trimEnd('.', ',', '!', '?', ';', ':', '…', '”', '’')
+
+    val sb = StringBuilder()
+    var idx = 0
+    var ti = 0
+    for ((wStart, wEnd) in rawSpans) {
+        if (wStart > idx) sb.append(text.substring(idx, wStart))
+        val wordText = text.substring(wStart, wEnd)
+        val cleanedWord = cleanTextForTts(wordText).trim()
+        if (cleanedWord.isEmpty()) {
+            // Non-speech token (emoji, arrows, markdown) — not in the spoken
+            // timeline; render always visible.
+            sb.append(wordText)
+        } else if (ti >= timestamps.size) {
+            return null   // ran out of timestamps — counts disagree, don't trust
+        } else {
+            // Skip server-injected punctuation tokens while the current raw
+            // token is a real word (injected tokens have no visible counterpart
+            // in the raw text and must not consume word slots).
+            while (ti + 1 < timestamps.size &&
+                   isPurePunct(timestamps[ti].word) &&
+                   normWord(cleanedWord) != normWord(timestamps[ti].word)) {
+                ti++
+            }
+            if (isPurePunct(timestamps[ti].word) &&
+                normWord(cleanedWord) != normWord(timestamps[ti].word)) {
+                // Ran into an injected token we can't reconcile — don't trust
+                // the alignment.
+                return null
+            }
+            val (_, s, _) = timestamps[ti]
+            val slotFrac = (s / total).toFloat()   // word's start as a fraction of total speech
+            if (clamped >= slotFrac) sb.append(wordText)
+            else sb.append(" ".repeat(wEnd - wStart))
+            ti++
+        }
+        idx = wEnd
+    }
+    if (idx < text.length) sb.append(text.substring(idx))
+    return sb.toString()
+}
+
+/**
  * Returns `text` with words revealed up to `fraction` of the total word count
  * (weighted by length). Unrevealed words render as spaces so the layout never
  * reflows. Shared by the classic mini-box and text-mode ChatList for the
@@ -180,6 +270,7 @@ fun MainScreen(service: AssistantService?) {
     var celestialUi by remember { mutableStateOf(false) }
     var streamingText by remember { mutableStateOf<String?>(null) }
     var ttsPlaybackFraction by remember { mutableStateOf<Float?>(null) }
+    var ttsWordTimestamps by remember { mutableStateOf<String?>(null) }
     var pendingCert by remember { mutableStateOf<CertApprovalRequest?>(null) }
     var updateInfo by remember { mutableStateOf<UpdateInfo?>(null) }
 
@@ -197,6 +288,7 @@ fun MainScreen(service: AssistantService?) {
             launch { service.celestialUi.collect { celestialUi = it } }
             launch { service.streamingText.collect { streamingText = it } }
             launch { service.ttsPlaybackFraction.collect { ttsPlaybackFraction = it } }
+            launch { service.ttsWordTimestamps.collect { ttsWordTimestamps = it } }
             launch { service.pendingCertApproval.collect { pendingCert = it } }
             launch { service.updateAvailable.collect { updateInfo = it } }
         }
@@ -346,7 +438,7 @@ fun MainScreen(service: AssistantService?) {
     }
 
     // Combined Auto-scroll logic
-    LaunchedEffect(messages.size, revealedChars, textModeOpen, streamingText, ttsPlaybackFraction) {
+    LaunchedEffect(messages.size, revealedChars, textModeOpen, streamingText, ttsPlaybackFraction, ttsWordTimestamps) {
         if (messages.isNotEmpty()) {
             // Scroll the main chat list
             if (textModeOpen) {
@@ -502,6 +594,7 @@ fun MainScreen(service: AssistantService?) {
                         revealedChars = revealedChars,
                         streamingText = streamingText,
                         ttsPlaybackFraction = ttsPlaybackFraction,
+                        ttsWordTimestamps = ttsWordTimestamps,
                         onMicClick = {
                             if (state == AssistantState.IDLE) service?.startRecording()
                             else if (state == AssistantState.LISTENING) service?.stopRecording(currentPersona)
@@ -568,6 +661,7 @@ fun MainScreen(service: AssistantService?) {
                     revealedChars = revealedChars,
                     streamingText = streamingText,
                     ttsPlaybackFraction = ttsPlaybackFraction,
+                    ttsWordTimestamps = ttsWordTimestamps,
                     miniScrollState = miniScrollState,
                     listState = listState,
                     onEditMessage = { idx, txt -> service?.updateMessage(idx, txt) },
@@ -743,6 +837,7 @@ fun ControlBar(
     // same way.
     streamingText: String?,
     ttsPlaybackFraction: Float?,
+    ttsWordTimestamps: String?,
     miniScrollState: ScrollState,
     listState: LazyListState,
     onEditMessage: (Int, String) -> Unit,
@@ -760,6 +855,7 @@ fun ControlBar(
                 revealedChars = revealedChars,
                 streamingText = streamingText,
                 ttsPlaybackFraction = ttsPlaybackFraction,
+                ttsWordTimestamps = ttsWordTimestamps,
                 onEditMessage = onEditMessage,
                 onDeleteMessage = onDeleteMessage,
                 onReplayAudio = onReplayAudio
@@ -842,13 +938,15 @@ fun ControlBar(
                             
                             messages.forEachIndexed { index, msg ->
                                 val isLastAssistant = index == messages.size - 1 && msg.role == "assistant"
-                                // Stage-2: fraction-based reveal when chunked TTS
+                                // Stage-2: real-timestamp reveal when chunked TTS
                                 // is active (ttsPlaybackFraction non-null) — word
-                                // visibility tracks actual playback. Falls back to
-                                // the classic revealedChars for non-chunked paths.
+                                // visibility tracks actual spoken positions
+                                // (falling back to the fraction estimate, then the
+                                // classic revealedChars for non-chunked paths).
                                 val displayText = if (isLastAssistant) {
                                     if (ttsPlaybackFraction != null) {
-                                        fractionVisibleText(msg.text, ttsPlaybackFraction)
+                                        timestampsRevealedText(msg.text, ttsWordTimestamps, ttsPlaybackFraction)
+                                            ?: fractionVisibleText(msg.text, ttsPlaybackFraction)
                                     } else {
                                         msg.text.take(revealedChars)
                                     }

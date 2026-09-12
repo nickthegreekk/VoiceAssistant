@@ -189,6 +189,7 @@ fun ChatList(
     // in-progress assistant bubble with a typing cursor while non-null.
     streamingText: String? = null,
     ttsPlaybackFraction: Float? = null,
+    ttsWordTimestamps: String? = null,
     onEditMessage: (Int, String) -> Unit,
     onDeleteMessage: (Int) -> Unit,
     onReplayAudio: (ChatMessage) -> Unit
@@ -205,12 +206,14 @@ fun ChatList(
             itemsIndexed(messages) { index, message ->
                 val isUser = message.role == "user"
                 val isLastAssistant = index == messages.size - 1 && !isUser
-                // Stage-2: fraction-based reveal when chunked TTS is active —
-                // word visibility tracks actual playback. Falls back to the
-                // classic revealedChars for non-chunked paths.
+                // Stage-2: real-timestamp reveal when chunked TTS is active —
+                // word visibility tracks actual spoken positions (graciously
+                // falling back to the fraction-based estimate when timestamps
+                // can't be aligned, then the classic revealedChars).
                 val displayText = if (isLastAssistant) {
                     if (ttsPlaybackFraction != null) {
-                        fractionVisibleText(message.text, ttsPlaybackFraction)
+                        timestampsRevealedText(message.text, ttsWordTimestamps, ttsPlaybackFraction)
+                            ?: fractionVisibleText(message.text, ttsPlaybackFraction)
                     } else {
                         message.text.take(revealedChars)
                     }

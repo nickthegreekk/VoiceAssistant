@@ -83,6 +83,7 @@ fun CelestialHudBody(
     voiceDuration: Int,
     streamingText: String?,
     ttsPlaybackFraction: Float?,
+    ttsWordTimestamps: String?,
     muted: Boolean,
     silenced: Boolean,
     handsFreeMode: Boolean,
@@ -135,6 +136,7 @@ fun CelestialHudBody(
                 voiceDuration = voiceDuration,
                 streamingText = streamingText,
                 ttsPlaybackFraction = ttsPlaybackFraction,
+                ttsWordTimestamps = ttsWordTimestamps,
                 messages = messages,
                 revealedChars = revealedChars,
                 mono = mono,
@@ -336,6 +338,7 @@ private fun HudTranscriptPanel(
     voiceDuration: Int,
     streamingText: String?,
     ttsPlaybackFraction: Float?,
+    ttsWordTimestamps: String?,
     messages: List<ChatMessage>,
     revealedChars: Int,
     mono: FontFamily,
@@ -407,6 +410,7 @@ private fun HudTranscriptPanel(
                             durationMs = voiceDuration,
                             speaking = speaking,
                             ttsPlaybackFraction = ttsPlaybackFraction,
+                            ttsWordTimestamps = ttsWordTimestamps,
                             scrollState = scroll,
                             fontFamily = mono,
                             color = MaterialTheme.colorScheme.onBackground
@@ -526,6 +530,7 @@ private fun WordTimedText(
     durationMs: Int,
     speaking: Boolean,
     ttsPlaybackFraction: Float?,
+    ttsWordTimestamps: String?,
     scrollState: androidx.compose.foundation.ScrollState,
     fontFamily: FontFamily,
     color: Color
@@ -568,11 +573,29 @@ private fun WordTimedText(
 
     val revealFraction = ttsPlaybackFraction ?: fallbackFraction
 
-    // Auto-scroll: follow the reveal progress
+    // Auto-scroll: follow the reveal progress. Registered before the real
+    // timestamp path below so scrolling stays active in both reveal modes.
     LaunchedEffect(revealFraction) {
         if (scrollState.maxValue > 0 && revealFraction in 0.01f..0.99f) {
             scrollState.scrollTo((revealFraction * scrollState.maxValue).toInt())
         }
+    }
+
+    // Real word-timestamp sync: when the server returned per-word timestamps,
+    // the fraction is converted to a spoken-text reveal with genuine word
+    // boundaries (falls back to the annotated length-weighted path when the
+    // timestamps can't be aligned to the raw text).
+    val tsRevealed = timestampsRevealedText(text, ttsWordTimestamps, revealFraction)
+    if (tsRevealed != null) {
+        Text(
+            text = tsRevealed,
+            fontFamily = fontFamily,
+            fontSize = 13.sp,
+            lineHeight = 20.sp,
+            color = color,
+            modifier = Modifier.padding(bottom = 8.dp)
+        )
+        return
     }
 
     val annotated = androidx.compose.ui.text.buildAnnotatedString {

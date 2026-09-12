@@ -465,6 +465,47 @@ fun AssistantService.stopEverything() {
  * - ` / `` code markers → removed
  * - Excessive blank lines (3+) → collapsed to a single blank line
  */
+/**
+ * Parses the duration (seconds) of a WAV file from its raw bytes by reading
+ * the canonical 44-byte RIFF header: sample rate at offset 24, data-subchunk
+ * size at offset 40, channels at offset 22, bits-per-sample at offset 34.
+ * Duration = dataSize / (sampleRate * bytesPerSample). Falls back to the
+ * header's byteRate (offset 28) when present. Returns 0.0 for anything that
+ * isn't a standard WAV.
+ *
+ * Used to keep the accumulated word-timestamp offset on the same clock as
+ * the MediaPlayer durations (mp.duration) that drive ttsPlaybackFraction.
+ */
+internal fun wavDurationSeconds(wavBytes: ByteArray): Double {
+    if (wavBytes.size < 44) return 0.0
+    // "RIFF" magic
+    if (wavBytes[0] != 0x52.toByte() || wavBytes[1] != 0x49.toByte()) return 0.0
+    if (wavBytes[2] != 0x46.toByte() || wavBytes[3] != 0x46.toByte()) return 0.0
+    // "WAVE" magic
+    if (wavBytes[8] != 0x57.toByte() || wavBytes[9] != 0x41.toByte()) return 0.0
+    if (wavBytes[10] != 0x56.toByte() || wavBytes[11] != 0x45.toByte()) return 0.0
+    var sampleRate = 0
+    for (i in 24 until 28) {
+        sampleRate = sampleRate or ((wavBytes[i].toInt() and 0xFF) shl (8 * (i - 24)))
+    }
+    if (sampleRate <= 0) return 0.0
+    var byteRate = 0L
+    for (i in 28 until 32) {
+        byteRate = byteRate or ((wavBytes[i].toInt() and 0xFF).toLong() shl (8 * (i - 28)))
+    }
+    var dataSizeLong = 0L
+    for (i in 40 until 44) {
+        dataSizeLong = dataSizeLong or (((wavBytes[i].toInt() and 0xFF).toLong()) shl (8 * (i - 40)))
+    }
+    if (dataSizeLong <= 0) return 0.0
+    // dataSize is in BYTES. Prefer the header's byteRate (bytes/sec); fall back
+    // to channels*bitsPerSample/8 when byteRate is absent.
+    val bytesPerSec = if (byteRate > 0) byteRate.toDouble()
+        else 1.0 * (wavBytes[22].toInt() and 0xFF) * ((wavBytes[34].toInt() and 0xFF) or ((wavBytes[35].toInt() and 0xFF) shl 8)) / 8.0
+    if (bytesPerSec <= 0) return 0.0
+    return dataSizeLong.toDouble() / bytesPerSec
+}
+
 fun cleanTextForTts(text: String): String {
     var cleaned = text
     // **bold** markers — keep the enclosed text, strip the asterisks
@@ -646,6 +687,8 @@ internal suspend fun AssistantService.playChunkedTtsGateway(
     if (chunks.isEmpty()) return emptyList()
 
     val chunkFiles = mutableListOf<String>()
+    var accumulatedTimestamps = mutableListOf<Map<String, Any>>()  // [{word, start, end}] absolute
+    var cumulativeAudioS = 0.0  // full AUDIO duration of prior chunks (matches mp.duration timeline)
 
     for ((idx, chunkText) in chunks.withIndex()) {
         // Generation check BEFORE each synthesis: if stopAudio() bumped the
@@ -658,8 +701,42 @@ internal suspend fun AssistantService.playChunkedTtsGateway(
 
         // Sequential synthesis: one chunk at a time, via the existing
         // single-text synthesizeWithGateway (tracks currentCall for Stop).
-        val audioBytes = synthesizeWithGateway(cleaned, persona)
+        val (audioBytes, tsJson) = synthesizeWithGateway(cleaned, persona)
         if (audioBytes == null || audioBytes.isEmpty()) continue
+
+        // Parse and adjust word timestamps: Kokoro returns them relative to
+        // the chunk start; add the cumulative AUDIO duration offset for
+        // absolute position. The offset is the full WAV duration of prior
+        // chunks (parsed from the RIFF header) — NOT the prior chunk's last
+        // word .end, which excludes Kokoro's trailing pad (~0.1s per chunk)
+        // and would drift the reveal progressively early across chunks.
+        // Using full audio durations keeps the timestamp timeline identical
+        // to the ttsPlaybackFraction timeline (which is built from each
+        // chunk's actual mp.duration), so word positions and playback
+        // position stay on the same clock.
+        if (tsJson != null) {
+            try {
+                val chunkTimestamps = org.json.JSONArray(tsJson)
+                for (i in 0 until chunkTimestamps.length()) {
+                    val t = chunkTimestamps.getJSONObject(i)
+                    accumulatedTimestamps.add(mapOf(
+                        "word" to t.optString("word", ""),
+                        "start" to (t.optDouble("start", 0.0) + cumulativeAudioS),
+                        "end" to (t.optDouble("end", 0.0) + cumulativeAudioS)
+                    ))
+                }
+                // Publish the accumulated timestamps to the service StateFlow
+                _ttsWordTimestamps.value = accumulatedTimestamps.joinToString(",", "[", "]") { m ->
+                    """{"word":"${m["word"]}","start":${m["start"]},"end":${m["end"]}}"""
+                }
+            } catch (e: Exception) {
+                android.util.Log.w("AssistantService", "Failed to parse word timestamps: ${e.message}")
+            }
+        }
+
+        // Advance the audio clock by THIS chunk's full WAV duration so the
+        // next chunk's words land at the correct absolute position.
+        cumulativeAudioS += wavDurationSeconds(audioBytes)
 
         // Generation check AFTER synthesis (it may have taken seconds -
         // Stop could have fired while we were waiting for Kokoro).
@@ -732,6 +809,7 @@ private fun AssistantService.startChunkPlayback(
             if (ttsGeneration != myTtsGeneration) {
                 pollJob?.cancel()
                 _ttsPlaybackFraction.value = null
+                _ttsWordTimestamps.value = null
                 mp.release()
                 currentPlayer = null
                 _state.value = AssistantState.IDLE
@@ -750,6 +828,7 @@ private fun AssistantService.startChunkPlayback(
                 // playAudioFile() onCompletion.
                 pollJob?.cancel()
                 _ttsPlaybackFraction.value = 1f
+                _ttsWordTimestamps.value = null
                 _state.value = AssistantState.IDLE
                 updateNotification("Ready to help")
                 mp.release()
@@ -891,6 +970,7 @@ private fun AssistantService.startChunkPlayback(
             android.util.Log.e("AssistantService", "playChunkedTtsGateway: MediaPlayer error what=$what extra=$extra")
             pollJob?.cancel()
             _ttsPlaybackFraction.value = null
+            _ttsWordTimestamps.value = null
             if (currentPlayer === mp) {
                 _state.value = AssistantState.IDLE
                 updateNotification("Ready to help")

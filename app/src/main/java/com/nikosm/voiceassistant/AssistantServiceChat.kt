@@ -259,7 +259,7 @@ internal fun AssistantService.sendAudioToServer(file: File, currentPersona: Pers
 
                          // If it's a gateway voice mode, we need to fetch audio separately
                          if (currentPersona.voiceMode == VoiceMode.GATEWAY) {
-                             val audioBytes = synthesizeWithGateway(directRes.first, currentPersona)
+                             val (audioBytes, wordTsJson) = synthesizeWithGateway(directRes.first, currentPersona)
                              return@withContext listOf(transcribedText, directRes.first, directRes.second, audioBytes, cleanedForTts)
                          }
 
@@ -1030,7 +1030,7 @@ private fun AssistantService.performCloudChat(text: String, persona: Persona, us
                 saveSettings()
                 playResponse(persona, deviceText = responseData.third)
             } else if (persona.voiceMode == VoiceMode.GATEWAY) {
-                val audioBytes = synthesizeWithGateway(responseData.first, persona)
+                val (audioBytes, _) = synthesizeWithGateway(responseData.first, persona)
                 val audioPath = if (audioBytes != null) {
                     val outFile = File(cacheDir, "response_${System.currentTimeMillis()}.wav")
                     outFile.writeBytes(audioBytes)
