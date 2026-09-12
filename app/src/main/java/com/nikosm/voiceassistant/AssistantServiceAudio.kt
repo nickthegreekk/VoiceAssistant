@@ -269,6 +269,15 @@ internal fun AssistantService.speakWithEspeak(text: String, persona: Persona) {
             currentAudioTrack = audioTrack
             audioTrack.play()
 
+            // Set the voice duration UP FRONT (before the blocking write below) so
+            // the UI reveal tickers (classic box + HUD WordTimedText) have a target
+            // to animate against from the first frame. Previously this was set only
+            // AFTER the blocking write completed — i.e. after playback finished —
+            // which is why the classic box dumped the full text at once: the
+            // fallback ticker saw durationMs <= 0 and pinned the reveal to 1f.
+            val durationMs = (samples.size.toFloat() / sampleRate * 1000).toInt()
+            _voiceDuration.value = durationMs
+
             // A7: genuine-completion detection via the playback-position marker —
             // no sleep-based estimate. Marker position = total frames actually written
             // (PCM16 mono = 2 bytes/frame) so onMarkerReached fires precisely when real
@@ -303,9 +312,6 @@ internal fun AssistantService.speakWithEspeak(text: String, persona: Persona) {
             withContext(Dispatchers.IO) {
                 audioTrack.write(samples, 0, samples.size, AudioTrack.WRITE_BLOCKING)
             }
-
-            val durationMs = (samples.size.toFloat() / sampleRate * 1000).toInt()
-            _voiceDuration.value = durationMs
         }
     }
 }

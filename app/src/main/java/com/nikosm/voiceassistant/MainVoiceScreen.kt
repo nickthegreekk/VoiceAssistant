@@ -662,6 +662,7 @@ fun MainScreen(service: AssistantService?) {
                     streamingText = streamingText,
                     ttsPlaybackFraction = ttsPlaybackFraction,
                     ttsWordTimestamps = ttsWordTimestamps,
+                    voiceDuration = voiceDuration,
                     miniScrollState = miniScrollState,
                     listState = listState,
                     onEditMessage = { idx, txt -> service?.updateMessage(idx, txt) },
@@ -838,6 +839,7 @@ fun ControlBar(
     streamingText: String?,
     ttsPlaybackFraction: Float?,
     ttsWordTimestamps: String?,
+    voiceDuration: Int,
     miniScrollState: ScrollState,
     listState: LazyListState,
     onEditMessage: (Int, String) -> Unit,
@@ -935,18 +937,41 @@ fun ControlBar(
                                 drawRect(fadeBrush, blendMode = BlendMode.DstIn) 
                             }
                             .verticalScroll(miniScrollState)) {
-                            
+
+                            // Fallback reveal fraction for NON-chunkED paths
+                            // (SYSTEM_TTS / BUNDLED_ESPEAK): when ttsPlaybackFraction is
+                            // null we have no real-time playback position, so estimate
+                            // one from voiceDuration — same approach the HUD's
+                            // WordTimedText uses. Without this, the classic box would
+                            // dump the full text at once (revealedChars pinned to max
+                            // after streaming), which is exactly the reported symptom.
+                            var classicFallbackFraction by remember { mutableFloatStateOf(0f) }
+                            LaunchedEffect(voiceDuration, state, ttsPlaybackFraction) {
+                                if (ttsPlaybackFraction != null) return@LaunchedEffect
+                                if (state != AssistantState.SPEAKING || voiceDuration <= 0) {
+                                    classicFallbackFraction = 1f; return@LaunchedEffect
+                                }
+                                val start = System.currentTimeMillis()
+                                while (state == AssistantState.SPEAKING) {
+                                    val elapsed = System.currentTimeMillis() - start
+                                    classicFallbackFraction = (elapsed.toFloat() / voiceDuration).coerceIn(0f, 1f)
+                                    delay(60)
+                                }
+                                classicFallbackFraction = 1f
+                            }
+
                             messages.forEachIndexed { index, msg ->
                                 val isLastAssistant = index == messages.size - 1 && msg.role == "assistant"
-                                // Stage-2: real-timestamp reveal when chunked TTS
-                                // is active (ttsPlaybackFraction non-null) — word
-                                // visibility tracks actual spoken positions
-                                // (falling back to the fraction estimate, then the
-                                // classic revealedChars for non-chunked paths).
+                                // Reveal priority: (1) real Kokoro timestamps when the
+                                // chunked Gateway path supplied them, (2) the live
+                                // playback fraction, (3) a voiceDuration-based estimate
+                                // for non-chunked paths, (4) the classic typewriter.
                                 val displayText = if (isLastAssistant) {
                                     if (ttsPlaybackFraction != null) {
                                         timestampsRevealedText(msg.text, ttsWordTimestamps, ttsPlaybackFraction)
                                             ?: fractionVisibleText(msg.text, ttsPlaybackFraction)
+                                    } else if (state == AssistantState.SPEAKING && voiceDuration > 0) {
+                                        fractionVisibleText(msg.text, classicFallbackFraction)
                                     } else {
                                         msg.text.take(revealedChars)
                                     }
