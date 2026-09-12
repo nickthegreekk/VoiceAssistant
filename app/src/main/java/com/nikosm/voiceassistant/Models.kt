@@ -184,6 +184,16 @@ val CLOUD_PERSONAS = listOf(
         isTranslator = false
     ),
     Persona(
+        name = "Cline",
+        themeColor = Color(0xFF6366F1),
+        model = "[Cline] anthropic/claude-sonnet-4-6",
+        systemPrompt = "You are a helpful AI assistant powered by Cline.",
+        isCloud = true,
+        providerIcon = "CL",
+        providerColor = Color(0xFF6366F1),
+        isTranslator = false
+    ),
+    Persona(
         name = "Custom LLM",
         themeColor = Color(0xFF808080),
         model = "[OpenAI-Compatible] llama3",
@@ -211,7 +221,26 @@ val DEFAULT_CLOUD_APIS = listOf(
     CloudApiSetting("OpenAI", "https://api.openai.com/v1", "", "O", Color(0xFF10A37F)),
     CloudApiSetting("DeepSeek", "https://api.deepseek.com/v1", "", "D", Color(0xFF4D6BFE)),
     CloudApiSetting("Google", "https://generativelanguage.googleapis.com", "", "G", Color(0xFF4285F4)),
+    CloudApiSetting("Cline", "https://api.cline.bot/api/v1", "", "CL", Color(0xFF6366F1)),
     CloudApiSetting("OpenAI-Compatible", "http://0.0.0.0:11434/v1", "", "C", Color(0xFF808080), isEditableUrl = true)
+)
+
+// Cline Bot does not expose a /models endpoint — model fetching for this provider
+// must use this static list instead of hitting the API. Model IDs follow the
+// provider/model-name convention documented at docs.cline.bot/api/models.
+val CLINE_BOT_MODELS = listOf(
+    "anthropic/claude-sonnet-4-6",
+    "anthropic/claude-3-5-sonnet-latest",
+    "anthropic/claude-3-5-haiku-latest",
+    "openai/gpt-4o",
+    "openai/gpt-4o-mini",
+    "openai/o1-preview",
+    "openai/o1-mini",
+    "google/gemini-2.5-pro",
+    "google/gemini-2.0-flash",
+    "deepseek/deepseek-chat",
+    "deepseek/deepseek-reasoner",
+    "minimax/minimax-m2.5"
 )
 
 val TRANSLATION_LANGUAGES = listOf(

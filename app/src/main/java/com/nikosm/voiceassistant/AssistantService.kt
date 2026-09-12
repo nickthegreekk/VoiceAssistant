@@ -1715,7 +1715,7 @@ class AssistantService : Service() {
 
 
     fun fetchCloudModels(api: CloudApiSetting) {
-        if (api.apiKey.isBlank() && api.icon != "C") {
+        if (api.apiKey.isBlank() && api.icon != "C" && api.icon != "CL") {
             return
         }
         incrementModelFetchCount()
@@ -1731,6 +1731,21 @@ class AssistantService : Service() {
             // from other providers untouched.
             var status: String? = null
             try {
+                // Cline Bot has no /models endpoint — use the static model list directly.
+                if (api.icon == "CL") {
+                    val models = CLINE_BOT_MODELS.map { "[${api.name}] $it" }
+                    withContext(Dispatchers.Main) {
+                        val current = _fetchedCloudModels.value.toMutableMap()
+                        current[api.name] = models
+                        _fetchedCloudModels.value = current
+                        // Clear any previous error status on success
+                        val statusMap = _serverStatus.value.toMutableMap()
+                        statusMap.remove(api.name)
+                        _serverStatus.value = statusMap
+                    }
+                    withContext(Dispatchers.Main) { decrementModelFetchCount() }
+                    return@launch
+                }
                 val models = when (api.icon) {
                     "G" -> { // Google
                         val url = "https://generativelanguage.googleapis.com/v1beta/models?key=${api.apiKey}"

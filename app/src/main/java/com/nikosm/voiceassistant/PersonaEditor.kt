@@ -245,6 +245,7 @@ fun PersonaEditor(
                 trimmedModel.startsWith("[OpenAI]") -> "O"
                 trimmedModel.startsWith("[Google]") -> "G"
                 trimmedModel.startsWith("[DeepSeek]") -> "D"
+                trimmedModel.startsWith("[Cline]") -> "CL"
                 customCloudApis.any { it.name == providerName } || trimmedModel.startsWith("[OpenAI-Compatible]") -> "C"
                 trimmedModel.contains("Translator") || isTranslator -> "T"
                 else -> "O" // Local Ollama
