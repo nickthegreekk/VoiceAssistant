@@ -152,6 +152,7 @@ fun MainScreen(service: AssistantService?) {
     // service so flipping it in settings swaps the voice screen reactively.
     var celestialUi by remember { mutableStateOf(false) }
     var streamingText by remember { mutableStateOf<String?>(null) }
+    var ttsPlaybackFraction by remember { mutableStateOf<Float?>(null) }
     var pendingCert by remember { mutableStateOf<CertApprovalRequest?>(null) }
     var updateInfo by remember { mutableStateOf<UpdateInfo?>(null) }
 
@@ -168,6 +169,7 @@ fun MainScreen(service: AssistantService?) {
             launch { service.handsFreeMode.collect { handsFreeMode = it } }
             launch { service.celestialUi.collect { celestialUi = it } }
             launch { service.streamingText.collect { streamingText = it } }
+            launch { service.ttsPlaybackFraction.collect { ttsPlaybackFraction = it } }
             launch { service.pendingCertApproval.collect { pendingCert = it } }
             launch { service.updateAvailable.collect { updateInfo = it } }
         }
@@ -463,6 +465,7 @@ fun MainScreen(service: AssistantService?) {
                         messages = messages,
                         revealedChars = revealedChars,
                         streamingText = streamingText,
+                        ttsPlaybackFraction = ttsPlaybackFraction,
                         onMicClick = {
                             if (state == AssistantState.IDLE) service?.startRecording()
                             else if (state == AssistantState.LISTENING) service?.stopRecording(currentPersona)

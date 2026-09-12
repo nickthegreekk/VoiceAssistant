@@ -147,6 +147,16 @@ class AssistantService : Service() {
     val _streamingText = MutableStateFlow<String?>(null)
     val streamingText = _streamingText.asStateFlow()
 
+    // Stage-2 streaming TTS: live playback fraction (0.0→1.0) for the HUD's
+    // word-by-word reveal. Driven by the chunked player's polling coroutine
+    // (actual MediaPlayer position + cumulative prior chunk durations, mapped
+    // against a progressively refined total-duration estimate). Null when no
+    // chunked TTS is active — the HUD falls back to the classic revealedChars
+    // path. Scoped to the HUD only (classic mini-box and text-mode ChatList
+    // use revealedChars, not WordTimedText).
+    val _ttsPlaybackFraction = MutableStateFlow<Float?>(null)
+    val ttsPlaybackFraction = _ttsPlaybackFraction.asStateFlow()
+
     // Index of the in-flight Direct-Ollama streaming placeholder inside
     // _messages (appended on the stream's first chunk, replaced by the final
     // message at apply, removed if it ended up blank). Nullable — null when no

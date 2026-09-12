@@ -11,6 +11,7 @@ import android.os.Build
 import android.util.Log
 import androidx.compose.ui.graphics.Color
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -684,11 +685,13 @@ internal suspend fun AssistantService.playChunkedTtsGateway(
             // the total audio duration from chunk 0's actual MediaPlayer
             // duration, so the word-by-word sync in the HUD covers the FULL
             // response (not just chunk 0's few seconds).
-            val firstChunkLen = cleaned.length.coerceAtLeast(1)
-            val fullTextLen = fullText.length.coerceAtLeast(firstChunkLen)
-            val durationScale = fullTextLen.toFloat() / firstChunkLen
+            val cleanedChunks = chunks.map { cleanTextForTts(it) }
+            val fullTextLen = cleanedChunks.sumOf { it.length }.coerceAtLeast(1)
 
-            startChunkPlayback(chunkFile, persona, myTtsGeneration, chunks.size, durationScale)
+            startChunkPlayback(
+                chunkFile, persona, myTtsGeneration, chunks.size,
+                fullTextLen, cleanedChunks
+            )
         }
         // Subsequent chunks: just write the file. The onCompletion callback
         // from the previous chunk picks it up via the file naming convention.
@@ -703,9 +706,11 @@ private fun AssistantService.startChunkPlayback(
     persona: Persona,
     myTtsGeneration: Long,
     totalChunks: Int,
-    durationScale: Float
+    fullTextLen: Int,
+    cleanedChunks: List<String>
 ) {
     val player = MediaPlayer()
+    var pollJob: kotlinx.coroutines.Job? = null
     try {
         player.setAudioAttributes(
             AudioAttributes.Builder()
@@ -725,6 +730,8 @@ private fun AssistantService.startChunkPlayback(
             // Generation check: if stopAudio() bumped the counter, the entire
             // sequence is stale - clean up and do NOT play the next chunk.
             if (ttsGeneration != myTtsGeneration) {
+                pollJob?.cancel()
+                _ttsPlaybackFraction.value = null
                 mp.release()
                 currentPlayer = null
                 _state.value = AssistantState.IDLE
@@ -741,6 +748,8 @@ private fun AssistantService.startChunkPlayback(
             if (currentChunkIdx >= totalChunks) {
                 // Last chunk finished - full cleanup, exactly like the classic
                 // playAudioFile() onCompletion.
+                pollJob?.cancel()
+                _ttsPlaybackFraction.value = 1f
                 _state.value = AssistantState.IDLE
                 updateNotification("Ready to help")
                 mp.release()
@@ -839,16 +848,49 @@ private fun AssistantService.startChunkPlayback(
             }
         }
 
+        // Cumulative tracking for the playback fraction (progressively refined)
+        var cumulativeDurationMs = 0
+        var preparedTextLen = 0
+        var totalEstimatedMs = 0
         player.setOnPreparedListener { mp ->
-            // Estimated full duration = chunk 0's actual audio duration scaled
-            // by the text-length ratio (full text / first chunk). Gives the
-            // word-by-word sync a duration covering the entire response.
-            _voiceDuration.value = (mp.duration * durationScale).toInt()
+            val chunkTextLen = cleanedChunks.getOrElse(currentChunkIdx) { "" }.length.coerceAtLeast(1)
+            val cumulativeBefore = cumulativeDurationMs
+            cumulativeDurationMs += mp.duration
+            preparedTextLen += chunkTextLen
+
+            // Progressively refine the total-duration estimate
+            totalEstimatedMs = (cumulativeDurationMs * fullTextLen / preparedTextLen).toInt()
+
+            // Set voiceDuration for the classic path (only on first chunk)
+            if (currentChunkIdx == 0) {
+                _voiceDuration.value = totalEstimatedMs
+            }
+
             mp.start()
+
+            // Start/restart the fraction polling coroutine
+            pollJob?.cancel()
+            pollJob = serviceScope.launch(Dispatchers.Main) {
+                while (currentPlayer === player && ttsGeneration == myTtsGeneration
+                    && assistantState.value == AssistantState.SPEAKING) {
+                    val seqPos = cumulativeBefore + mp.currentPosition
+                    val fraction = if (totalEstimatedMs > 0) {
+                        (seqPos.toFloat() / totalEstimatedMs).coerceIn(0f, 1f)
+                    } else 0f
+                    _ttsPlaybackFraction.value = fraction
+                    delay(100)
+                }
+                // Sequence done or interrupted: fully reveal
+                if (ttsGeneration == myTtsGeneration) {
+                    _ttsPlaybackFraction.value = 1f
+                }
+            }
         }
 
         player.setOnErrorListener { mp, what, extra ->
             android.util.Log.e("AssistantService", "playChunkedTtsGateway: MediaPlayer error what=$what extra=$extra")
+            pollJob?.cancel()
+            _ttsPlaybackFraction.value = null
             if (currentPlayer === mp) {
                 _state.value = AssistantState.IDLE
                 updateNotification("Ready to help")

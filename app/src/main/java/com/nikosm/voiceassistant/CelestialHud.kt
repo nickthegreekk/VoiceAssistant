@@ -82,6 +82,7 @@ fun CelestialHudBody(
     personaColor: Color,
     voiceDuration: Int,
     streamingText: String?,
+    ttsPlaybackFraction: Float?,
     muted: Boolean,
     silenced: Boolean,
     handsFreeMode: Boolean,
@@ -133,6 +134,7 @@ fun CelestialHudBody(
                 personaColor = personaColor,
                 voiceDuration = voiceDuration,
                 streamingText = streamingText,
+                ttsPlaybackFraction = ttsPlaybackFraction,
                 messages = messages,
                 revealedChars = revealedChars,
                 mono = mono,
@@ -333,6 +335,7 @@ private fun HudTranscriptPanel(
     personaColor: Color,
     voiceDuration: Int,
     streamingText: String?,
+    ttsPlaybackFraction: Float?,
     messages: List<ChatMessage>,
     revealedChars: Int,
     mono: FontFamily,
@@ -403,6 +406,7 @@ private fun HudTranscriptPanel(
                             text = currentAssistant.text,
                             durationMs = voiceDuration,
                             speaking = speaking,
+                            ttsPlaybackFraction = ttsPlaybackFraction,
                             scrollState = scroll,
                             fontFamily = mono,
                             color = MaterialTheme.colorScheme.onBackground
@@ -521,6 +525,7 @@ private fun WordTimedText(
     text: String,
     durationMs: Int,
     speaking: Boolean,
+    ttsPlaybackFraction: Float?,
     scrollState: androidx.compose.foundation.ScrollState,
     fontFamily: FontFamily,
     color: Color
@@ -542,51 +547,41 @@ private fun WordTimedText(
     }
     val totalWeight = remember(text) { weights.sum().coerceAtLeast(1f) }
 
-    var started by remember(text) { mutableStateOf(false) }
-    var startMs by remember(text) { mutableStateOf(0L) }
-    var nowMs by remember(text) { mutableStateOf(Long.MAX_VALUE) }
+    // Fraction-based word visibility: when ttsPlaybackFraction is non-null,
+    // the fraction comes from the chunked player (actual MediaPlayer position
+    // / estimated total). When null, fall back to a durationMs-based ticker
+    // for non-chunked paths (eSpeak/System TTS).
+    var fallbackFraction by remember(text) { mutableStateOf(0f) }
 
-    LaunchedEffect(text, durationMs, speaking) {
-        if (!speaking) {
-            // Not speaking: fully revealed (covers completion, stop, and
-            // historical messages).
-            started = false
-            nowMs = Long.MAX_VALUE
-            return@LaunchedEffect
-        }
-        if (durationMs <= 0) {
-            // Audio duration not known yet (e.g. Kokoro still synthesizing):
-            // keep everything hidden, same as the classic reveal's
-            // revealedChars = 0 until duration arrives.
-            started = false
-            nowMs = 0L
-            return@LaunchedEffect
-        }
-        if (!started) {
-            started = true
-            startMs = System.currentTimeMillis()
-        }
-        while (speaking && System.currentTimeMillis() - startMs < durationMs) {
-            nowMs = System.currentTimeMillis()
-            // Scroll the transcript panel proportionally to the word-reveal
-            // progress, so the currently-spoken word stays visible.
-            val fraction = ((nowMs - startMs).toFloat() / durationMs).coerceIn(0f, 1f)
-            if (scrollState.maxValue > 0) {
-                scrollState.scrollTo((fraction * scrollState.maxValue).toInt())
-            }
+    LaunchedEffect(text, durationMs, speaking, ttsPlaybackFraction) {
+        if (ttsPlaybackFraction != null) return@LaunchedEffect // chunked player drives it
+        if (!speaking) { fallbackFraction = 1f; return@LaunchedEffect }
+        if (durationMs <= 0) { fallbackFraction = 0f; return@LaunchedEffect }
+        val start = System.currentTimeMillis()
+        while (speaking) {
+            val elapsed = System.currentTimeMillis() - start
+            fallbackFraction = (elapsed.toFloat() / durationMs).coerceIn(0f, 1f)
             delay(60)
         }
-        nowMs = Long.MAX_VALUE // fully revealed
+        fallbackFraction = 1f
+    }
+
+    val revealFraction = ttsPlaybackFraction ?: fallbackFraction
+
+    // Auto-scroll: follow the reveal progress
+    LaunchedEffect(revealFraction) {
+        if (scrollState.maxValue > 0 && revealFraction in 0.01f..0.99f) {
+            scrollState.scrollTo((revealFraction * scrollState.maxValue).toInt())
+        }
     }
 
     val annotated = androidx.compose.ui.text.buildAnnotatedString {
         var idx = 0
         var consumed = 0f
         spans.forEachIndexed { i, (wStart, wEnd) ->
-            if (wStart > idx) append(text.substring(idx, wStart)) // whitespace between words
-            val slotMs = (consumed / totalWeight) * durationMs
-            val visible = !speaking ||
-                (started && durationMs > 0 && (nowMs - startMs) >= slotMs.toLong())
+            if (wStart > idx) append(text.substring(idx, wStart))
+            val slotFraction = consumed / totalWeight
+            val visible = revealFraction >= slotFraction
             if (visible) append(text.substring(wStart, wEnd))
             else append(" ".repeat(wEnd - wStart))
             idx = wEnd
