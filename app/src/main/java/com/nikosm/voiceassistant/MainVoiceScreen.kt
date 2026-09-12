@@ -123,6 +123,33 @@ private fun UpdateBanner(info: UpdateInfo, onView: () -> Unit, onDismiss: () -> 
     }
 }
 
+/**
+ * Returns `text` with words revealed up to `fraction` of the total word count
+ * (weighted by length). Unrevealed words render as spaces so the layout never
+ * reflows. Shared by the classic mini-box and text-mode ChatList for the
+ * Stage-2 fraction-based reveal (same calculation as the HUD's WordTimedText).
+ */
+internal fun fractionVisibleText(text: String, fraction: Float): String {
+    if (text.isBlank()) return text
+    val spans = Regex("\\S+").findAll(text).map { it.range.first to (it.range.last + 1) }.toList()
+    val weights = spans.map { (it.second - it.first + 1).toFloat() }
+    val totalWeight = weights.sum().coerceAtLeast(1f)
+    val clamped = fraction.coerceIn(0f, 1f)
+    val sb = StringBuilder()
+    var idx = 0
+    var consumed = 0f
+    spans.forEachIndexed { i, (wStart, wEnd) ->
+        if (wStart > idx) sb.append(text.substring(idx, wStart))
+        val slot = consumed / totalWeight
+        if (clamped >= slot) sb.append(text.substring(wStart, wEnd))
+        else sb.append(" ".repeat(wEnd - wStart))
+        idx = wEnd
+        consumed += weights[i]
+    }
+    if (idx < text.length) sb.append(text.substring(idx))
+    return sb.toString()
+}
+
 @Composable
 fun MainScreen(service: AssistantService?) {
     val context = LocalContext.current
@@ -319,7 +346,7 @@ fun MainScreen(service: AssistantService?) {
     }
 
     // Combined Auto-scroll logic
-    LaunchedEffect(messages.size, revealedChars, textModeOpen, streamingText) {
+    LaunchedEffect(messages.size, revealedChars, textModeOpen, streamingText, ttsPlaybackFraction) {
         if (messages.isNotEmpty()) {
             // Scroll the main chat list
             if (textModeOpen) {
@@ -335,9 +362,18 @@ fun MainScreen(service: AssistantService?) {
                     }
                 }
             }
-            // Scroll the small transcription box in voice mode
+            // Scroll the small transcription box in voice mode.
+            // With fraction-based reveal: proportional scroll tracks the
+            // currently-spoken word. Without: scroll to bottom (classic).
             if (!textModeOpen && miniScrollState.maxValue > 0) {
-                miniScrollState.scrollTo(miniScrollState.maxValue)
+                val fraction = ttsPlaybackFraction
+                if (fraction != null) {
+                    miniScrollState.scrollTo(
+                        (fraction * miniScrollState.maxValue).toInt()
+                    )
+                } else {
+                    miniScrollState.scrollTo(miniScrollState.maxValue)
+                }
             }
         }
     }
@@ -531,6 +567,7 @@ fun MainScreen(service: AssistantService?) {
                     messages = messages,
                     revealedChars = revealedChars,
                     streamingText = streamingText,
+                    ttsPlaybackFraction = ttsPlaybackFraction,
                     miniScrollState = miniScrollState,
                     listState = listState,
                     onEditMessage = { idx, txt -> service?.updateMessage(idx, txt) },
@@ -705,6 +742,7 @@ fun ControlBar(
     // in the voice-mode mini box; text mode streams into the chat list the
     // same way.
     streamingText: String?,
+    ttsPlaybackFraction: Float?,
     miniScrollState: ScrollState,
     listState: LazyListState,
     onEditMessage: (Int, String) -> Unit,
@@ -721,6 +759,7 @@ fun ControlBar(
                 personaColor = personaColor,
                 revealedChars = revealedChars,
                 streamingText = streamingText,
+                ttsPlaybackFraction = ttsPlaybackFraction,
                 onEditMessage = onEditMessage,
                 onDeleteMessage = onDeleteMessage,
                 onReplayAudio = onReplayAudio
@@ -803,8 +842,16 @@ fun ControlBar(
                             
                             messages.forEachIndexed { index, msg ->
                                 val isLastAssistant = index == messages.size - 1 && msg.role == "assistant"
+                                // Stage-2: fraction-based reveal when chunked TTS
+                                // is active (ttsPlaybackFraction non-null) — word
+                                // visibility tracks actual playback. Falls back to
+                                // the classic revealedChars for non-chunked paths.
                                 val displayText = if (isLastAssistant) {
-                                    msg.text.take(revealedChars)
+                                    if (ttsPlaybackFraction != null) {
+                                        fractionVisibleText(msg.text, ttsPlaybackFraction)
+                                    } else {
+                                        msg.text.take(revealedChars)
+                                    }
                                 } else msg.text
                                 
                                 ChatMessageBubble(
