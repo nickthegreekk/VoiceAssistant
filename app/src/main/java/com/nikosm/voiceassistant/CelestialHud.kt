@@ -392,6 +392,7 @@ private fun HudTranscriptPanel(
                     }
                     .verticalScroll(scroll)
             ) {
+                Column {
                 if (messages.isEmpty() && state != AssistantState.THINKING) {
                     Text(
                         "STANDBY - awaiting input",
@@ -423,16 +424,7 @@ private fun HudTranscriptPanel(
                             )
                         }
                     }
-                    if (state == AssistantState.THINKING) {
-                        // THINKING dots suppressed while streaming (the streaming
-                        // placeholder in messages already carries the content).
-                        if (streamingText == null) {
-                            Text(
-                                "...",
-                                fontFamily = mono, fontSize = 13.sp,
-                                color = personaColor.copy(alpha = 0.7f)
-                            )
-                        }
+                    if (state == AssistantState.THINKING && streamingText == null) {
                         Text(
                             "...",
                             fontFamily = mono, fontSize = 13.sp,
@@ -440,6 +432,7 @@ private fun HudTranscriptPanel(
                         )
                     }
                 }
+                } // end Column (vertical stacking inside scroll box)
             }
         }
     }

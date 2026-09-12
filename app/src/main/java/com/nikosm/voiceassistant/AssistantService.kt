@@ -266,6 +266,7 @@ class AssistantService : Service() {
     // Dispatchers.IO). That Main confinement is the thread-safety contract for this
     // plain Int — no lock/atomic needed. Hard floor at 0 so a defensive decrement can
     // never go negative.
+    @Volatile
     private var modelFetchInFlightCount = 0
 
     internal fun incrementModelFetchCount() {
