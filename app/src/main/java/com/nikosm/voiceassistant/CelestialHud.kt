@@ -407,6 +407,7 @@ private fun HudTranscriptPanel(
                                 text = msg.text,
                                 durationMs = voiceDuration,
                                 speaking = speaking,
+                                scrollState = scroll,
                                 fontFamily = mono,
                                 color = MaterialTheme.colorScheme.onBackground
                             )
@@ -533,6 +534,7 @@ private fun WordTimedText(
     text: String,
     durationMs: Int,
     speaking: Boolean,
+    scrollState: androidx.compose.foundation.ScrollState,
     fontFamily: FontFamily,
     color: Color
 ) {
@@ -579,6 +581,12 @@ private fun WordTimedText(
         }
         while (speaking && System.currentTimeMillis() - startMs < durationMs) {
             nowMs = System.currentTimeMillis()
+            // Scroll the transcript panel proportionally to the word-reveal
+            // progress, so the currently-spoken word stays visible.
+            val fraction = ((nowMs - startMs).toFloat() / durationMs).coerceIn(0f, 1f)
+            if (scrollState.maxValue > 0) {
+                scrollState.scrollTo((fraction * scrollState.maxValue).toInt())
+            }
             delay(60)
         }
         nowMs = Long.MAX_VALUE // fully revealed
