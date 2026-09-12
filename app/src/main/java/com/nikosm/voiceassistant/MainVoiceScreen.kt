@@ -253,10 +253,17 @@ fun MainScreen(service: AssistantService?) {
         // over the complete final text. Non-streaming paths (cloud/gateway)
         // never see a non-null streamingText → unchanged behavior.
         if (streamingText != null) {
+            // During streaming: show ALL text (no fake reveal). The placeholder
+            // in messages carries the accumulated content. Track the messageId
+            // so after streaming completes, the final hash matches → no
+            // re-reveal flash (the user just watched the real stream).
             messages.lastOrNull()?.let { streamingMsg ->
-                if (streamingMsg.role == "assistant") revealedChars = streamingMsg.text.length
+                if (streamingMsg.role == "assistant") {
+                    revealedChars = Int.MAX_VALUE
+                    val text = streamingMsg.text
+                    lastAnimatedMessageId = "${currentPersona.name}_${messages.size}_${text.hashCode()}"
+                }
             }
-            lastAnimatedMessageId = ""
             return@LaunchedEffect
         }
         val lastMsg = messages.lastOrNull()
@@ -809,19 +816,11 @@ fun ControlBar(
                             if (state == AssistantState.THINKING) {
                                 Text("...", color = personaColor.copy(alpha = 0.7f), style = MaterialTheme.typography.bodyMedium, modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center)
                             }
-                            // Stage-1 streaming overlay: trailing in-progress
-                            // message with a typing cursor while a Direct-Ollama
-                            // stream is in flight (full auto-scroll handled by
-                            // the shared scroll LaunchedEffect above).
-                            streamingText?.let { st ->
-                                Text(
-                                    text = st + " ▌",
-                                    color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.9f),
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    lineHeight = MaterialTheme.typography.bodyMedium.lineHeight,
-                                    modifier = Modifier.fillMaxWidth()
-                                )
-                            }
+                            // Stage-1 streaming: the placeholder message in
+                            // messages already carries the accumulated stream
+                            // content (updated per chunk by the NDJSON loop) -
+                            // no separate overlay needed here (it would double-
+                            // render the same text).
                         }
                     }
                 }

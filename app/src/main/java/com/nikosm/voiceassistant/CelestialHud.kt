@@ -423,18 +423,16 @@ private fun HudTranscriptPanel(
                             )
                         }
                     }
-                    // Stage-1 streaming overlay: trailing in-progress line with
-                    // a typing cursor while a Direct-Ollama stream is in flight.
-                    streamingText?.let { st ->
-                        Text(
-                            text = st + " ▌",
-                            fontFamily = mono,
-                            fontSize = 13.sp,
-                            lineHeight = 20.sp,
-                            color = MaterialTheme.colorScheme.onBackground
-                        )
-                    }
-                    if (state == AssistantState.THINKING && streamingText == null) {
+                    if (state == AssistantState.THINKING) {
+                        // THINKING dots suppressed while streaming (the streaming
+                        // placeholder in messages already carries the content).
+                        if (streamingText == null) {
+                            Text(
+                                "...",
+                                fontFamily = mono, fontSize = 13.sp,
+                                color = personaColor.copy(alpha = 0.7f)
+                            )
+                        }
                         Text(
                             "...",
                             fontFamily = mono, fontSize = 13.sp,
@@ -545,6 +543,15 @@ private fun WordTimedText(
     fontFamily: FontFamily,
     color: Color
 ) {
+    if (text.isBlank()) {
+        Text(
+            text = "",
+            fontFamily = fontFamily,
+            fontSize = 13.sp,
+            modifier = Modifier.padding(bottom = 8.dp)
+        )
+        return
+    }
     val spans = remember(text) {
         Regex("\\S+").findAll(text).map { it.range.first to (it.range.last + 1) }.toList()
     }
