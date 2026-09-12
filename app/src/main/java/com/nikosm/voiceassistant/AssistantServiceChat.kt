@@ -1126,7 +1126,16 @@ private suspend fun AssistantService.performDirectOllamaChat(baseUrl: String, mo
         // Budget-aware history selection
         val contextWindow = persona.numCtx // Fix #3 (sibling): was hardcoded 8192 — keep the client-side trim in sync with the num_ctx this request sends to the server
         val reservedOutput = persona.maxTokens.coerceAtLeast(1024)
-        val budget = maxOf(0, contextWindow - reservedOutput - estimateTokens(finalSystemPrompt) - estimateTokens(modelText))
+        // Regression fix: the floor had been lowered to 0 to avoid num_ctx overflow
+        // on small contexts, but 0 means NO history fits and the model loses all
+        // conversation continuity (observed: history=0, budget=0 on every turn).
+        // Floor at 25% of the context window — guarantees meaningful history while
+        // leaving 75% for system prompt + reserved output + current message, so the
+        // total request still fits within num_ctx. Capped at 2048 so very large
+        // contexts don't reserve an unreasonable history block.
+        val historyFloor = (contextWindow / 4).coerceAtMost(2048).coerceAtLeast(256)
+        val rawBudget = contextWindow - reservedOutput - estimateTokens(finalSystemPrompt) - estimateTokens(modelText)
+        val budget = if (rawBudget < historyFloor) historyFloor else rawBudget
 
         // A1: positional slice — the caller says whether the current user turn is
         // already the last entry in _messages (text flow appends it before the
@@ -1359,7 +1368,9 @@ private suspend fun AssistantService.buildCloudRequest(api: CloudApiSetting, per
     // Budget-aware history selection
     val contextWindow = persona.numCtx // Fix #3: was hardcoded 128000 — the persona's own Context Window Size setting is now the trimming budget 
     val reservedOutput = persona.maxTokens.coerceAtLeast(1024)
-    val budget = maxOf(0, contextWindow - reservedOutput - estimateTokens(finalSystemPrompt) - estimateTokens(modelText))
+    val historyFloor = (contextWindow / 4).coerceAtMost(2048).coerceAtLeast(256)
+    val rawBudget = contextWindow - reservedOutput - estimateTokens(finalSystemPrompt) - estimateTokens(modelText)
+    val budget = if (rawBudget < historyFloor) historyFloor else rawBudget
     
     // A1: positional slice — the caller says whether the current user turn is already
     // the last entry in _messages (text flow appends it; voice flow does not). No
