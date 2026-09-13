@@ -1743,7 +1743,13 @@ class AssistantService : Service() {
                         statusMap.remove(api.name)
                         _serverStatus.value = statusMap
                     }
-                    withContext(Dispatchers.Main) { decrementModelFetchCount() }
+                    // M1: no explicit decrement here — the finally below is the single
+                    // decrement point for every exit of this coroutine (this early
+                    // return included). The old explicit decrement on this path
+                    // double-decremented (one increment at the top, two decrements):
+                    // under concurrent provider fetches the counter could hit zero
+                    // while another fetch was still in flight, prematurely clearing
+                    // _isLoadingModels — the exact stuck-spinner bug B3/M1 prevent.
                     return@launch
                 }
                 val models = when (api.icon) {
