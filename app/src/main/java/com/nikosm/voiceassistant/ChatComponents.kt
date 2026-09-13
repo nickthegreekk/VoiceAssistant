@@ -73,6 +73,10 @@ fun ChatMessageBubble(
     personaColor: Color,
     isCompact: Boolean = false,
     horizontalAlignment: Alignment.Horizontal = Alignment.Start,
+    // Stage-2 karaoke: char range of the currently-spoken word + its color.
+    // Null → plain text (no highlight). Text is never hidden.
+    highlightRange: IntRange? = null,
+    highlightColor: Color? = null,
     onLongClick: (() -> Unit)? = null,
     onReplayAudio: (() -> Unit)? = null,
     modifier: Modifier = Modifier
@@ -148,7 +152,11 @@ fun ChatMessageBubble(
         }
 
         Text(
-            text = displayText,
+            text = highlightedAnnotated(
+                displayText,
+                if (isUser) null else highlightRange,
+                highlightColor
+            ),
             color = when {
                 isUser && isCompact -> personaColor
                 isUser -> MaterialTheme.colorScheme.onSurface
@@ -190,6 +198,7 @@ fun ChatList(
     streamingText: String? = null,
     ttsPlaybackFraction: Float? = null,
     ttsWordTimestamps: String? = null,
+    voiceDuration: Int,
     onEditMessage: (Int, String) -> Unit,
     onDeleteMessage: (Int) -> Unit,
     onReplayAudio: (ChatMessage) -> Unit
@@ -206,18 +215,19 @@ fun ChatList(
             itemsIndexed(messages) { index, message ->
                 val isUser = message.role == "user"
                 val isLastAssistant = index == messages.size - 1 && !isUser
-                // Stage-2: real-timestamp reveal when chunked TTS is active —
-                // word visibility tracks actual spoken positions (graciously
-                // falling back to the fraction-based estimate when timestamps
-                // can't be aligned, then the classic revealedChars).
-                val displayText = if (isLastAssistant) {
-                    if (ttsPlaybackFraction != null) {
-                        timestampsRevealedText(message.text, ttsWordTimestamps, ttsPlaybackFraction)
-                            ?: fractionVisibleText(message.text, ttsPlaybackFraction)
-                    } else {
-                        message.text.take(revealedChars)
-                    }
+                // Stage-2 karaoke: during chunked playback the text is ALWAYS
+                // fully visible — the sync engine positions the highlight on the
+                // word currently being spoken (persona color). The classic
+                // typewriter only drives non-chunked paths (no player fraction).
+                val chunkedKaraoke = isLastAssistant && state == AssistantState.SPEAKING &&
+                    ttsPlaybackFraction != null && voiceDuration > 0
+                val displayText = if (isLastAssistant && !chunkedKaraoke) {
+                    message.text.take(revealedChars)
                 } else message.text
+                val activeFraction = ttsPlaybackFraction
+                val highlightRange = if (chunkedKaraoke) {
+                    ttsActiveWordRange(message.text, ttsWordTimestamps, activeFraction!!, voiceDuration)
+                } else null
 
                 Box(
                     modifier = Modifier.fillMaxWidth(), 
@@ -226,6 +236,8 @@ fun ChatList(
                     ChatMessageBubble(
                         message = message,
                         displayText = displayText,
+                        highlightRange = if (isUser) null else highlightRange,
+                        highlightColor = if (isUser) null else personaColor,
                         personaColor = personaColor,
                         isCompact = false,
                         horizontalAlignment = if (isUser) Alignment.End else Alignment.Start,

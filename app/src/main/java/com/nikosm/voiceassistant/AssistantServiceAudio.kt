@@ -692,6 +692,14 @@ internal suspend fun AssistantService.playChunkedTtsGateway(
     val chunks = splitIntoTtsChunks(fullText)
     if (chunks.isEmpty()) return emptyList()
 
+    // Fresh-sequence state reset: the previous response's stale fraction (1f)
+    // and timestamps must not leak into this turn's UI window before the first
+    // chunk republishes them — a stale 1f fraction would misplace the karaoke
+    // highlight (or pin it pre-speech), and stale timestamps could mis-align
+    // against the new text.
+    _ttsPlaybackFraction.value = null
+    _ttsWordTimestamps.value = null
+
     val chunkFiles = mutableListOf<String>()
     var accumulatedTimestamps = mutableListOf<Map<String, Any>>()  // [{word, start, end}] absolute
     var cumulativeAudioS = 0.0  // full AUDIO duration of prior chunks (matches mp.duration timeline)
@@ -946,10 +954,12 @@ private fun AssistantService.startChunkPlayback(
             // Progressively refine the total-duration estimate
             totalEstimatedMs = (cumulativeDurationMs * fullTextLen / preparedTextLen).toInt()
 
-            // Set voiceDuration for the classic path (only on first chunk)
-            if (currentChunkIdx == 0) {
-                _voiceDuration.value = totalEstimatedMs
-            }
+            // Publish the refined estimate on EVERY chunk prepare (was
+            // first-chunk-only). The UI derives elapsed audio time as
+            // fraction × voiceDuration, so this denominator must track the same
+            // refining totalEstimatedMs the fraction is divided by — freezing
+            // it at the chunk-0 extrapolation reintroduced reveal drift.
+            _voiceDuration.value = totalEstimatedMs
 
             mp.start()
 

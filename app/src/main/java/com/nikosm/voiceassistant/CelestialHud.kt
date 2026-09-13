@@ -68,7 +68,6 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -413,7 +412,8 @@ private fun HudTranscriptPanel(
                             ttsWordTimestamps = ttsWordTimestamps,
                             scrollState = scroll,
                             fontFamily = mono,
-                            color = MaterialTheme.colorScheme.onBackground
+                            color = MaterialTheme.colorScheme.onBackground,
+                            highlightColor = personaColor
                         )
                     } else if (state == AssistantState.THINKING) {
                         Text(
@@ -518,11 +518,10 @@ private fun darken(c: Color, factor: Float): Color = Color(
 
 
 /**
- * Word-by-word audio-synced text: the TTS duration is distributed across the
- * words proportional to their length (chars + trailing space), and each word
- * becomes visible exactly when its slot in the audio elapses. Hidden words are
- * rendered as spaces so the layout never reflows mid-sentence. When TTS is not
- * speaking (before start, after completion/stop), the full text is shown.
+ * Stage-2 karaoke transcript: text is ALWAYS fully visible; the chunked sync
+ * engine (ttsActiveWordRange) positions a persona-colored highlight on the
+ * word currently being spoken. The old reveal/hide machinery (spaces for
+ * unspoken words) is gone — nothing ever disappears mid-response.
  */
 @Composable
 private fun WordTimedText(
@@ -533,7 +532,8 @@ private fun WordTimedText(
     ttsWordTimestamps: String?,
     scrollState: androidx.compose.foundation.ScrollState,
     fontFamily: FontFamily,
-    color: Color
+    color: Color,
+    highlightColor: Color
 ) {
     if (text.isBlank()) {
         Text(
@@ -544,77 +544,21 @@ private fun WordTimedText(
         )
         return
     }
-    val spans = remember(text) {
-        Regex("\\S+").findAll(text).map { it.range.first to (it.range.last + 1) }.toList()
-    }
-    val weights = remember(text) {
-        spans.map { (it.second - it.first + 1).toFloat() }
-    }
-    val totalWeight = remember(text) { weights.sum().coerceAtLeast(1f) }
+    // Text is ALWAYS fully visible — no reveal ticker, no fallback fraction.
+    // The ONLY dynamic element is the highlight on the currently-spoken word.
+    // Scrolling is NOT tied to the highlight: the panel's outer
+    // LaunchedEffect scrolls to bottom only when new content arrives.
 
-    // Fraction-based word visibility: when ttsPlaybackFraction is non-null,
-    // the fraction comes from the chunked player (actual MediaPlayer position
-    // / estimated total). When null, fall back to a durationMs-based ticker
-    // for non-chunked paths (eSpeak/System TTS).
-    var fallbackFraction by remember(text) { mutableStateOf(0f) }
-
-    LaunchedEffect(text, durationMs, speaking, ttsPlaybackFraction) {
-        if (ttsPlaybackFraction != null) return@LaunchedEffect // chunked player drives it
-        if (!speaking) { fallbackFraction = 1f; return@LaunchedEffect }
-        if (durationMs <= 0) { fallbackFraction = 0f; return@LaunchedEffect }
-        val start = System.currentTimeMillis()
-        while (speaking) {
-            val elapsed = System.currentTimeMillis() - start
-            fallbackFraction = (elapsed.toFloat() / durationMs).coerceIn(0f, 1f)
-            delay(60)
-        }
-        fallbackFraction = 1f
-    }
-
-    val revealFraction = ttsPlaybackFraction ?: fallbackFraction
-
-    // Auto-scroll: follow the reveal progress. Registered before the real
-    // timestamp path below so scrolling stays active in both reveal modes.
-    LaunchedEffect(revealFraction) {
-        if (scrollState.maxValue > 0 && revealFraction in 0.01f..0.99f) {
-            scrollState.scrollTo((revealFraction * scrollState.maxValue).toInt())
-        }
-    }
-
-    // Real word-timestamp sync: when the server returned per-word timestamps,
-    // the fraction is converted to a spoken-text reveal with genuine word
-    // boundaries (falls back to the annotated length-weighted path when the
-    // timestamps can't be aligned to the raw text).
-    val tsRevealed = timestampsRevealedText(text, ttsWordTimestamps, revealFraction)
-    if (tsRevealed != null) {
-        Text(
-            text = tsRevealed,
-            fontFamily = fontFamily,
-            fontSize = 13.sp,
-            lineHeight = 20.sp,
-            color = color,
-            modifier = Modifier.padding(bottom = 8.dp)
-        )
-        return
-    }
-
-    val annotated = androidx.compose.ui.text.buildAnnotatedString {
-        var idx = 0
-        var consumed = 0f
-        spans.forEachIndexed { i, (wStart, wEnd) ->
-            if (wStart > idx) append(text.substring(idx, wStart))
-            val slotFraction = consumed / totalWeight
-            val visible = revealFraction >= slotFraction
-            if (visible) append(text.substring(wStart, wEnd))
-            else append(" ".repeat(wEnd - wStart))
-            idx = wEnd
-            consumed += weights[i]
-        }
-        if (idx < text.length) append(text.substring(idx))
-    }
+    // Stage-2 karaoke: when the chunked player is active, the sync engine
+    // reports the char range of the word currently being spoken; the text is
+    // never hidden — the highlight rides on top of the fully-visible text.
+    // Non-chunked paths: plain text, no highlight.
+    val activeRange = if (ttsPlaybackFraction != null && speaking) {
+        ttsActiveWordRange(text, ttsWordTimestamps, ttsPlaybackFraction, durationMs)
+    } else null
 
     Text(
-        text = annotated,
+        text = highlightedAnnotated(text, activeRange, highlightColor),
         fontFamily = fontFamily,
         fontSize = 13.sp,
         lineHeight = 20.sp,
