@@ -1011,8 +1011,26 @@ private fun AssistantService.startChunkPlayback(
             cumulativeDurationMs += mp.duration
             preparedTextLen += chunkTextLen
 
-            // Progressively refine the total-duration estimate
-            totalEstimatedMs = (cumulativeDurationMs * fullTextLen / preparedTextLen).toInt()
+            // Progressively refine the total-duration estimate.
+            //
+            // Long arithmetic is MANDATORY here. cumulativeDurationMs and
+            // fullTextLen are both Int, so the product overflows 32-bit range
+            // for long responses — e.g. 274,425 ms of prepared audio × 8,000
+            // cleaned chars ≈ 2.2e9 > Int.MAX (2,147,483,647). The wrapped
+            // value is NEGATIVE, which made `totalEstimatedMs <= 0`:
+            //   • the polling loop below fell into its `else 0f` branch, so the
+            //     fraction FROZE at exactly 0.000 for the whole remainder of the
+            //     response (teleprompter dead, stuck where it was), and
+            //   • `_voiceDuration.value = totalEstimatedMs` published a negative
+            //     duration, so the UI's `voiceDuration > 0` karaoke gate went
+            //     false and the moving word highlight disappeared
+            // — both symptoms from one overflow, which is why they always
+            // broke together. The response length threshold is ~5.6k chars
+            // (overflow lands at ~50% of playback), so short/medium test
+            // responses never crossed it and appeared to work. Clamp the Long
+            // result back into Int range before publishing.
+            val estimatedTotalMs = cumulativeDurationMs.toLong() * fullTextLen / preparedTextLen
+            totalEstimatedMs = estimatedTotalMs.coerceIn(0L, Int.MAX_VALUE.toLong()).toInt()
 
             // Publish the refined estimate on EVERY chunk prepare (was
             // first-chunk-only). The UI derives elapsed audio time as
