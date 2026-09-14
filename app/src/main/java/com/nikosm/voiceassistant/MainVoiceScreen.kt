@@ -71,6 +71,10 @@ import com.nikosm.voiceassistant.ui.theme.VoiceAssistantTheme
 import kotlinx.coroutines.*
 import androidx.compose.material3.TabRowDefaults.tabIndicatorOffset
 import androidx.compose.foundation.gestures.scrollBy
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.layout.onGloballyPositioned
+import kotlin.math.roundToInt
 
 // Picked attachments must survive Activity recreation (rotation); Uri is Parcelable
 // but a List<Uri> isn't directly Bundle-storable, so save the elements individually.
@@ -78,6 +82,13 @@ private val AttachedFilesSaver = listSaver<List<Uri>, Uri>(
     save = { it.toList() },
     restore = { it }
 )
+
+/** Non-observing holder for layout coordinates (auto-teleprompter anchors). */
+private class LayoutRefHolder {
+    var container: LayoutCoordinates? = null
+    var bubble: LayoutCoordinates? = null
+    var viewport: LayoutCoordinates? = null
+}
 
 // Update banner: slim, non-intrusive row shown at the top of the
 // main chat screen while a newer release is available. "View" opens the release page
@@ -270,6 +281,12 @@ internal fun ttsActiveWordRange(
  * Applies the karaoke highlight to [text] for the currently-spoken word.
  * With no active range the text renders as a plain AnnotatedString — visually
  * identical to the old plain-Text path (nothing is ever hidden).
+ *
+ * The highlight is COLOR-ONLY (persona color text + a faint persona-tinted
+ * background). No font-weight change: bold glyphs are wider in proportional
+ * fonts, so a weight flip would rewrap the line and shift neighboring words
+ * every time the highlight moved — the spec requires that nothing about the
+ * text's layout changes during playback, only the spoken word's color/style.
  */
 internal fun highlightedAnnotated(text: String, range: IntRange?, highlightColor: Color?): AnnotatedString {
     if (range == null || highlightColor == null || text.isEmpty()) return AnnotatedString(text)
@@ -280,7 +297,6 @@ internal fun highlightedAnnotated(text: String, range: IntRange?, highlightColor
         append(text)
         addStyle(
             SpanStyle(
-                fontWeight = FontWeight.Bold,
                 color = highlightColor,
                 background = highlightColor.copy(alpha = 0.16f)
             ),
@@ -513,10 +529,12 @@ fun MainScreen(service: AssistantService?) {
 
     // Auto-scroll logic: scrolls ONLY to show newly-arrived content, as it
     // always did — scroll to bottom / last item on message or stream updates.
-    // Nothing here is tied to the karaoke word highlight: during chunked
-    // playback the typewriter is pinned (revealedChars constant), so this
-    // effect does NOT re-fire while the highlight moves, and the user can
-    // scroll freely while the spoken word is highlighted in place.
+    // Exception: while the chunked TTS karaoke is active, the mini box's scroll
+    // is owned by the progress-driven teleprompter effect in the voice column.
+    // Suppressing the bottom-jump here matters because the karaoke-start content
+    // change (revealedChars pinned to full length) used to fire this effect and
+    // slam the box to the tail — leaving the highlighted word off-screen at the
+    // top for the whole response.
     LaunchedEffect(messages.size, revealedChars, textModeOpen, streamingText) {
         if (messages.isNotEmpty()) {
             // Scroll the main chat list
@@ -533,12 +551,11 @@ fun MainScreen(service: AssistantService?) {
                     }
                 }
             }
-            // Scroll the small transcription box in voice mode: ONLY to show
-            // newly-arrived content (scroll to bottom), exactly as before the
-            // karaoke change. No scroll behavior is tied to the word highlight —
-            // the text is fully visible at all times and never moves during
-            // playback.
-            if (!textModeOpen && miniScrollState.maxValue > 0) {
+            // Scroll the small transcription box in voice mode to newly-arrived
+            // content — except while the chunked karaoke player is active, where
+            // the teleprompter effect owns the position (see the voice column).
+            val karaokeActive = state == AssistantState.SPEAKING && ttsPlaybackFraction != null
+            if (!textModeOpen && !karaokeActive && miniScrollState.maxValue > 0) {
                 miniScrollState.scrollTo(miniScrollState.maxValue)
             }
         }
@@ -991,6 +1008,46 @@ fun ControlBar(
                 
                 Spacer(modifier = Modifier.height(16.dp))
 
+                // Stage-2 auto-teleprompter: while the chunked TTS karaoke is
+                // active, the mini box tracks the spoken word instead of staying
+                // pinned at the bottom (the old arrival-only scroll left the
+                // highlighted word off-screen at the top until it happened to
+                // reach the visible tail). The highlight lives inside the LAST
+                // assistant bubble, so the target is derived from that bubble's
+                // measured pixel range — NOT from the whole scrollable content,
+                // which may start with older history. ~⅓ of the viewport is kept
+                // above the tracked position as lead so the active line never
+                // hugs the top fade. Plain scrollTo (no animation): fraction
+                // emissions land every ~150 ms, each step is a few pixels, and
+                // isScrollInProgress stays reserved for real user drags (which
+                // briefly win over the auto-track).
+                // Layout refs are a plain holder, NOT state: the position
+                // callbacks fire on every scroll frame and storing them in
+                // mutableStateOf would recompose the whole voice column ~60×/s.
+                val layoutRefs = remember { LayoutRefHolder() }
+                LaunchedEffect(ttsPlaybackFraction) {
+                    val f = ttsPlaybackFraction ?: return@LaunchedEffect
+                    if (state != AssistantState.SPEAKING) return@LaunchedEffect
+                    if (miniScrollState.isScrollInProgress) return@LaunchedEffect
+                    if (miniScrollState.maxValue <= 0) return@LaunchedEffect
+                    val container = layoutRefs.container ?: return@LaunchedEffect
+                    val bubble = layoutRefs.bubble ?: return@LaunchedEffect
+                    // Bubble top in CONTENT space: both refs measure inside the
+                    // scroll's coordinate space, so localPositionOf returns the
+                    // position in the scrollable content — the scroll offset is
+                    // NOT subtracted (adding it double-counts and overshoots
+                    // maxValue, pinning the scroll at the bottom).
+                    val bubbleTop = container.localPositionOf(bubble, Offset.Zero).y
+                    val bubbleHeight = bubble.size.height.toFloat()
+                    // Real visible viewport height: the ref BEFORE verticalScroll
+                    // (a ref after it measures the unbounded content height).
+                    val viewport = (layoutRefs.viewport?.size?.height
+                        ?: (container.size.height - miniScrollState.maxValue)).toFloat().coerceAtLeast(1f)
+                    val trackedY = bubbleTop + f * bubbleHeight
+                    val target = (trackedY - viewport / 3f).roundToInt().coerceIn(0, miniScrollState.maxValue)
+                    miniScrollState.scrollTo(target)
+                }
+
                 // Flexible Transcription Box
                 Box(modifier = Modifier
                     .fillMaxWidth()
@@ -1011,7 +1068,9 @@ fun ControlBar(
                                 drawContent()
                                 drawRect(fadeBrush, blendMode = BlendMode.DstIn) 
                             }
-                            .verticalScroll(miniScrollState)) {
+                            .onGloballyPositioned { layoutRefs.viewport = it }
+                            .verticalScroll(miniScrollState)
+                            .onGloballyPositioned { layoutRefs.container = it }) {
 
                             messages.forEachIndexed { index, msg ->
                                 val isLastAssistant = index == messages.size - 1 && msg.role == "assistant"
@@ -1038,7 +1097,14 @@ fun ControlBar(
                                     personaColor = personaColor,
                                     isCompact = true,
                                     horizontalAlignment = Alignment.CenterHorizontally,
-                                    modifier = Modifier.fillMaxWidth()
+                                    modifier = if (isLastAssistant) {
+                                        // Anchor for the auto-teleprompter: the
+                                        // spoken response bubble's pixel range.
+                                        Modifier.fillMaxWidth()
+                                            .onGloballyPositioned { layoutRefs.bubble = it }
+                                    } else {
+                                        Modifier.fillMaxWidth()
+                                    }
                                 )
                             }
                             if (state == AssistantState.THINKING) {

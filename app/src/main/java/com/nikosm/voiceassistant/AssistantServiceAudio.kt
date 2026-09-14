@@ -112,12 +112,17 @@ internal fun AssistantService.abandonAssistantFocus() {
 
 fun AssistantService.speakTextOnDevice(text: String) {
     if (!ttsReady || silenced.value) {
+        // No-play bail: release any focus held for this turn (stopRecording()
+        // retains it through THINKING when the turn was expected to speak).
+        // abandonAssistantFocus() no-ops when nothing is held.
+        abandonAssistantFocus()
         _state.value = AssistantState.IDLE
         updateNotification("Ready to help")
         return
     }
     
     if (!requestAssistantFocus()) {
+        abandonAssistantFocus()
         _state.value = AssistantState.IDLE
         updateNotification("Ready to help")
         return
@@ -174,17 +179,24 @@ fun AssistantService.speakTextOnDevice(text: String) {
 }
 
 internal fun AssistantService.speakWithEspeak(text: String, persona: Persona) {
-    stopAudio()
+    // abandonFocus=false: a new playback starts right after this teardown and
+    // re-requests focus — keep the (possibly retained-through-THINKING) request
+    // held so other apps stay ducked continuously (see stopAudio()).
+    stopAudio(abandonFocus = false)
     // C4: check silence BEFORE any synthesis work — when silent mode is on, skip the
     // entire pipeline (engine initialization, voice selection, setVoice, synthesize)
     // since the result would be discarded anyway. Same synchronous early-bail pattern
     // as speakTextOnDevice's silenced check.
     if (silenced.value) {
+        // No-play bail: release any focus held for this turn (see speakTextOnDevice).
+        abandonAssistantFocus()
         _state.value = AssistantState.IDLE
         updateNotification("Ready to help")
         return
     }
     val engine = espeakEngine ?: run {
+        // No-play bail: release any focus held for this turn.
+        abandonAssistantFocus()
         _state.value = AssistantState.IDLE
         updateNotification("Ready to help")
         return
@@ -220,6 +232,7 @@ internal fun AssistantService.speakWithEspeak(text: String, persona: Persona) {
         
         withContext(Dispatchers.Main) {
             if (!requestAssistantFocus()) {
+                abandonAssistantFocus()
                 _state.value = AssistantState.IDLE
                 updateNotification("Ready to help")
                 return@withContext
@@ -229,6 +242,7 @@ internal fun AssistantService.speakWithEspeak(text: String, persona: Persona) {
 
             val sampleRate = engine.getSampleRate()
             if (sampleRate <= 0 || samples.isEmpty()) {
+                abandonAssistantFocus()
                 _state.value = AssistantState.IDLE
                 updateNotification("Ready to help")
                 return@withContext
@@ -261,6 +275,7 @@ internal fun AssistantService.speakWithEspeak(text: String, persona: Persona) {
 
             if (audioTrack.state != AudioTrack.STATE_INITIALIZED) {
                 android.util.Log.e("AssistantService", "speakWithEspeak: AudioTrack STATE_UNINITIALIZED (minBufferSize=$minBufferSize, bufferSize=$bufferSize), bailing.")
+                abandonAssistantFocus()
                 _state.value = AssistantState.IDLE
                 updateNotification("Ready to help")
                 return@withContext
@@ -317,13 +332,19 @@ internal fun AssistantService.speakWithEspeak(text: String, persona: Persona) {
 }
 
 internal fun AssistantService.playAudioFile(file: File) {
-    stopAudio()
+    // abandonFocus=false: a new playback starts right after this teardown and
+    // re-requests focus — keep the (possibly retained-through-THINKING) request
+    // held so other apps stay ducked continuously (see stopAudio()).
+    stopAudio(abandonFocus = false)
     if (silenced.value) {
+        // No-play bail: release any focus held for this turn (see speakTextOnDevice).
+        abandonAssistantFocus()
         _state.value = AssistantState.IDLE
         updateNotification("Ready to help")
         return
     }
     if (!requestAssistantFocus()) {
+        abandonAssistantFocus()
         _state.value = AssistantState.IDLE
         updateNotification("Ready to help")
         return
@@ -394,7 +415,7 @@ internal fun AssistantService.playAudioFile(file: File) {
     }
 }
 
-fun AssistantService.stopAudio() {
+fun AssistantService.stopAudio(abandonFocus: Boolean = true) {
     // Stage-2: bump the TTS generation so all pending chunked-playback
     // onCompletion callbacks see a stale generation and halt atomically.
     ttsGeneration++
@@ -413,7 +434,19 @@ fun AssistantService.stopAudio() {
         updateNotification("Ready to help")
     }
     _voiceDuration.value = 0
-    abandonAssistantFocus()
+    // abandonFocus=false: the play-entry callers (speakWithEspeak / playAudioFile)
+    // tear down any previous playback here and then IMMEDIATELY re-request focus.
+    // Abandoning first would bounce the focus the stopRecording() retention kept
+    // through THINKING — other apps get a GAIN dispatch for a few milliseconds
+    // and are re-ducked instantly (an audible-environment flicker even if brief).
+    // With the flag false, the immediate re-request reuses the SAME held
+    // AudioFocusRequest (same usage): the framework dispatches no focus change
+    // to other apps for a re-request by the current holder, so ducking stays
+    // continuous. If the usage changed (earpiece toggle), requestAssistantFocus()
+    // abandons the superseded request itself — no leak either way.
+    if (abandonFocus) {
+        abandonAssistantFocus()
+    }
     audioManager.mode = AudioManager.MODE_NORMAL
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) audioManager.clearCommunicationDevice()
 }
@@ -624,6 +657,10 @@ fun AssistantService.playResponse(persona: Persona, file: File? = null, deviceTe
     // file != null, so it's unaffected.
     when (persona.voiceMode) {
         VoiceMode.NONE -> {
+            // No-play bail: release any focus held for this turn (stopRecording()
+            // abandons immediately for NONE personas, so this is normally a
+            // no-op kept for uniformity of the no-play landing contract).
+            abandonAssistantFocus()
             _state.value = AssistantState.IDLE
             updateNotification("Ready to help")
         }
@@ -632,6 +669,7 @@ fun AssistantService.playResponse(persona: Persona, file: File? = null, deviceTe
             else {
                 if (file != null) playAudioFile(file)
                 else {
+                    abandonAssistantFocus()
                     _state.value = AssistantState.IDLE
                     updateNotification("Ready to help")
                 }
@@ -642,6 +680,7 @@ fun AssistantService.playResponse(persona: Persona, file: File? = null, deviceTe
             else {
                 if (file != null) playAudioFile(file)
                 else {
+                    abandonAssistantFocus()
                     _state.value = AssistantState.IDLE
                     updateNotification("Ready to help")
                 }
@@ -652,6 +691,7 @@ fun AssistantService.playResponse(persona: Persona, file: File? = null, deviceTe
             else {
                 if (deviceText != null) speakTextOnDevice(deviceText)
                 else {
+                    abandonAssistantFocus()
                     _state.value = AssistantState.IDLE
                     updateNotification("Ready to help")
                 }
@@ -690,7 +730,16 @@ internal suspend fun AssistantService.playChunkedTtsGateway(
     myTtsGeneration: Long
 ): List<String> {
     val chunks = splitIntoTtsChunks(fullText)
-    if (chunks.isEmpty()) return emptyList()
+    if (chunks.isEmpty()) {
+        // No-play bail: the sequence cannot start — release any focus held for
+        // this turn (stopRecording() retained it through THINKING) and leave
+        // THINKING (the flow's finally would otherwise skip its abandon because
+        // playback was handed off).
+        abandonAssistantFocus()
+        _state.value = AssistantState.IDLE
+        updateNotification("Ready to help")
+        return emptyList()
+    }
 
     // Fresh-sequence state reset: the previous response's stale fraction (1f)
     // and timestamps must not leak into this turn's UI window before the first
@@ -765,6 +814,7 @@ internal suspend fun AssistantService.playChunkedTtsGateway(
             // First chunk: enter SPEAKING and start the player.
             // Only enter SPEAKING once for the entire sequence.
             if (!requestAssistantFocus()) {
+                abandonAssistantFocus()
                 _state.value = AssistantState.IDLE
                 updateNotification("Ready to help")
                 return chunkFiles
@@ -788,6 +838,16 @@ internal suspend fun AssistantService.playChunkedTtsGateway(
         // from the previous chunk picks it up via the file naming convention.
     }
 
+    // No-play guard: the loop ended without ever starting a chunk (chunk 0
+    // synthesis failed/empty, or every chunk cleaned to blank) — playback will
+    // never start, so release the focus stopRecording() retained through
+    // THINKING and land the turn. The early generation-stale returns above are
+    // excluded: those run after Stop, whose stopEverything() already abandoned.
+    if (chunkFiles.isEmpty()) {
+        abandonAssistantFocus()
+        _state.value = AssistantState.IDLE
+        updateNotification("Ready to help")
+    }
     return chunkFiles
 }
 

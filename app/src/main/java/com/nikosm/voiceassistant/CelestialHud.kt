@@ -73,6 +73,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
 import kotlin.math.min
+import kotlin.math.roundToInt
 import kotlin.math.sin
 
 @Composable
@@ -343,12 +344,33 @@ private fun HudTranscriptPanel(
     mono: FontFamily,
     modifier: Modifier
 ) {
-    // Word-by-word audio sync: the TTS duration is distributed across the
-    // words weighted by length, so each word appears at its spoken slot.
+    // Karaoke sync: the text is always fully visible; the sync engine places a
+    // persona-colored highlight on the currently-spoken word (WordTimedText).
+    // Scroll is split in two: the arrival effect below jumps to the newest
+    // content when it lands (message/stream updates) — but NOT while the
+    // chunked player is driving a highlight, where scroll ownership belongs to
+    // the progress-driven teleprompter effect under it (the old
+    // jump-to-bottom-and-pin left the spoken word off-screen at the top).
     val speaking = state == AssistantState.SPEAKING
     val scroll = rememberScrollState()
     LaunchedEffect(messages.size, revealedChars, streamingText) {
+        if (speaking && ttsPlaybackFraction != null) return@LaunchedEffect
         if (scroll.maxValue > 0) scroll.scrollTo(scroll.maxValue)
+    }
+    // Auto-teleprompter: the panel shows ONLY the current response, so the
+    // scrollable height IS the response — mapping the playback fraction
+    // linearly onto maxValue keeps the highlighted word in view as it walks
+    // from the top of the text to the bottom. Plain scrollTo (no animation):
+    // fraction emissions land every ~150 ms, so each step is a few pixels, and
+    // isScrollInProgress stays reserved for real user drags (which briefly win
+    // over the auto-track).
+    LaunchedEffect(ttsPlaybackFraction) {
+        val f = ttsPlaybackFraction ?: return@LaunchedEffect
+        if (!speaking) return@LaunchedEffect
+        if (scroll.isScrollInProgress) return@LaunchedEffect
+        if (scroll.maxValue > 0) {
+            scroll.scrollTo((f * scroll.maxValue).roundToInt())
+        }
     }
 
     Box(modifier) {
@@ -410,7 +432,6 @@ private fun HudTranscriptPanel(
                             speaking = speaking,
                             ttsPlaybackFraction = ttsPlaybackFraction,
                             ttsWordTimestamps = ttsWordTimestamps,
-                            scrollState = scroll,
                             fontFamily = mono,
                             color = MaterialTheme.colorScheme.onBackground,
                             highlightColor = personaColor
@@ -530,7 +551,6 @@ private fun WordTimedText(
     speaking: Boolean,
     ttsPlaybackFraction: Float?,
     ttsWordTimestamps: String?,
-    scrollState: androidx.compose.foundation.ScrollState,
     fontFamily: FontFamily,
     color: Color,
     highlightColor: Color
@@ -545,9 +565,9 @@ private fun WordTimedText(
         return
     }
     // Text is ALWAYS fully visible — no reveal ticker, no fallback fraction.
-    // The ONLY dynamic element is the highlight on the currently-spoken word.
-    // Scrolling is NOT tied to the highlight: the panel's outer
-    // LaunchedEffect scrolls to bottom only when new content arrives.
+    // The ONLY dynamic element is the highlight on the currently-spoken word;
+    // the panel's scroll follows it via the playback-fraction teleprompter
+    // effect in HudTranscriptPanel (progress-driven, linear on maxValue).
 
     // Stage-2 karaoke: when the chunked player is active, the sync engine
     // reports the char range of the word currently being spoken; the text is

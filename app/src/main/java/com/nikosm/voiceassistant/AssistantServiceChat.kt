@@ -200,6 +200,10 @@ internal fun AssistantService.sendAudioToServer(file: File, currentPersona: Pers
                     } else if (isUserCancellation(e)) {
                         // A5: the user deliberately stopped this request — no error bubble.
                         android.util.Log.d("AssistantService", "Voice chat request cancelled by user — no error bubble")
+                        // Transcription failed before performCloudChat existed, so its
+                        // finally never ran — release the focus stopRecording() retained
+                        // through THINKING (prompt un-duck, no indefinite ducking).
+                        abandonAssistantFocus()
                         _state.value = AssistantState.IDLE
                         updateNotification("Ready to help")
                     } else {
@@ -209,6 +213,8 @@ internal fun AssistantService.sendAudioToServer(file: File, currentPersona: Pers
                         } else {
                             android.util.Log.d("AssistantService", "Persona changed during request — discarding failure message: ${e.message}")
                         }
+                        // Same as above: pre-performCloudChat failure, no finally ran.
+                        abandonAssistantFocus()
                         _state.value = AssistantState.IDLE
                         updateNotification("Ready to help")
                     }
@@ -220,6 +226,14 @@ internal fun AssistantService.sendAudioToServer(file: File, currentPersona: Pers
         // Hoisted so the Stage-1 streaming cancellation catch can persist the
         // transcribed text alongside the kept partial response (D2).
         var transcribedText: String = ""
+        // Focus-retention guard: stopRecording() now retains the recorder's
+        // focus through THINKING when the turn will speak. This flag marks
+        // whether playback was actually handed off — if the turn terminates
+        // without playing (server error, empty transcription, user cancel,
+        // persona switch), the finally below must release the retained focus
+        // (the original indefinite-duck bug). NOT set for superseded turns:
+        // a newer request then owns the flow and its focus lifecycle.
+        var playbackRequested = false
         try {
             val responseData = withContext(Dispatchers.IO) {
                 val rawModel = currentPersona.model
@@ -446,8 +460,10 @@ internal fun AssistantService.sendAudioToServer(file: File, currentPersona: Pers
             saveSettings()
 
             if (useDeviceVoice) {
+                playbackRequested = true
                 playResponse(currentPersona, deviceText = cleanedForTts as String)
             } else if (audioPath != null) {
+                playbackRequested = true
                 playResponse(currentPersona, file = File(audioPath))
             } else if (currentPersona.voiceMode == VoiceMode.GATEWAY) {
                 // Stage-2 streaming TTS: gateway mode with deferred synthesis.
@@ -455,6 +471,7 @@ internal fun AssistantService.sendAudioToServer(file: File, currentPersona: Pers
                 // sequential pipeline (synthesize chunk 0, play, synthesize
                 // chunk 1 while playing, etc.) for dramatically lower
                 // first-audio latency on long responses.
+                playbackRequested = true
                 playChunkedTtsGateway(rText as String, currentPersona, ttsGeneration)
             }
         } catch (e: CancellationException) {
@@ -507,6 +524,17 @@ internal fun AssistantService.sendAudioToServer(file: File, currentPersona: Pers
             streamedPlaceholderIndex = null
             _streamingText.value = null
             if (_state.value == AssistantState.THINKING && isChatRequestCurrent(generation)) {
+                // Focus-retention counterpart (see playbackRequested above): the
+                // turn terminated without handing off to playback (server error,
+                // empty transcription, user cancel, persona switch) — release the
+                // focus stopRecording() retained through THINKING, exactly as the
+                // unconditional abandon did for these paths before. A turn whose
+                // playback entry is still pending (eSpeak synthesis in flight,
+                // chunk-0 synthesis in flight) has playbackRequested=true and
+                // keeps the focus until playback's own teardown abandons it.
+                if (!playbackRequested) {
+                    abandonAssistantFocus()
+                }
                 _state.value = AssistantState.IDLE
                 updateNotification("Ready to help")
             }
@@ -539,6 +567,14 @@ internal fun AssistantService.sendTextMessageToServer(inputText: String, current
     // the user turn already, so the response applies only if both are still current.
     val generation = nextChatRequestSeq()
     val personaName = currentPersona.name
+
+    // Focus-retention guard (same contract as the voice flow): marks whether
+    // playback was handed off. Text turns normally hold no focus, so the
+    // finally's conditional abandon is a no-op — it only fires when THIS turn
+    // superseded a voice turn that had retained its focus through THINKING and
+    // then terminated without playing (the superseded flow's own finally skips
+    // its abandon because the request is no longer current).
+    var playbackRequested = false
 
     if (currentPersona.isCloud && isCloudModel(currentPersona.model)) {
         performCloudChat(inputText, currentPersona, useDeviceVoice, startTime, currentTurnInHistory = true, generation = generation)
@@ -800,8 +836,10 @@ internal fun AssistantService.sendTextMessageToServer(inputText: String, current
             saveSettings()
 
             if (useDeviceVoice) {
+                playbackRequested = true
                 playResponse(currentPersona, deviceText = cleanedForTts as String)
             } else if (audioPath != null) {
+                playbackRequested = true
                 playResponse(currentPersona, file = File(audioPath))
             } else if (currentPersona.voiceMode == VoiceMode.GATEWAY) {
                 // Stage-2 streaming TTS: gateway mode with deferred synthesis.
@@ -809,6 +847,7 @@ internal fun AssistantService.sendTextMessageToServer(inputText: String, current
                 // sequential pipeline (synthesize chunk 0, play, synthesize
                 // chunk 1 while playing, etc.) for dramatically lower
                 // first-audio latency on long responses.
+                playbackRequested = true
                 playChunkedTtsGateway(rText as String, currentPersona, ttsGeneration)
             }
         } catch (e: CancellationException) {
@@ -854,6 +893,10 @@ internal fun AssistantService.sendTextMessageToServer(inputText: String, current
             streamedPlaceholderIndex = null
             _streamingText.value = null
             if (_state.value == AssistantState.THINKING && isChatRequestCurrent(generation)) {
+                // Focus-retention counterpart (see playbackRequested above).
+                if (!playbackRequested) {
+                    abandonAssistantFocus()
+                }
                 _state.value = AssistantState.IDLE
                 updateNotification("Ready to help")
             }
@@ -974,6 +1017,10 @@ private fun AssistantService.performCloudChat(text: String, persona: Persona, us
     serviceScope.launch {
         _state.value = AssistantState.THINKING
         updateNotification("Thinking (Cloud)...")
+        // Focus-retention guard (same contract as sendAudioToServer): a voice
+        // turn that reaches here retained its focus through THINKING — release
+        // it in the finally below if playback was never handed off.
+        var playbackRequested = false
         try {
             val responseData = withContext(Dispatchers.IO) {
                 val providerName = if (persona.model.startsWith("[") && persona.model.contains("] ")) {
@@ -1028,6 +1075,7 @@ private fun AssistantService.performCloudChat(text: String, persona: Persona, us
             if (useDeviceVoice) {
                 _messages.value = _messages.value + ChatMessage("assistant", responseData.first, responseData.second, responseTimeMs = responseTimeMs)
                 saveSettings()
+                playbackRequested = true
                 playResponse(persona, deviceText = responseData.third)
             } else if (persona.voiceMode == VoiceMode.GATEWAY) {
                 val (audioBytes, _) = synthesizeWithGateway(responseData.first, persona)
@@ -1041,6 +1089,7 @@ private fun AssistantService.performCloudChat(text: String, persona: Persona, us
                 saveSettings()
 
                 if (audioPath != null) {
+                    playbackRequested = true
                     playResponse(persona, file = File(audioPath))
                 }
             } else {
@@ -1064,6 +1113,14 @@ private fun AssistantService.performCloudChat(text: String, persona: Persona, us
             }
         } finally {
             if (_state.value == AssistantState.THINKING && isChatRequestCurrent(generation)) {
+                // Focus-retention counterpart (see playbackRequested above): the
+                // turn terminated without handing off to playback — release the
+                // focus stopRecording() retained through THINKING. Playback-pending
+                // turns (eSpeak synthesis, gateway synthesis in flight) keep it
+                // until playback's own teardown abandons.
+                if (!playbackRequested) {
+                    abandonAssistantFocus()
+                }
                 _state.value = AssistantState.IDLE
                 updateNotification("Ready to help")
             }

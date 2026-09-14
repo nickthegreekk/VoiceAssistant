@@ -147,21 +147,21 @@ class AssistantService : Service() {
     val _streamingText = MutableStateFlow<String?>(null)
     val streamingText = _streamingText.asStateFlow()
 
-    // Stage-2 streaming TTS: live playback fraction (0.0→1.0) for the HUD's
-    // word-by-word reveal. Driven by the chunked player's polling coroutine
-    // (actual MediaPlayer position + cumulative prior chunk durations, mapped
-    // against a progressively refined total-duration estimate). Null when no
-    // chunked TTS is active — the HUD falls back to the classic revealedChars
-    // path. Scoped to the HUD only (classic mini-box and text-mode ChatList
-    // use revealedChars, not WordTimedText).
+    // Stage-2 streaming TTS: live playback fraction (0.0→1.0) for the karaoke
+    // highlight. Driven by the chunked player's polling coroutine (actual
+    // MediaPlayer position + cumulative prior chunk durations, mapped against
+    // a progressively refined total-duration estimate). Null when no chunked
+    // TTS is active — the views then show their classic behavior (typewriter
+    // reveal / plain text). Consumed by all three transcript views (HUD,
+    // classic mini-box, text-mode ChatList) via ttsActiveWordRange().
     val _ttsPlaybackFraction = MutableStateFlow<Float?>(null)
     val ttsPlaybackFraction = _ttsPlaybackFraction.asStateFlow()
 
     // Stage-2 word timestamps: [{word, start, end}] in absolute seconds (from
     // the chunked player's synthesis responses, adjusted for cumulative
     // chunk offsets). Null when no timestamps available (eSpeak/System TTS,
-    // synthesis without timestamps, etc.). Drives the HUD's word-by-word
-    // reveal with REAL Kokoro alignment data when available.
+    // synthesis without timestamps, etc.). Feeds ttsActiveWordRange() with
+    // REAL Kokoro alignment data when available (estimated tail otherwise).
     val _ttsWordTimestamps = MutableStateFlow<String?>(null)
     val ttsWordTimestamps = _ttsWordTimestamps.asStateFlow()
 
@@ -1614,14 +1614,39 @@ class AssistantService : Service() {
         // Fix: the recorder cleanup is shared with stopEverything()'s discard path
         // via stopActiveRecording() — the identical stop/release sequence.
         stopActiveRecording()
-        // Release the focus startRecording() acquired, unconditionally: playback
-        // cleanup only abandons focus when playback actually happens, so on error
-        // or VoiceMode.NONE paths the transient request was otherwise held
-        // indefinitely, ducking other apps until the app was killed. Safe when
-        // playback does follow: requestAssistantFocus() builds and requests a fresh
-        // AudioFocusRequest when the field is null (and legally re-requests focus
-        // on a reused one), so the normal record -> playback flow is unaffected.
-        abandonAssistantFocus()
+        // Focus release is CONDITIONAL on whether playback will genuinely follow
+        // this turn. The unconditional abandon created a 2-5s un-duck window
+        // during THINKING: other apps' audio (e.g. music) jumped back to full
+        // volume the moment speech ended, then re-ducked when the response
+        // started playing — a jarring jump-then-drop.
+        //
+        // Retain through THINKING only when the turn will actually speak:
+        //   - a model is configured (sendAudioToServer's guard otherwise lands
+        //     the turn in IDLE with an error bubble, no playback), and
+        //   - voiceMode != NONE (playResponse's NONE branch bails to IDLE), and
+        //   - TTS is not silenced (with silence on, every playback entry point
+        //     early-returns to IDLE WITHOUT requesting focus — a retained
+        //     request would be held indefinitely, the original bug).
+        // When playback does follow, its requestAssistantFocus() re-requests the
+        // SAME held AudioFocusRequest (same usage). A focus re-request by the
+        // current holder dispatches no focus change to other apps, so ducking
+        // stays continuous from speech-end through playback.
+        //
+        // The IMMEDIATE abandon is kept exactly as before on the no-playback
+        // paths (no model / VoiceMode.NONE / silenced) — that unconditional
+        // abandon was added to fix the earlier bug where the transient request
+        // was held indefinitely on error or NONE paths, ducking other apps
+        // until the app was killed. Turns retained through THINKING that then
+        // fail (server error, empty transcription, user stop) abandon at their
+        // terminal point — see the no-play abandon sites in
+        // sendAudioToServer/performCloudChat and the playback entry bail-outs
+        // (stopEverything() and the playback teardown paths already abandon).
+        val playbackWillFollow = currentPersona.model.isNotBlank() &&
+            currentPersona.voiceMode != VoiceMode.NONE &&
+            !silenced.value
+        if (!playbackWillFollow) {
+            abandonAssistantFocus()
+        }
         // Fix #10: claim and clear the field BEFORE sending. stopRecording() can run
         // twice (double-tap on the stop control, or a state race re-invoking it) —
         // without this, every call after the first re-sent the same previously
