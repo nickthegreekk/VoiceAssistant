@@ -238,6 +238,18 @@ class AssistantService : Service() {
         settingsManager.saveCelestialUi(enabled)
     }
 
+    // Adaptive Theme (Material You): base colors follow the wallpaper, while each
+    // persona's themeColor keeps acting as the accent on top. Same UI-choice pattern
+    // as celestialUi — persisted in SettingsManager, exposed as a StateFlow so the
+    // root theme re-derives the moment the Settings switch flips. Default OFF.
+    val _adaptiveTheme = MutableStateFlow(false)
+    val adaptiveTheme = _adaptiveTheme.asStateFlow()
+
+    fun setAdaptiveTheme(enabled: Boolean) {
+        _adaptiveTheme.value = enabled
+        settingsManager.saveAdaptiveTheme(enabled)
+    }
+
     internal val _serverBases = MutableStateFlow<List<ServerConfig>>(emptyList())
     val serverBases = _serverBases.asStateFlow()
 
@@ -960,6 +972,7 @@ class AssistantService : Service() {
         _favoriteModels.value = settingsManager.getFavoriteModels() ?: emptyList()
         _lastPriceSyncTimestamp.value = settingsManager.getLastPriceSyncTimestamp()
         _celestialUi.value = settingsManager.getCelestialUi()
+        _adaptiveTheme.value = settingsManager.getAdaptiveTheme()
 
         // Fetch models for all enabled cloud providers
         (_cloudApis.value + allCustom).forEach { api ->

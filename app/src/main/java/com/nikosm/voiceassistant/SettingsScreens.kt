@@ -72,6 +72,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
 import com.nikosm.voiceassistant.ui.theme.VoiceAssistantTheme
+import com.nikosm.voiceassistant.ui.theme.isDynamicColorSupported
 import kotlinx.coroutines.*
 import androidx.compose.material3.TabRowDefaults.tabIndicatorOffset
 import androidx.compose.foundation.gestures.scrollBy
@@ -210,6 +211,23 @@ fun SettingsDialog(service: AssistantService?, onDismiss: () -> Unit, personaCol
     }
 }
 
+/**
+ * Sub-title for the Adaptive Theme (Material You) switch.
+ *
+ * Split out of the composable and parameterised on [sdkInt] so the older-Android
+ * branch is actually executed by a test: when the platform cannot supply dynamic
+ * color the switch is disabled *and* says why, rather than silently no-opping.
+ * The copy is surfaced verbatim in the UI, so its two branches are asserted by
+ * AdaptiveThemeGateTest.
+ */
+internal fun adaptiveThemeDescription(sdkInt: Int): String =
+    if (isDynamicColorSupported(sdkInt))
+        "Material You: derive the app's base colors from your wallpaper (Android 12+). " +
+            "Each persona's color stays the accent on top."
+    else
+        "Unavailable: dynamic color needs Android 12 (API 31) or newer. This device runs " +
+            "API $sdkInt, so the standard theme is used instead."
+
 @Composable
 fun GeneralSettings(service: AssistantService, totalCost: Double, onDismiss: () -> Unit) {
 
@@ -218,6 +236,13 @@ fun GeneralSettings(service: AssistantService, totalCost: Double, onDismiss: () 
     var celestialUi by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) {
         service.celestialUi.collect { celestialUi = it }
+    }
+
+    // Adaptive Theme (Material You) toggle state — same service-flow pattern as
+    // Celestial UI above.
+    var adaptiveTheme by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        service.adaptiveTheme.collect { adaptiveTheme = it }
     }
 
     // Fix #7: optional password encryption for exported backups. The password is
@@ -277,6 +302,36 @@ fun GeneralSettings(service: AssistantService, totalCost: Double, onDismiss: () 
                     Switch(
                         checked = celestialUi,
                         onCheckedChange = { service.setCelestialUi(it) }
+                    )
+                }
+                HorizontalDivider(
+                    modifier = Modifier.padding(vertical = 12.dp),
+                    color = Color.White.copy(alpha = 0.05f)
+                )
+                // Adaptive Theme (Material You): base scheme derived from the wallpaper.
+                // The persona's own themeColor is deliberately NOT routed through the
+                // scheme — the voice screen/HUD paint `personaColor` directly — so the
+                // per-persona accent stays distinct on top of the dynamic base.
+                val dynamicSupported = isDynamicColorSupported(Build.VERSION.SDK_INT)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Adaptive Theme", style = MaterialTheme.typography.titleMedium)
+                        Text(
+                            adaptiveThemeDescription(Build.VERSION.SDK_INT),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                        )
+                    }
+                    Switch(
+                        checked = adaptiveTheme,
+                        onCheckedChange = { service.setAdaptiveTheme(it) },
+                        // Disabled (with the reason above) rather than a silent no-op
+                        // when the platform can't provide dynamic color.
+                        enabled = dynamicSupported
                     )
                 }
             }

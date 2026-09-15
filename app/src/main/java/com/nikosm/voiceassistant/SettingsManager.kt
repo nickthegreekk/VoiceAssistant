@@ -713,6 +713,19 @@ class SettingsManager(context: Context) {
         prefs.edit().putBoolean("celestial_ui", enabled).apply()
     }
 
+    // Adaptive Theme (Material You dynamic color): same precedent as celestial_ui —
+    // a plain boolean in the same prefs file, default OFF so the existing static
+    // green/amber theme is byte-identical until the user opts in. The wallpaper-
+    // derived scheme itself is resolved in VoiceAssistantTheme.baseColorScheme(),
+    // which also handles the API < 31 fallback (see isDynamicColorSupported).
+    fun getAdaptiveTheme(): Boolean {
+        return prefs.getBoolean("adaptive_theme", false)
+    }
+
+    fun saveAdaptiveTheme(enabled: Boolean) {
+        prefs.edit().putBoolean("adaptive_theme", enabled).apply()
+    }
+
     fun saveSearxngUrl(url: String) {
         prefs.edit().putString("searxng_url", url).apply()
     }

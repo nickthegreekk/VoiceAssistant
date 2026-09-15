@@ -127,7 +127,20 @@ private val EditingPersonaSaver = Saver<Pair<Int, Persona>?, String>(
             bindService(intent, connection, BIND_AUTO_CREATE)
         }
         enableEdgeToEdge()
-        setContent { VoiceAssistantTheme { MainScreen(assistantService) } }
+        setContent {
+            // Adaptive Theme (Settings > General > Appearance): the service owns the
+            // persisted flag, so collect it here and re-derive the root color scheme from
+            // the wallpaper the instant the switch flips. While the binder is still null
+            // the flag stays false, so the existing static theme renders first, unchanged.
+            val svc = assistantService
+            var adaptiveTheme by remember { mutableStateOf(false) }
+            LaunchedEffect(svc) {
+                val bound = svc
+                if (bound == null) adaptiveTheme = false
+                else bound.adaptiveTheme.collect { adaptiveTheme = it }
+            }
+            VoiceAssistantTheme(dynamicColor = adaptiveTheme) { MainScreen(svc) }
+        }
     }
 
     override fun onResume() {
