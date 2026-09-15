@@ -96,7 +96,7 @@ fun PersonaSelector(
                     modifier = Modifier.fillMaxWidth().clickable { onPersonaSelected(persona) }.padding(12.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    ProviderLogo(icon = persona.providerIcon, isCloud = persona.isCloud)
+                    ProviderLogo(icon = persona.providerIcon, isCloud = persona.isCloud, imagePath = persona.iconImageUri)
                     Spacer(modifier = Modifier.width(16.dp))
                     Text(persona.name, style = MaterialTheme.typography.bodyLarge, color = if (persona.name == currentPersona.name) personaColor else MaterialTheme.colorScheme.onSurface)
                 }

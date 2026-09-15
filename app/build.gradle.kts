@@ -88,4 +88,9 @@ dependencies {
     androidTestImplementation(libs.androidx.junit)
     debugImplementation(libs.androidx.compose.ui.test.manifest)
     debugImplementation(libs.androidx.compose.ui.tooling)
+
+    // Custom persona artwork (icon + background). Coil 3 core handles java.io.File
+    // models natively — the persona images live in our own filesDir, so no
+    // network artifact is required.
+    implementation(libs.coil.compose)
 }

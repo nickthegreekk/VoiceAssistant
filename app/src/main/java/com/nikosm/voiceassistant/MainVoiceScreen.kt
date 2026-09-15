@@ -72,8 +72,11 @@ import kotlinx.coroutines.*
 import androidx.compose.material3.TabRowDefaults.tabIndicatorOffset
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.onGloballyPositioned
+import coil3.compose.AsyncImage
+import java.io.File
 import kotlin.math.roundToInt
 
 // Picked attachments must survive Activity recreation (rotation); Uri is Parcelable
@@ -631,136 +634,160 @@ fun MainScreen(service: AssistantService?) {
                 )
             }
         ) { innerPadding ->
-            // Celestial UI (Option-2 toggle, Settings > General > Appearance):
-            // when enabled AND in voice mode, the classic body below is replaced
-            // by the HUD voice screen (starfield + planet + HUD transcript).
-            // Text mode ALWAYS renders the unchanged classic ControlBar (chat
-            // list + input), and the classic body is byte-identical when the
-            // toggle is off — full runtime reversibility.
-            val celestialActive = celestialUi && !textModeOpen
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(innerPadding)
-                    .imePadding(),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                // Update banner: quiet, dismissible, only present when the service's
-                // throttled GitHub check found a newer version (see checkForAppUpdate).
-                updateInfo?.let { info ->
-                    UpdateBanner(
-                        info = info,
-                        onView = {
-                            runCatching {
-                                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(info.url)))
-                            }
-                        },
-                        onDismiss = { service?.dismissUpdate(info.version) }
+            // Persona backdrop: an app-owned copy of the chosen image (see
+            // SettingsManager.savePersonaImage), drawn BEHIND the entire voice UI and
+            // cropped to fill. It lives inside the content lambda rather than behind
+            // the Scaffold because Scaffold paints its containerColor opaquely, which
+            // would hide it. One layer serves both bodies: the celestial HUD's
+            // starfield is a transparent Canvas, so the image shows through it too.
+            Box(modifier = Modifier.fillMaxSize()) {
+                currentPersona.backgroundImageUri?.takeIf { it.isNotBlank() }?.let { path ->
+                    AsyncImage(
+                        model = File(path),
+                        contentDescription = null,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                    // Scrim: keeps the HUD's thin mono labels and the chat text legible
+                    // over an arbitrary user photo, while leaving the image clearly
+                    // visible underneath.
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(Color.Black.copy(alpha = 0.55f))
                     )
                 }
-                if (currentPersona.isTranslator) {
-                    LanguageBar(
-                        currentLanguage = currentPersona.targetLanguage,
-                        onLanguageSelected = { lang ->
-                            val idx = personaList.indexOfFirst { it.name == currentPersona.name }
-                            if (idx != -1) {
-                                service?.updatePersona(idx, currentPersona.copy(targetLanguage = lang))
-                            }
-                            currentPersona = currentPersona.copy(targetLanguage = lang)
-                        },
-                        personaColor = personaColor
-                    )
-                }
+                // Celestial UI (Option-2 toggle, Settings > General > Appearance):
+                // when enabled AND in voice mode, the classic body below is replaced
+                // by the HUD voice screen (starfield + planet + HUD transcript).
+                // Text mode ALWAYS renders the unchanged classic ControlBar (chat
+                // list + input), and the classic body is byte-identical when the
+                // toggle is off — full runtime reversibility.
+                val celestialActive = celestialUi && !textModeOpen
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(innerPadding)
+                        .imePadding(),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    // Update banner: quiet, dismissible, only present when the service's
+                    // throttled GitHub check found a newer version (see checkForAppUpdate).
+                    updateInfo?.let { info ->
+                        UpdateBanner(
+                            info = info,
+                            onView = {
+                                runCatching {
+                                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(info.url)))
+                                }
+                            },
+                            onDismiss = { service?.dismissUpdate(info.version) }
+                        )
+                    }
+                    if (currentPersona.isTranslator) {
+                        LanguageBar(
+                            currentLanguage = currentPersona.targetLanguage,
+                            onLanguageSelected = { lang ->
+                                val idx = personaList.indexOfFirst { it.name == currentPersona.name }
+                                if (idx != -1) {
+                                    service?.updatePersona(idx, currentPersona.copy(targetLanguage = lang))
+                                }
+                                currentPersona = currentPersona.copy(targetLanguage = lang)
+                            },
+                            personaColor = personaColor
+                        )
+                    }
 
-                if (celestialActive) {
-                    CelestialHudBody(
-                        state = state,
-                        personaColor = personaColor,
-                        voiceDuration = voiceDuration,
-                        muted = muted,
-                        silenced = silenced,
-                        handsFreeMode = handsFreeMode,
-                        sessionUsage = sessionUsage,
-                        messages = messages,
-                        revealedChars = revealedChars,
-                        streamingText = streamingText,
-                        ttsPlaybackFraction = ttsPlaybackFraction,
-                        ttsWordTimestamps = ttsWordTimestamps,
+                    if (celestialActive) {
+                        CelestialHudBody(
+                            state = state,
+                            personaColor = personaColor,
+                            voiceDuration = voiceDuration,
+                            muted = muted,
+                            silenced = silenced,
+                            handsFreeMode = handsFreeMode,
+                            sessionUsage = sessionUsage,
+                            messages = messages,
+                            revealedChars = revealedChars,
+                            streamingText = streamingText,
+                            ttsPlaybackFraction = ttsPlaybackFraction,
+                            ttsWordTimestamps = ttsWordTimestamps,
+                            onMicClick = {
+                                if (state == AssistantState.IDLE) service?.startRecording()
+                                else if (state == AssistantState.LISTENING) service?.stopRecording(currentPersona)
+                            },
+                            onStopClick = { service?.stopEverything() },
+                            onTextModeToggle = { textModeOpen = !textModeOpen },
+                            onMuteToggle = { service?.toggleMicMute() },
+                            onSilenceToggle = { service?.toggleSilence() },
+                            onHandsFreeToggle = {
+                                if (service?.handsFreeMode?.value == true) service.stopVadListening()
+                                else service?.startVadListening()
+                            }
+                        )
+                    } else {
+                        ControlBar(
+                        textModeOpen = textModeOpen,
+                        textInput = textInput,
+                        onTextInputChange = { textInput = it },
+                        attachedFiles = attachedFiles,
+                        onAttachClick = { attachmentLauncher.launch(arrayOf(
+                            "text/plain", "text/markdown", "text/x-markdown",
+                            "application/json", "text/x-json",
+                            "application/yaml", "text/yaml", "text/x-yaml",
+                            "application/xml", "text/xml",
+                            "text/html",
+                            "text/css",
+                            "text/x-javascript", "application/javascript",
+                            "text/x-python", "text/x-python-script",
+                            "text/x-sh", "text/x-shellscript",
+                            "text/x-c", "text/x-csrc", "text/x-c++", "text/x-c++src",
+                            "text/x-java-source",
+                            "text/x-ruby", "text/x-sql", "text/x-csharp", "text/x-go-source", "text/x-rust"
+                        )) },
+                        onRemoveAttachment = { attachedFiles = attachedFiles - it },
+                        onSendClick = {
+                            // Defensive copy: the composition's attachedFiles is a
+                            // state-backed mutable list. We snapshot it BEFORE clearing the
+                            // UI, so the synchronous `attachedFiles = emptyList()` below
+                            // can't leave the in-flight send reading an emptied list.
+                            val filesToSend = attachedFiles.toList()
+                            service?.sendTextMessageToServer(textInput, currentPersona, filesToSend)
+                            textInput = ""
+                            attachedFiles = emptyList()
+                        },
                         onMicClick = {
                             if (state == AssistantState.IDLE) service?.startRecording()
                             else if (state == AssistantState.LISTENING) service?.stopRecording(currentPersona)
                         },
                         onStopClick = { service?.stopEverything() },
+                        state = state,
+                        personaColor = personaColor,
                         onTextModeToggle = { textModeOpen = !textModeOpen },
+                        focusRequester = focusRequester,
+                        muted = muted,
+                        silenced = silenced,
                         onMuteToggle = { service?.toggleMicMute() },
                         onSilenceToggle = { service?.toggleSilence() },
+                        handsFreeMode = handsFreeMode,
                         onHandsFreeToggle = {
                             if (service?.handsFreeMode?.value == true) service.stopVadListening()
                             else service?.startVadListening()
-                        }
-                    )
-                } else {
-                    ControlBar(
-                    textModeOpen = textModeOpen,
-                    textInput = textInput,
-                    onTextInputChange = { textInput = it },
-                    attachedFiles = attachedFiles,
-                    onAttachClick = { attachmentLauncher.launch(arrayOf(
-                        "text/plain", "text/markdown", "text/x-markdown",
-                        "application/json", "text/x-json",
-                        "application/yaml", "text/yaml", "text/x-yaml",
-                        "application/xml", "text/xml",
-                        "text/html",
-                        "text/css",
-                        "text/x-javascript", "application/javascript",
-                        "text/x-python", "text/x-python-script",
-                        "text/x-sh", "text/x-shellscript",
-                        "text/x-c", "text/x-csrc", "text/x-c++", "text/x-c++src",
-                        "text/x-java-source",
-                        "text/x-ruby", "text/x-sql", "text/x-csharp", "text/x-go-source", "text/x-rust"
-                    )) },
-                    onRemoveAttachment = { attachedFiles = attachedFiles - it },
-                    onSendClick = {
-                        // Defensive copy: the composition's attachedFiles is a
-                        // state-backed mutable list. We snapshot it BEFORE clearing the
-                        // UI, so the synchronous `attachedFiles = emptyList()` below
-                        // can't leave the in-flight send reading an emptied list.
-                        val filesToSend = attachedFiles.toList()
-                        service?.sendTextMessageToServer(textInput, currentPersona, filesToSend)
-                        textInput = ""
-                        attachedFiles = emptyList()
-                    },
-                    onMicClick = {
-                        if (state == AssistantState.IDLE) service?.startRecording()
-                        else if (state == AssistantState.LISTENING) service?.stopRecording(currentPersona)
-                    },
-                    onStopClick = { service?.stopEverything() },
-                    state = state,
-                    personaColor = personaColor,
-                    onTextModeToggle = { textModeOpen = !textModeOpen },
-                    focusRequester = focusRequester,
-                    muted = muted,
-                    silenced = silenced,
-                    onMuteToggle = { service?.toggleMicMute() },
-                    onSilenceToggle = { service?.toggleSilence() },
-                    handsFreeMode = handsFreeMode,
-                    onHandsFreeToggle = {
-                        if (service?.handsFreeMode?.value == true) service.stopVadListening()
-                        else service?.startVadListening()
-                    },
-                    messages = messages,
-                    revealedChars = revealedChars,
-                    streamingText = streamingText,
-                    ttsPlaybackFraction = ttsPlaybackFraction,
-                    ttsWordTimestamps = ttsWordTimestamps,
-                    voiceDuration = voiceDuration,
-                    miniScrollState = miniScrollState,
-                    listState = listState,
-                    onEditMessage = { idx, txt -> service?.updateMessage(idx, txt) },
-                    onDeleteMessage = { idx -> service?.deleteMessage(idx) },
-                    onReplayAudio = { msg -> service?.replayMessageAudio(msg, currentPersona) }
-                    )
-                } // end celestial-if/else (HUD body vs classic ControlBar)
+                        },
+                        messages = messages,
+                        revealedChars = revealedChars,
+                        streamingText = streamingText,
+                        ttsPlaybackFraction = ttsPlaybackFraction,
+                        ttsWordTimestamps = ttsWordTimestamps,
+                        voiceDuration = voiceDuration,
+                        miniScrollState = miniScrollState,
+                        listState = listState,
+                        onEditMessage = { idx, txt -> service?.updateMessage(idx, txt) },
+                        onDeleteMessage = { idx -> service?.deleteMessage(idx) },
+                        onReplayAudio = { msg -> service?.replayMessageAudio(msg, currentPersona) }
+                        )
+                    } // end celestial-if/else (HUD body vs classic ControlBar)
+                }
             }
         }
     }
@@ -857,7 +884,7 @@ fun Header(
                     .padding(8.dp), 
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                ProviderLogo(icon = currentPersona.providerIcon, isCloud = currentPersona.isCloud)
+                ProviderLogo(icon = currentPersona.providerIcon, isCloud = currentPersona.isCloud, imagePath = currentPersona.iconImageUri)
                 Spacer(modifier = Modifier.width(12.dp))
                 Column(modifier = Modifier.fillMaxWidth()) {
                     val displayName = if (currentPersona.name.length > 20) currentPersona.name.take(20) + "..." else currentPersona.name

@@ -1,5 +1,10 @@
 package com.nikosm.voiceassistant
 
+import android.net.Uri
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -10,6 +15,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -22,6 +28,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
+import androidx.compose.material.icons.filled.AddPhotoAlternate
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Delete
@@ -30,6 +37,7 @@ import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material.icons.filled.Translate
 import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.filled.Wallpaper
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -56,6 +64,7 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -63,10 +72,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import coil3.compose.AsyncImage
+import java.io.File
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -120,6 +133,12 @@ fun PersonaEditor(
     var model by remember(persona) { mutableStateOf(persona.model) }
     var systemPrompt by remember(persona) { mutableStateOf(persona.systemPrompt) }
     var themeColor by remember(persona) { mutableStateOf(persona.themeColor) }
+    // Custom artwork, held as INTERNAL file paths (never the raw picker URI) — see
+    // SettingsManager.savePersonaImage, which copies the pick into app-owned storage
+    // at selection time. Both flow into the saved Persona (see the two copy sites
+    // below) so the debounced auto-save persists them like any other field.
+    var iconImageUri by remember(persona) { mutableStateOf(persona.iconImageUri) }
+    var backgroundImageUri by remember(persona) { mutableStateOf(persona.backgroundImageUri) }
     var temp by remember(persona) { mutableFloatStateOf(persona.temperature) }
     var topP by remember(persona) { mutableFloatStateOf(persona.topP) }
     var topK by remember(persona) { mutableIntStateOf(persona.topK) }
@@ -138,6 +157,36 @@ fun PersonaEditor(
     var kokoroVoice by remember(persona) { mutableStateOf(persona.kokoroVoice) }
     var backendUrl by remember(persona) { mutableStateOf(persona.backendUrl) }
     var showDeleteConfirm by rememberSaveable { mutableStateOf(false) }
+
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+
+    // Copies a freshly-picked image into app-owned storage, off the main thread via
+    // the service (it decodes + downsamples a full-sized photo). Doing the copy at
+    // pick time — rather than rendering the picker URI directly — is what makes the
+    // artwork survive the photo-picker's read grant expiring, and what lets the user
+    // later move or delete the original photo without breaking the persona.
+    fun adoptPickedImage(uri: Uri?, slot: String, onAdopted: (String) -> Unit) {
+        if (uri == null) return // picker dismissed — keep whatever artwork exists
+        scope.launch {
+            val saved = service.savePersonaImage(uri, slot)
+            if (saved != null) {
+                onAdopted(saved)
+            } else {
+                Toast.makeText(context, "Couldn't load that image", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    // PickVisualMedia is the system photo picker: it grants read access to just the
+    // selected item and requires NO storage permission at any API level, unlike the
+    // legacy GetContent/OpenDocument contracts.
+    val iconPicker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+        adoptPickedImage(uri, "icon") { iconImageUri = it }
+    }
+    val backgroundPicker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+        adoptPickedImage(uri, "background") { backgroundImageUri = it }
+    }
 
     // Flush-on-close: the debounce's delay(500) is cancelled when the composable
     // leaves composition, so closing within 500ms of an edit silently discards it.
@@ -163,6 +212,8 @@ fun PersonaEditor(
         themeColor = themeColor,
         isCloud = persona.isCloud,
         providerIcon = persona.providerIcon,
+        iconImageUri = iconImageUri,
+        backgroundImageUri = backgroundImageUri,
         temperature = temp,
         topP = topP,
         topK = topK,
@@ -223,7 +274,7 @@ fun PersonaEditor(
     }
 
     // Auto-save logic
-    LaunchedEffect(name, model, systemPrompt, themeColor, temp, topP, topK, repeatPenalty, maxTokens, numCtx, enableThinking, webSearchEnabled, ragEnabled, allowGatewayFailover, isTranslator, targetLanguage, voiceMode, voiceEngine, kokoroVoice, backendUrl) {
+    LaunchedEffect(name, model, systemPrompt, themeColor, temp, topP, topK, repeatPenalty, maxTokens, numCtx, enableThinking, webSearchEnabled, ragEnabled, allowGatewayFailover, isTranslator, targetLanguage, voiceMode, voiceEngine, kokoroVoice, backendUrl, iconImageUri, backgroundImageUri) {
         // Skip initial evaluation if needed? No, persona change will trigger it once, which is fine.
         delay(500)
         val trimmedModel = model.trim()
@@ -265,9 +316,11 @@ fun PersonaEditor(
             voiceMode = voiceMode,
             voiceEngine = voiceEngine,
             kokoroVoice = kokoroVoice,
-            backendUrl = backendUrl
+            backendUrl = backendUrl,
+            iconImageUri = iconImageUri,
+            backgroundImageUri = backgroundImageUri
         )
-        
+
         if (updated != persona) {
             onSaveRef.value(updated)
             lastSavedPersona = updated
@@ -340,6 +393,88 @@ fun PersonaEditor(
                             .border(if (themeColor == color) 2.dp else 0.dp, Color.White, CircleShape)
                             .clickable { themeColor = color }
                     )
+                }
+            }
+        }
+
+        item {
+            SettingsSectionHeader(title = "Artwork", icon = Icons.Default.AddPhotoAlternate)
+            SettingsSection {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    // Icon — previewed in the same circular crop ProviderLogo renders it
+                    // with, so what you pick is what you see on the persona list.
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                        Box(
+                            modifier = Modifier
+                                .size(56.dp)
+                                .clip(CircleShape)
+                                .background(Color.White.copy(alpha = 0.08f)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            if (iconImageUri != null) {
+                                AsyncImage(
+                                    model = File(iconImageUri!!),
+                                    contentDescription = null,
+                                    contentScale = ContentScale.Crop,
+                                    modifier = Modifier.fillMaxSize()
+                                )
+                            } else {
+                                Icon(Icons.Default.AddPhotoAlternate, null, tint = Color.White.copy(alpha = 0.4f))
+                            }
+                        }
+                        Spacer(Modifier.width(16.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Icon", style = MaterialTheme.typography.bodyMedium)
+                            Text("Replaces the provider badge on the persona list.",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
+                        }
+                        OutlinedButton(onClick = {
+                            iconPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                        }) { Text(if (iconImageUri == null) "Choose" else "Replace") }
+                    }
+                    if (iconImageUri != null) {
+                        // Clearing the field is enough: the save that follows reports the
+                        // change, and AssistantService.updatePersona deletes the now
+                        // unreferenced file.
+                        TextButton(onClick = { iconImageUri = null }) { Text("Remove icon") }
+                    }
+
+                    // Background — full-screen backdrop behind the voice screen in both
+                    // the classic and celestial layouts, cropped to fill.
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                        Box(
+                            modifier = Modifier
+                                .size(56.dp)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(Color.White.copy(alpha = 0.08f)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            if (backgroundImageUri != null) {
+                                AsyncImage(
+                                    model = File(backgroundImageUri!!),
+                                    contentDescription = null,
+                                    contentScale = ContentScale.Crop,
+                                    modifier = Modifier.fillMaxSize()
+                                )
+                            } else {
+                                Icon(Icons.Default.Wallpaper, null, tint = Color.White.copy(alpha = 0.4f))
+                            }
+                        }
+                        Spacer(Modifier.width(16.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Background", style = MaterialTheme.typography.bodyMedium)
+                            Text("Full-screen backdrop behind the voice screen.",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
+                        }
+                        OutlinedButton(onClick = {
+                            backgroundPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                        }) { Text(if (backgroundImageUri == null) "Choose" else "Replace") }
+                    }
+                    if (backgroundImageUri != null) {
+                        TextButton(onClick = { backgroundImageUri = null }) { Text("Remove background") }
+                    }
                 }
             }
         }

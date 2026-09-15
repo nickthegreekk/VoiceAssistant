@@ -1216,7 +1216,8 @@ class AssistantService : Service() {
     fun updatePersona(index: Int, persona: Persona) {
         val current = _personas.value.toMutableList()
         if (index in current.indices) {
-            val oldName = current[index].name
+            val previous = current[index]
+            val oldName = previous.name
             if (persona.name != oldName) {
                 // Rename: move the persona's history to the new name-keyed storage
                 // entry (it would otherwise be orphaned on disk forever), and when
@@ -1230,6 +1231,20 @@ class AssistantService : Service() {
             }
             current[index] = persona
             _personas.value = current
+            // Artwork lifecycle: a save that REPLACED a slot points the persona at a
+            // new file, and a save that CLEARED one points it at null — either way the
+            // previously referenced file is now unreachable and would sit in filesDir
+            // forever, so it is deleted here. Compared by PATH rather than by Persona
+            // equality, because re-saving an unmodified persona must NOT delete its
+            // artwork (the editor auto-saves on every keystroke). Filenames are unique
+            // per save (SettingsManager.newArtworkFile), so a path is never shared
+            // between two personas — nothing else can be pointing at it.
+            if (previous.iconImageUri != persona.iconImageUri) {
+                settingsManager.deleteArtworkFile(previous.iconImageUri)
+            }
+            if (previous.backgroundImageUri != persona.backgroundImageUri) {
+                settingsManager.deleteArtworkFile(previous.backgroundImageUri)
+            }
             saveSettings()
         }
     }
@@ -1237,7 +1252,8 @@ class AssistantService : Service() {
     fun removePersona(index: Int) {
         val current = _personas.value.toMutableList()
         if (index in current.indices) {
-            val removedName = current[index].name
+            val removedPersona = current[index]
+            val removedName = removedPersona.name
             current.removeAt(index)
             // Fix #4: deleting the ACTIVE persona used to leave currentPersonaName
             // pointing at a name that no longer existed — currentPersona then returned
@@ -1271,6 +1287,13 @@ class AssistantService : Service() {
             // updatePersona and MIGRATES rather than deletes, so this only ever fires
             // on true removal. Removing a name with no saved entry is a no-op.)
             settingsManager.deletePersonaHistory(removedName)
+            // Artwork cleanup rides along with the history cleanup above: the persona's
+            // app-owned icon/background JPEGs are unreachable once it is gone, so they
+            // would sit in filesDir forever. Driven off the captured Persona object
+            // rather than the name, because SettingsManager's stored persona list is
+            // only rewritten by saveSettings() below — a name lookup would still find
+            // (and therefore leave alone) the persona being removed.
+            settingsManager.deletePersonaArtworkFiles(removedPersona)
             saveSettings()
         }
     }
@@ -1333,6 +1356,13 @@ class AssistantService : Service() {
     fun saveRagPassword(password: String) = settingsManager.saveRagPassword(password)
 
     fun exportBackup(): String = settingsManager.exportBackup()
+
+    // Persona artwork import. Suspends on Dispatchers.IO because it decodes and
+    // re-encodes a full-sized photo — far too heavy for the main thread. Returns the
+    // app-owned path to persist on the Persona, or null when the pick was unreadable
+    // (the caller then keeps the persona's previous artwork).
+    suspend fun savePersonaImage(uri: Uri, slot: String): String? =
+        withContext(Dispatchers.IO) { settingsManager.savePersonaImage(uri, slot) }
     fun importBackup(json: String): Boolean {
         val success = settingsManager.importBackup(json)
         if (success) loadSettings()

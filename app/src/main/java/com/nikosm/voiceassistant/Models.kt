@@ -76,7 +76,14 @@ data class Persona(
     val numCtx: Int = 8192,
     val enableThinking: Boolean = true,
     val webSearchEnabled: Boolean = false,
-    val ragEnabled: Boolean = false
+    val ragEnabled: Boolean = false,
+    // Custom persona artwork. These hold INTERNAL paths inside the app's own
+    // filesDir (filesDir/persona_images/...), never raw photo-picker URIs: the
+    // picked image is copied + downsampled into app storage at selection time,
+    // so it survives the user deleting/moving the original photo and needs no
+    // persistent URI permission grant. Both are optional/nullable.
+    val iconImageUri: String? = null,        // square-ish avatar shown in ProviderLogo
+    val backgroundImageUri: String? = null   // full-screen backdrop behind the UI
 )
 
 @Serializable

@@ -5,6 +5,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
@@ -28,11 +29,14 @@ import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.material3.Surface
+import coil3.compose.AsyncImage
+import java.io.File
 
 @Composable
 fun ResponseTimeBadge(
@@ -60,7 +64,13 @@ fun ProviderLogo(
     icon: String,
     modifier: Modifier = Modifier,
     size: androidx.compose.ui.unit.Dp = 28.dp,
-    isCloud: Boolean = false
+    isCloud: Boolean = false,
+    // Optional absolute path to an app-owned artwork file (Persona.iconImageUri).
+    // When present it REPLACES the built-in provider glyph. When it is null — or the
+    // file has since been removed on disk, which Coil reports as an error and simply
+    // draws nothing for — the original letter/icon badge is used, so a persona always
+    // has a visible logo rather than an empty circle.
+    imagePath: String? = null
 ) {
     Box(
         modifier = modifier
@@ -74,7 +84,17 @@ fun ProviderLogo(
             .background(Color.White),
         contentAlignment = Alignment.Center
     ) {
-        when (icon) {
+        if (!imagePath.isNullOrBlank()) {
+            // Custom artwork wins over the built-in glyph. Coil decodes off the main
+            // thread and caches by path key, so recomposition (and the persona list's
+            // frequent rebuilds) never re-reads the file.
+            AsyncImage(
+                model = File(imagePath),
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize()
+            )
+        } else when (icon) {
             "O" -> Icon(Icons.Default.Memory, null, tint = Color.Black, modifier = Modifier.size(size * 0.6f))
             "G" -> Icon(Icons.Default.Language, null, tint = Color(0xFF4285F4), modifier = Modifier.size(size * 0.6f))
             "A" -> Icon(Icons.Default.Architecture, null, tint = Color(0xFFD97755), modifier = Modifier.size(size * 0.6f))

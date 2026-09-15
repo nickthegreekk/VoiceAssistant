@@ -195,7 +195,7 @@ fun PersonaSettings(service: AssistantService, personas: List<Persona>, currentT
                         border = BorderStroke(1.dp, persona.themeColor.copy(alpha = 0.3f))
                     ) {
                         Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-                            ProviderLogo(icon = persona.providerIcon, isCloud = persona.isCloud, size = 40.dp)
+                            ProviderLogo(icon = persona.providerIcon, isCloud = persona.isCloud, size = 40.dp, imagePath = persona.iconImageUri)
                             Spacer(Modifier.width(16.dp))
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(persona.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
