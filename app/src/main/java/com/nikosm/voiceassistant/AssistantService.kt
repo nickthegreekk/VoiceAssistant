@@ -900,22 +900,34 @@ class AssistantService : Service() {
         val authorizationHeader = buildAuthorizationHeader(target)
         val url = buildHealthCheckUrl(target, isGateway)
 
-        try {
+        // #3 (health) fix: this runs on Dispatchers.IO — the 30s periodic sweep below and
+        // forceCheckHealth both launch there — but _serverStatus may only be
+        // read-modify-written on Main, the contract every other writer relies on
+        // (fetchCloudModels/#3 (cloud), fetchModels/B3 (chat)). It used to do that
+        // read-modify-write inline, off-Main, which made it the last writer outside the
+        // contract: a write landing on Main between its `toMutableMap()` and its
+        // assignment (e.g. a provider fetch finishing in that window) was silently
+        // dropped, and the clobbered entry stayed wrong until the next 30s tick.
+        // So compute the outcome off-Main and apply it through a Main hop, one entry at a
+        // time, exactly like the other writers.
+        val outcome = try {
             val requestBuilder = Request.Builder().url(url)
             authorizationHeader?.let { requestBuilder.header("Authorization", it) }
 
             fastClient.newCall(requestBuilder.build()).execute().use { response ->
-                val statusMap = _serverStatus.value.toMutableMap()
                 if (response.isSuccessful || response.code == 401) {
-                    statusMap[target.url] = "Online"
+                    "Online"
                 } else {
-                    statusMap[target.url] = "failed: ${response.code}"
+                    "failed: ${response.code}"
                 }
-                _serverStatus.value = statusMap
             }
         } catch (e: Exception) {
+            "failed: offline"
+        }
+
+        withContext(Dispatchers.Main) {
             val statusMap = _serverStatus.value.toMutableMap()
-            statusMap[target.url] = "failed: offline"
+            statusMap[target.url] = outcome
             _serverStatus.value = statusMap
         }
     }
