@@ -3,6 +3,7 @@ package com.nikosm.voiceassistant
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.SharedPreferences
+import java.security.GeneralSecurityException
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -25,6 +26,9 @@ class SettingsManagerCorruptionTest {
     private companion object {
         const val GARBAGE = "{ this is ·definitely· not »valid« JSON ]"
         const val FALLBACK_PREFS = "voice_assistant_secure_prefs_fallback"
+
+        // Must match the encrypted file name in SettingsManager.buildEncryptedPrefs().
+        const val ENCRYPTED_PREFS = "voice_assistant_secure_prefs"
     }
 
     // In-memory SharedPreferences so SettingsManager's plaintext fallback branch has a
@@ -67,14 +71,33 @@ class SettingsManagerCorruptionTest {
         }
     }
 
-    // ContextWrapper(null) keeps the abstract-Context surface minimal: only the two
-    // calls SettingsManager/EncryptedSharedPreferences actually reach need answers.
-    // Every other delegation hits the null base and throws NPE, which the manager's
-    // own init-recovery catches — that IS the fallback path under test.
+    // ContextWrapper(null) keeps the abstract-Context surface minimal: only the calls
+    // SettingsManager actually reaches need answers. Delegation to the null base throws
+    // NPE, which the manager's own init-recovery catches — that IS the fallback path
+    // under test.
+    //
+    // Two overrides keep that premise true on the JVM:
+    //  - getApplicationContext must be non-null. SettingsManager captures
+    //    `context.applicationContext` in a field initializer (SettingsManager.kt:26)
+    //    that runs BEFORE and OUTSIDE its recovery try/catch, so a null there aborts
+    //    construction instead of falling back.
+    //  - the encrypted prefs file must stay unavailable. Given a usable app context,
+    //    EncryptedSharedPreferences can now construct on the JVM against stubbed crypto,
+    //    which silently REPLACES the plaintext fallback store and breaks every test
+    //    below (a null keyset then NPEs inside putEncryptedObject). Refusing that one
+    //    filename reproduces the production condition these tests depend on:
+    //    EncryptedSharedPreferences cannot initialize without AndroidKeyStore.
     private class FakeAppContext : ContextWrapper(null) {
         private val stores = HashMap<String, FakeSharedPreferences>()
-        override fun getSharedPreferences(name: String?, mode: Int): SharedPreferences =
-            stores.getOrPut(name ?: "unnamed") { FakeSharedPreferences() }
+
+        override fun getApplicationContext(): Context = this
+
+        override fun getSharedPreferences(name: String?, mode: Int): SharedPreferences {
+            if (name == ENCRYPTED_PREFS) throw GeneralSecurityException(
+                "AndroidKeyStore is unavailable on the JVM — encrypted prefs cannot initialize"
+            )
+            return stores.getOrPut(name ?: "unnamed") { FakeSharedPreferences() }
+        }
 
         override fun deleteSharedPreferences(name: String?): Boolean {
             stores.remove(name)
