@@ -333,9 +333,12 @@ fun MainScreen(service: AssistantService?) {
     var muted by remember { mutableStateOf(false) }
     var silenced by remember { mutableStateOf(false) }
     var handsFreeMode by remember { mutableStateOf(false) }
-    // Celestial UI toggle (Settings > General > Appearance) — collected from the
-    // service so flipping it in settings swaps the voice screen reactively.
-    var celestialUi by remember { mutableStateOf(false) }
+    // Celestial UI toggle (Settings > General > Appearance) — seeded from the
+    // service's already-loaded value (the same synchronous-read pattern as
+    // isFirstRun above) so a fresh install paints the HUD on its first frame
+    // instead of flashing the classic layout, then kept live from the service
+    // so flipping it in settings swaps the voice screen reactively.
+    var celestialUi by remember(service) { mutableStateOf(service?.celestialUi?.value ?: false) }
     var streamingText by remember { mutableStateOf<String?>(null) }
     var ttsPlaybackFraction by remember { mutableStateOf<Float?>(null) }
     var ttsWordTimestamps by remember { mutableStateOf<String?>(null) }

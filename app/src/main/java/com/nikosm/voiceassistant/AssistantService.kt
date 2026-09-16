@@ -226,10 +226,13 @@ class AssistantService : Service() {
     val _micMuted = MutableStateFlow(false)
     val micMuted = _micMuted.asStateFlow()
 
-    // Celestial UI (optional HUD voice-screen): a UI-choice toggle, not a voice
-    // behavior — persisted in SettingsManager, exposed as a StateFlow so the
-    // main screen can branch between the classic body and the HUD body
-    // reactively. Default OFF.
+    // Celestial UI (HUD voice-screen): a UI-choice toggle, not a voice behavior —
+    // persisted in SettingsManager, exposed as a StateFlow so the main screen can
+    // branch between the classic body and the HUD body reactively. The literal
+    // initial below is only a placeholder: loadSettings() runs synchronously in
+    // onCreate, before onBind can hand the binder to the Activity, and overwrites
+    // it from prefs — whose default is now ON for a fresh install, and always the
+    // explicitly saved value on a device that has one.
     val _celestialUi = MutableStateFlow(false)
     val celestialUi = _celestialUi.asStateFlow()
 

@@ -702,11 +702,13 @@ class SettingsManager(context: Context) {
         prefs.edit().putBoolean("is_first_run", false).apply()
     }
 
-    // Celestial UI (optional HUD voice-screen, Option-2 toggle): persisted like
-    // is_first_run — a plain boolean in the same prefs file. Default OFF so the
-    // existing UI is untouched until explicitly enabled in Settings.
+    // Celestial UI (the HUD voice screen): persisted like is_first_run — a plain
+    // boolean in the same prefs file. Default ON, because the HUD is now the layout a
+    // fresh install should open in. getBoolean only falls back to this default when the
+    // key is absent, so an explicitly saved value always wins: a device whose user
+    // turned the HUD off (or on) keeps the classic layout (or the HUD) exactly as saved.
     fun getCelestialUi(): Boolean {
-        return prefs.getBoolean("celestial_ui", false)
+        return prefs.getBoolean("celestial_ui", true)
     }
 
     fun saveCelestialUi(enabled: Boolean) {
