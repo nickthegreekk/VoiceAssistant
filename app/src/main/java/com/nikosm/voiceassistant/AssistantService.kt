@@ -165,6 +165,15 @@ class AssistantService : Service() {
     val _ttsWordTimestamps = MutableStateFlow<String?>(null)
     val ttsWordTimestamps = _ttsWordTimestamps.asStateFlow()
 
+    // Fix #3: one-shot "re-run the timed reveal for this message" signal, emitted
+    // BEFORE a NON-chunked replay starts (device-voice engine or a stored file) so a
+    // replay gets the same duration-synced typewriter reveal a live first response
+    // gets. Null until the first replay is requested; the UI consumes each token
+    // exactly once. Not emitted by the chunked Gateway path, which has its own
+    // karaoke highlight. See RevealRestartRequest.
+    val _revealRestartRequest = MutableStateFlow<RevealRestartRequest?>(null)
+    val revealRestartRequest = _revealRestartRequest.asStateFlow()
+
     // Index of the in-flight Direct-Ollama streaming placeholder inside
     // _messages (appended on the stream's first chunk, replaced by the final
     // message at apply, removed if it ended up blank). Nullable — null when no
@@ -748,6 +757,11 @@ class AssistantService : Service() {
     // start; every onCompletion checks it. If it has advanced, the entire
     // sequence is stale and must not continue.
     internal var ttsGeneration: Long = 0
+    // Fix #3: monotonic token for reveal-restart requests (see RevealRestartRequest).
+    // Bumped by requestRevealRestart() on every non-chunked replay so the UI can
+    // consume each request exactly once — replaying the same message twice in a row
+    // must re-arm the reveal both times, which an index-only signal couldn't express.
+    internal var revealRestartSeq: Long = 0
     // A3: utterance ID issued by the most recent speakTextOnDevice() call. TTS
     // onDone/onError callbacks only run their cleanup when their delivered ID still
     // matches this, so a stale callback from an older utterance can't cut off a

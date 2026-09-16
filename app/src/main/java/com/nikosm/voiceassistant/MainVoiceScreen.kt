@@ -91,7 +91,23 @@ private class LayoutRefHolder {
     var container: LayoutCoordinates? = null
     var bubble: LayoutCoordinates? = null
     var viewport: LayoutCoordinates? = null
+    /**
+     * Identity of the message [bubble] was measured for, using the same
+     * "{persona}_{messageCount}_{textHash}" pattern the reveal effect uses for the
+     * last assistant message. The holder is never invalidated when the message list
+     * changes (persona switch, clear-chat), so the teleprompter re-checks this
+     * against the CURRENT last assistant message before trusting [bubble]/[container]:
+     * measuring a detached pair can throw from layout math, not just scroll wrong.
+     */
+    var bubbleMessageId: String? = null
 }
+
+// Fix #3: how long a freshly-armed replay reveal waits for the engine to publish the
+// replayed audio's real duration before falling back to the heuristic tick. Bundled
+// eSpeak publishes it as soon as the AudioTrack is up (a few hundred ms after the
+// reveal is armed); System TTS never publishes one, so its replay reveals on the
+// fallback. Bounded so a failed/absent duration can never leave the text hidden.
+private const val ReplayRevealDurationWaitMs = 1500L
 
 // Update banner: slim, non-intrusive row shown at the top of the
 // main chat screen while a newer release is available. "View" opens the release page
@@ -321,6 +337,17 @@ fun MainScreen(service: AssistantService?) {
     var textModeOpen by rememberSaveable { mutableStateOf(false) }
     var revealedChars by remember { mutableIntStateOf(Int.MAX_VALUE) }
     var lastAnimatedMessageId by remember { mutableStateOf("") }
+    // Fix #3 (device-voice replay): consumed-token bookkeeping for the one-shot
+    // "re-run the reveal" request. `restartIndex` + `restartCount` pin the forced
+    // reveal to the exact message the service re-synthesized — both must still
+    // describe the current list, so a reshaped list (deletion, persona switch,
+    // clear-chat) can never re-point the forced reveal at a different message —
+    // and `restartStarted` records that the timer already owns this reveal, so a
+    // later duration refinement re-runs the effect without zeroing the text again.
+    var consumedRevealToken by remember { mutableStateOf(0L) }
+    var revealRestartIndex by remember { mutableStateOf(-1) }
+    var revealRestartCount by remember { mutableStateOf(-1) }
+    var revealRestartStarted by remember { mutableStateOf(false) }
     var attachedFiles by rememberSaveable(stateSaver = AttachedFilesSaver) { mutableStateOf<List<Uri>>(emptyList()) }
     var isFirstRun by remember(service) { mutableStateOf(service?.isFirstRun() ?: false) }
 
@@ -340,6 +367,9 @@ fun MainScreen(service: AssistantService?) {
     // so flipping it in settings swaps the voice screen reactively.
     var celestialUi by remember(service) { mutableStateOf(service?.celestialUi?.value ?: false) }
     var streamingText by remember { mutableStateOf<String?>(null) }
+    // Fix #3: latest reveal-restart request from the service (non-chunked replay).
+    // The effect below keys on it, so a request re-runs the reveal logic immediately.
+    var revealRestartRequest by remember { mutableStateOf<RevealRestartRequest?>(null) }
     var ttsPlaybackFraction by remember { mutableStateOf<Float?>(null) }
     var ttsWordTimestamps by remember { mutableStateOf<String?>(null) }
     var pendingCert by remember { mutableStateOf<CertApprovalRequest?>(null) }
@@ -360,6 +390,7 @@ fun MainScreen(service: AssistantService?) {
             launch { service.streamingText.collect { streamingText = it } }
             launch { service.ttsPlaybackFraction.collect { ttsPlaybackFraction = it } }
             launch { service.ttsWordTimestamps.collect { ttsWordTimestamps = it } }
+            launch { service.revealRestartRequest.collect { revealRestartRequest = it } }
             launch { service.pendingCertApproval.collect { pendingCert = it } }
             launch { service.updateAvailable.collect { updateInfo = it } }
         }
@@ -448,7 +479,7 @@ fun MainScreen(service: AssistantService?) {
         }
     }
 
-    LaunchedEffect(messages.size, state, voiceDuration, streamingText, ttsPlaybackFraction) {
+    LaunchedEffect(messages.size, state, voiceDuration, streamingText, ttsPlaybackFraction, revealRestartRequest) {
         // Stage-1 streaming gate: while a Direct-Ollama stream is in flight, the
         // fake typewriter must NOT run — the overlay carries the progressive
         // text (shown in full as it arrives; the HUD/classic render it with a
@@ -470,6 +501,29 @@ fun MainScreen(service: AssistantService?) {
             }
             return@LaunchedEffect
         }
+
+        // Fix #3 (non-chunked replay): consume a pending reveal-restart request. A
+        // replay of a device-voice message must re-run the duration-synced reveal the
+        // first play got — otherwise the text just appears in full with no sync to the
+        // replayed audio. The request is consumed once per token; the index it carries
+        // must still address the last message, because only the last assistant bubble
+        // is reveal-driven (older bubbles always render in full) — anything else would
+        // animate an unrelated bubble.
+        val restartRequest = revealRestartRequest
+        if (restartRequest != null && restartRequest.token != consumedRevealToken) {
+            consumedRevealToken = restartRequest.token
+            if (restartRequest.messageIndex == messages.lastIndex) {
+                revealRestartIndex = restartRequest.messageIndex
+                revealRestartCount = messages.size
+                revealRestartStarted = false
+                // Bypass the "already animated" cache for this action: this message WAS
+                // revealed when it first arrived, so without the reset the ID gate below
+                // would pin the full text instantly and the replay would stay visually
+                // silent.
+                lastAnimatedMessageId = ""
+            }
+        }
+
         val lastMsg = messages.lastOrNull()
         if (lastMsg != null && lastMsg.role == "assistant") {
             val text = lastMsg.text
@@ -491,17 +545,50 @@ fun MainScreen(service: AssistantService?) {
                 return@LaunchedEffect
             }
 
-            // If this message was already animated or we're loading history, show fully instantly
-            if (messageId == lastAnimatedMessageId || state == AssistantState.IDLE) {
+            // Fix #3: is a fresh replay reveal armed for THIS message? Both the index
+            // and the list size captured when the request arrived must still describe
+            // the current list, so a reshaped/cleared list (deletion, persona switch,
+            // clear-chat) can never make it apply to a different message.
+            val forcedReveal = revealRestartIndex == messages.lastIndex &&
+                revealRestartCount == messages.size
+
+            // If this message was already animated or we're loading history, show fully
+            // instantly. A forced (replay) reveal deliberately skips BOTH halves of this
+            // gate: this message was already animated on first play, and the device
+            // engines walk through non-SPEAKING states around a replay (eSpeak is IDLE
+            // while it synthesizes), so either check would pin the text and leave the
+            // replay with no visual sync at all.
+            if (!forcedReveal && (messageId == lastAnimatedMessageId || state == AssistantState.IDLE)) {
                 revealedChars = text.length
                 lastAnimatedMessageId = messageId
                 return@LaunchedEffect
             }
-            
-            // If it's a completely new message (ID differs and we aren't in IDLE), start animation
-            revealedChars = 0
+
+            // Forced reveal: wait (briefly) for the engine to publish the replayed
+            // audio's real duration, so the typing below is synced to what the user is
+            // actually hearing rather than to the heuristic tick. The text stays as it
+            // is during the wait (no flash to empty), and the wait is bounded — System
+            // TTS never publishes a duration, so its replay reveals on the fallback
+            // instead of staying hidden.
+            if (forcedReveal && !revealRestartStarted) {
+                var waited = 0L
+                while (voiceDuration <= 0 && waited < ReplayRevealDurationWaitMs) {
+                    delay(50)
+                    waited += 50
+                }
+                revealRestartStarted = true
+                revealedChars = 0
+            }
+
+            // New message: start from zero (unchanged). Forced reveal: start from zero
+            // the first time for this action, then continue from the current position
+            // if a later refinement re-runs this effect — a duration landing mid-reveal
+            // then re-syncs the remaining text instead of snapping it back to empty.
+            val startChars = if (forcedReveal) revealedChars.coerceIn(0, text.length) else 0
+            if (!forcedReveal) revealedChars = 0
             lastAnimatedMessageId = messageId
             val startTime = System.currentTimeMillis()
+            val remainingChars = text.length - startChars
             
             var currentVoiceDuration = voiceDuration
             if (currentVoiceDuration <= 0 && state == AssistantState.SPEAKING) {
@@ -518,7 +605,7 @@ fun MainScreen(service: AssistantService?) {
             while (true) {
                 val elapsed = System.currentTimeMillis() - startTime
                 val progress = (elapsed.toFloat() / animDuration).coerceIn(0f, 1f)
-                revealedChars = (text.length * progress).toInt()
+                revealedChars = startChars + (remainingChars * progress).toInt()
                 
                 if (progress >= 1f) break
                 if (currentVoiceDuration > 0 && state != AssistantState.SPEAKING && elapsed > 500) break
@@ -526,6 +613,13 @@ fun MainScreen(service: AssistantService?) {
                 delay(16)
             }
             revealedChars = text.length
+            // Disarm once the reveal has run: later triggers for this message (the
+            // engine's completion flipping the state, a duration refinement) go back
+            // through the classic path above.
+            if (forcedReveal) {
+                revealRestartIndex = -1
+                revealRestartCount = -1
+            }
         } else {
             revealedChars = Int.MAX_VALUE
             // Reset tracker when no assistant message is present (e.g. cleared chat)
@@ -766,6 +860,7 @@ fun MainScreen(service: AssistantService?) {
                         onStopClick = { service?.stopEverything() },
                         state = state,
                         personaColor = personaColor,
+                        personaName = currentPersona.name,
                         onTextModeToggle = { textModeOpen = !textModeOpen },
                         focusRequester = focusRequester,
                         muted = muted,
@@ -943,6 +1038,10 @@ fun ControlBar(
     onStopClick: () -> Unit,
     state: AssistantState,
     personaColor: Color,
+    // Persona NAME (not just the color) so the mini box can derive the same
+    // "{persona}_{messageCount}_{textHash}" identity the reveal effect uses — the
+    // teleprompter re-checks the anchored bubble against it before measuring it.
+    personaName: String,
     onTextModeToggle: () -> Unit,
     focusRequester: FocusRequester,
     muted: Boolean,
@@ -1062,6 +1161,27 @@ fun ControlBar(
                     if (miniScrollState.maxValue <= 0) return@LaunchedEffect
                     val container = layoutRefs.container ?: return@LaunchedEffect
                     val bubble = layoutRefs.bubble ?: return@LaunchedEffect
+                    // Identity gate (stale-ref hardening): the refs are captured by
+                    // onGloballyPositioned and never invalidated, so after a persona
+                    // switch or clear-chat they can still point at the PREVIOUS
+                    // message list's nodes. Recompute the identity of the CURRENT last
+                    // assistant message (reading messages/currentPersona here reads
+                    // the values as of this emission, not as of effect launch) and bail
+                    // out when the bubble ref no longer corresponds to it. Trusting a
+                    // stale pair measures a detached node: localPositionOf then falls
+                    // back to findCommonAncestor and, when the two nodes were detached
+                    // in different chains, throws
+                    // IllegalArgumentException("layouts are not part of the same
+                    // hierarchy") — an uncaught crash inside a layout callback, not
+                    // merely a wrong scroll position.
+                    val lastMessage = messages.lastOrNull()
+                    val expectedBubbleMessageId =
+                        if (lastMessage != null && lastMessage.role == "assistant") {
+                            "${personaName}_${messages.size}_${lastMessage.text.hashCode()}"
+                        } else null
+                    if (expectedBubbleMessageId == null ||
+                        layoutRefs.bubbleMessageId != expectedBubbleMessageId
+                    ) return@LaunchedEffect
                     // Bubble top in CONTENT space: both refs measure inside the
                     // scroll's coordinate space, so localPositionOf returns the
                     // position in the scrollable content — the scroll offset is
@@ -1118,6 +1238,18 @@ fun ControlBar(
                                 val highlightRange = if (chunkedKaraoke) {
                                     ttsActiveWordRange(msg.text, ttsWordTimestamps, activeFraction!!, voiceDuration)
                                 } else null
+                                // Identity recorded alongside the teleprompter anchor below,
+                                // using the same "{persona}_{messageCount}_{textHash}" pattern
+                                // the reveal effect uses for the last assistant message. The
+                                // teleprompter re-checks it before trusting the refs, so a
+                                // ref captured for what is no longer the last assistant
+                                // message (persona switch / clear-chat / list edit) can never
+                                // be measured. Computed here (once per recomposition, not per
+                                // placement) so the onGloballyPositioned lambda does no
+                                // string work on the scroll-time layout pass.
+                                val anchorMessageId = if (isLastAssistant) {
+                                    "${personaName}_${messages.size}_${msg.text.hashCode()}"
+                                } else null
                                 
                                 ChatMessageBubble(
                                     message = msg,
@@ -1131,7 +1263,10 @@ fun ControlBar(
                                         // Anchor for the auto-teleprompter: the
                                         // spoken response bubble's pixel range.
                                         Modifier.fillMaxWidth()
-                                            .onGloballyPositioned { layoutRefs.bubble = it }
+                                            .onGloballyPositioned {
+                                                layoutRefs.bubble = it
+                                                layoutRefs.bubbleMessageId = anchorMessageId
+                                            }
                                     } else {
                                         Modifier.fillMaxWidth()
                                     }

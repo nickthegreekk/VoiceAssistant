@@ -35,6 +35,28 @@ data class ChatMessage(
     val responseTimeMs: Long? = null
 )
 
+/**
+ * One-shot UI signal: the service is about to play [messageIndex] through a
+ * NON-chunked engine, so the classic duration-synced reveal must run again for
+ * that message as if it had just arrived.
+ *
+ * Why this exists: replaying an eSpeak/System TTS message used to show the whole
+ * text instantly with no visual sync to the replayed audio, while a live first
+ * response got the duration-based typewriter reveal. The chunked Gateway path
+ * doesn't need this — its karaoke highlight is the dynamic element and the reveal
+ * is deliberately pinned to full text there (see the karaoke gate in MainScreen).
+ *
+ * [token] increments per request so the UI consumes each request exactly once
+ * (the same message can legitimately be replayed twice in a row, and a repeated
+ * request must re-arm the reveal each time). [messageIndex] is the message's index
+ * into AssistantService._messages at request time; the UI honors the request only
+ * while that index still addresses the last message, because only the last
+ * assistant bubble is reveal-driven (older bubbles always render in full).
+ *
+ * Transient UI signalling: built per request, never persisted.
+ */
+data class RevealRestartRequest(val token: Long, val messageIndex: Int)
+
 @Serializable
 data class UsageInfo(
     val promptTokens: Int = 0,

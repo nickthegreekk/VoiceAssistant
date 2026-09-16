@@ -111,6 +111,18 @@ internal fun AssistantService.abandonAssistantFocus() {
 }
 
 fun AssistantService.speakTextOnDevice(text: String) {
+    // Fix #1b: System TTS is the ONE playback entry point that never routes through
+    // stopAudio() — this function requests audio focus itself (below), and no live flow calls
+    // a teardown beforehand. The per-sequence Stage-2 state therefore has to be cleared here,
+    // or an unrelated earlier turn's values satisfy the UI's karaoke gate during THIS
+    // playback (`SPEAKING && ttsPlaybackFraction != null && voiceDuration > 0`): the chunked
+    // pipeline deliberately leaves `_ttsPlaybackFraction` at 1f when a Gateway turn ends, and
+    // `_voiceDuration` keeps an earlier eSpeak turn's length, so the new response would be
+    // pinned to full text (reveal suppressed) with a nonsense highlight painted from the old
+    // fraction. Cleared before the no-play bail: a muted/unready engine must land clean too.
+    _ttsPlaybackFraction.value = null
+    _ttsWordTimestamps.value = null
+    _voiceDuration.value = 0
     if (!ttsReady || silenced.value) {
         // No-play bail: release any focus held for this turn (stopRecording()
         // retains it through THINKING when the turn was expected to speak).
@@ -434,6 +446,19 @@ fun AssistantService.stopAudio(abandonFocus: Boolean = true) {
         updateNotification("Ready to help")
     }
     _voiceDuration.value = 0
+    // Stage-2 fraction/timestamps are PER-SEQUENCE state, not per-session state, so
+    // they belong in this teardown next to _voiceDuration. Without this, a value left
+    // over from an earlier Gateway (chunked) turn survived into an unrelated later
+    // playback in the same session: the UI's karaoke gate is
+    // `SPEAKING && ttsPlaybackFraction != null && voiceDuration > 0`, so a stale
+    // fraction could (a) wrongly suppress the typewriter reveal of a device-voice
+    // (eSpeak/System TTS) response and (b) paint a nonsense estimated word highlight
+    // from a fraction that belongs to a response that finished playing long ago.
+    // Redundant-but-harmless for the chunked path: playChunkedTtsGateway() nulls both
+    // at sequence start anyway, and this teardown has just bumped ttsGeneration, so
+    // any sequence that was mid-flight is dead and cannot republish.
+    _ttsPlaybackFraction.value = null
+    _ttsWordTimestamps.value = null
     // abandonFocus=false: the play-entry callers (speakWithEspeak / playAudioFile)
     // tear down any previous playback here and then IMMEDIATELY re-request focus.
     // Abandoning first would bounce the focus the stopRecording() retention kept
@@ -1152,7 +1177,11 @@ fun AssistantService.replayMessageAudio(message: ChatMessage, persona: Persona) 
     val storedPath = message.audioFilePath
     if (storedPath != null && File(storedPath).exists()) {
         // Cloud-path pre-synthesis persisted the exact bytes that were played, so
-        // replay them verbatim regardless of voice mode.
+        // replay them verbatim regardless of voice mode. The reveal is re-armed here
+        // too: playAudioFile() publishes its own _voiceDuration from the file, and
+        // without the request the UI's "already animated" cache would keep this
+        // replay visually silent (text in full, no sync).
+        requestRevealRestart(message)
         playAudioFile(File(storedPath))
         return
     }
@@ -1161,7 +1190,9 @@ fun AssistantService.replayMessageAudio(message: ChatMessage, persona: Persona) 
         // synthesizeGatewayTextForPlayback). Re-synthesize the stored text through the
         // persona's OWN Gateway voice. message.text is the original markdown, kept for
         // the chat bubble — the chunked pipeline cleans each chunk itself, exactly as
-        // the live streaming flow does.
+        // the live streaming flow does. Deliberately NO reveal request: the chunked
+        // path owns the response with its karaoke highlight, and the UI's reveal gate
+        // is bypassed while a fraction is live.
         synthesizeGatewayTextForPlayback(message.text, persona) {
             _state.value = AssistantState.IDLE
             updateNotification("Voice unavailable - check TTS server")
@@ -1172,6 +1203,47 @@ fun AssistantService.replayMessageAudio(message: ChatMessage, persona: Persona) 
     // their own engine, cleaning the stored markdown off-Main first.
     serviceScope.launch(Dispatchers.IO) {
         val cleaned = cleanTextForTts(message.text)
-        withContext(Dispatchers.Main) { playResponse(persona, deviceText = cleaned) }
+        withContext(Dispatchers.Main) {
+            // Fix #1 follow-up for this entry point: bundled eSpeak reaches
+            // stopAudio() inside speakWithEspeak() (which now clears these), but
+            // System TTS does NOT route through stopAudio() at all — speakTextOnDevice()
+            // requests focus directly. A fraction/timestamps left over from an earlier
+            // Gateway turn would therefore survive into a System-TTS replay and
+            // satisfy the UI's karaoke gate (stale highlight / suppressed reveal).
+            // The stale _voiceDuration matters here too: System TTS never publishes a
+            // duration of its own, so a left-over one would be read by the reveal as
+            // this replay's length. Cleared before playback so the reveal waits for a
+            // genuinely fresh duration (eSpeak) or falls back to its heuristic (System
+            // TTS) — never a value from the previous response.
+            _ttsPlaybackFraction.value = null
+            _ttsWordTimestamps.value = null
+            _voiceDuration.value = 0
+            // Fix #3: arm the timed reveal for this replay (must be emitted BEFORE
+            // playback so the UI is already waiting when the engine publishes the
+            // replay's duration).
+            requestRevealRestart(message)
+            playResponse(persona, deviceText = cleaned)
+        }
     }
+}
+
+/**
+ * Fix #3: publishes a RevealRestartRequest for [message] so the classic
+ * duration-synced reveal runs again over the audio the replay is about to play.
+ * Called only by the NON-chunked replay paths (device-voice engine, stored file):
+ * the chunked Gateway path keeps its karaoke highlight instead.
+ *
+ * The message's index into _messages is resolved by identity first (the caller
+ * passes the very instance the UI holds, which is the instance in the list) and by
+ * role+text as a fallback. A message that cannot be located is not signalled at
+ * all — the UI honors a request only when its index still addresses the last
+ * assistant bubble, so a wrong/absent index would be ignored anyway.
+ */
+private fun AssistantService.requestRevealRestart(message: ChatMessage) {
+    val list = _messages.value
+    var index = list.indexOfFirst { it === message }
+    if (index < 0) index = list.indexOfFirst { it.role == message.role && it.text == message.text }
+    if (index < 0) return
+    revealRestartSeq++
+    _revealRestartRequest.value = RevealRestartRequest(token = revealRestartSeq, messageIndex = index)
 }
