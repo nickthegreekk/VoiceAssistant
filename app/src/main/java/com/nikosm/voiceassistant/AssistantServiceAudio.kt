@@ -689,8 +689,17 @@ fun AssistantService.playResponse(persona: Persona, file: File? = null, deviceTe
         VoiceMode.GATEWAY -> {
             if (file != null) playAudioFile(file)
             else {
-                if (deviceText != null) speakTextOnDevice(deviceText)
-                else {
+                if (deviceText != null) {
+                    // No persisted audio for this text (streaming/chunked Gateway turns
+                    // synthesize per chunk and never write a .wav). Re-synthesize through
+                    // the Gateway instead of silently substituting System TTS, which would
+                    // misrepresent the persona's configured voice. deviceText arrives
+                    // pre-cleaned; the chunked pipeline re-cleans per chunk anyway.
+                    synthesizeGatewayTextForPlayback(deviceText, persona) {
+                        _state.value = AssistantState.IDLE
+                        updateNotification("Voice unavailable - check TTS server")
+                    }
+                } else {
                     abandonAssistantFocus()
                     _state.value = AssistantState.IDLE
                     updateNotification("Ready to help")
@@ -1091,15 +1100,78 @@ private fun AssistantService.startChunkPlayback(
     }
 }
 
-fun AssistantService.replayMessageAudio(message: ChatMessage, persona: Persona) {
-    if (message.audioFilePath != null && File(message.audioFilePath).exists()) {
-        playAudioFile(File(message.audioFilePath))
-    } else {
-        // The stored text is the original markdown (kept for the chat bubble) — clean
-        // it off-Main, exactly like the live response flows, before speaking.
-        serviceScope.launch(Dispatchers.IO) {
-            val cleaned = cleanTextForTts(message.text)
-            withContext(Dispatchers.Main) { playResponse(persona, deviceText = cleaned) }
+// Replay / deferred Gateway playback entry point: re-synthesizes the full text
+// through the persona's configured Gateway voice, on demand.
+//
+// Background: the Stage-2 streaming pipeline (playChunkedTtsGateway) synthesizes
+// one chunk at a time and NEVER persists a .wav to disk, so a streamed turn's
+// ChatMessage.audioFilePath is null by design and there is no file to replay.
+// Re-synthesizing on demand is exactly what was specified when the chunked
+// pipeline was introduced. Previously this case fell through to System TTS,
+// silently misrepresenting a Gateway persona's configured voice.
+//
+// Dispatched onto Main because the chunked pipeline owns a MediaPlayer; the
+// network synthesis itself hops to IO inside synthesizeWithGateway.
+internal fun AssistantService.synthesizeGatewayTextForPlayback(
+    text: String,
+    persona: Persona,
+    onNoAudio: () -> Unit
+) {
+    serviceScope.launch(Dispatchers.Main) {
+        // Same teardown the device-voice play entries (speakWithEspeak / playAudioFile)
+        // do: stopAudio() bumps ttsGeneration so any in-flight chunk sequence halts
+        // atomically and the previous player is released. abandonFocus=false keeps the
+        // held focus request so other apps stay ducked continuously.
+        stopAudio(abandonFocus = false)
+        val myGeneration = ttsGeneration
+        if (silenced.value) {
+            // No-play bail: release any focus held for this turn.
+            abandonAssistantFocus()
+            _state.value = AssistantState.IDLE
+            updateNotification("Ready to help")
+            return@launch
         }
+        // Visible feedback for the synthesis latency, matching a live turn — instead
+        // of the silent gap the old System-TTS substitution used to hide.
+        _state.value = AssistantState.THINKING
+        updateNotification("Thinking...")
+        // Reuses the existing chunked pipeline verbatim: sentence chunking, per-chunk
+        // synthesis via synthesizeWithGateway, gapless playback, word timestamps.
+        val played = playChunkedTtsGateway(text, persona, myGeneration)
+        // Empty result with a still-current generation means nothing was synthesized —
+        // server unreachable, auth failure, or an HTTP error. Each is already logged
+        // with its status by synthesizeWithGateway and reflected in the server status
+        // dot; this makes it visible at the point of use instead of silently switching
+        // to a different voice. A stale generation means the user stopped it, which
+        // stopEverything() has already reflected in the UI.
+        if (played.isEmpty() && ttsGeneration == myGeneration) onNoAudio()
+    }
+}
+
+fun AssistantService.replayMessageAudio(message: ChatMessage, persona: Persona) {
+    val storedPath = message.audioFilePath
+    if (storedPath != null && File(storedPath).exists()) {
+        // Cloud-path pre-synthesis persisted the exact bytes that were played, so
+        // replay them verbatim regardless of voice mode.
+        playAudioFile(File(storedPath))
+        return
+    }
+    if (persona.voiceMode == VoiceMode.GATEWAY) {
+        // Streamed/chunked Gateway turn: no persisted .wav exists (see
+        // synthesizeGatewayTextForPlayback). Re-synthesize the stored text through the
+        // persona's OWN Gateway voice. message.text is the original markdown, kept for
+        // the chat bubble — the chunked pipeline cleans each chunk itself, exactly as
+        // the live streaming flow does.
+        synthesizeGatewayTextForPlayback(message.text, persona) {
+            _state.value = AssistantState.IDLE
+            updateNotification("Voice unavailable - check TTS server")
+        }
+        return
+    }
+    // Unchanged: device-voice personas (System TTS / bundled eSpeak) replay through
+    // their own engine, cleaning the stored markdown off-Main first.
+    serviceScope.launch(Dispatchers.IO) {
+        val cleaned = cleanTextForTts(message.text)
+        withContext(Dispatchers.Main) { playResponse(persona, deviceText = cleaned) }
     }
 }
