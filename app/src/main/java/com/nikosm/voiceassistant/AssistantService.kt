@@ -1766,6 +1766,30 @@ class AssistantService : Service() {
     }
 
     fun switchPersona(persona: Persona) {
+        // Persona switch must not leave the OUTGOING persona's turn running underneath
+        // the incoming persona's screen. Two things went wrong before this:
+        //  - an in-flight chunked Gateway TTS sequence kept AUDIO playing (the sequence
+        //    only ever halts on a ttsGeneration bump, and nothing bumped it here), and
+        //  - its polling coroutine kept republishing _ttsPlaybackFraction every ~100ms
+        //    against the NEW persona's message list — the wrong list entirely, so the
+        //    UI could pin/highlight a bubble from a response it no longer displays.
+        // stopEverything() (not just stopAudio()) matches the existing Stop-button
+        // semantics: it stops playback AND bumps the chat generation, so an in-flight
+        // chat/stream/synthesis turn can no longer append its reply into the outgoing
+        // persona's history after the user moved on (isChatRequestCurrent/
+        // isChatContextCurrent discard it at each apply-gate).
+        // Deliberately ordered BEFORE the outgoing-history save below: stopEverything()
+        // does not touch _messages, so that save still persists exactly the conversation
+        // the user was looking at when they switched. Idle switches (the common case)
+        // are cheap — every teardown step self-guards: currentPlayer/currentAudioTrack/
+        // recorder/outputFile/audioFocusRequest are all null and _state is already IDLE,
+        // so the state+notification reset is skipped entirely (tts.stop() is still called
+        // but is a no-op with nothing queued, and nextChatRequestSeq() is a bare ++).
+        // The Stage-2 StateFlow writes are equality-conflated, so clearing already-null
+        // values emits nothing to collectors. What an idle switch does leave behind is
+        // only the two counter bumps (ttsGeneration, chatRequestSeq) — the same bumps the
+        // Stop button makes, and harmless with no in-flight work for them to invalidate.
+        stopEverything()
         // Save current persona history before switching
         currentPersonaName?.let { oldName ->
             settingsManager.savePersonaMessages(oldName, _messages.value)
@@ -1788,6 +1812,15 @@ class AssistantService : Service() {
         get() = currentPersonaName?.let { name -> _personas.value.find { it.name == name } }
 
     fun clearMessages() { 
+        // Clear-chat is the same "move on" gesture as a persona switch: an in-flight
+        // Gateway TTS sequence must not keep speaking underneath a conversation the user
+        // just emptied, and its poll coroutine must not keep republishing playback state
+        // against the now-empty list (stale highlight / wrong reveal), nor may the
+        // discarded turn append a reply into the cleared history. stopEverything() gives
+        // this the Stop-button semantics: audio halted + generation bumped so every
+        // in-flight apply-gate discards. Ordered before the empty-list write below, which
+        // is the only thing that touches _messages here.
+        stopEverything()
         _messages.value = emptyList()
         currentPersonaName?.let { settingsManager.savePersonaMessages(it, emptyList()) }
         saveSettings() 
