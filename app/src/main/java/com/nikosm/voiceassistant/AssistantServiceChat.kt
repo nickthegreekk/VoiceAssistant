@@ -1183,14 +1183,11 @@ private suspend fun AssistantService.performDirectOllamaChat(baseUrl: String, mo
         // Budget-aware history selection
         val contextWindow = persona.numCtx // Fix #3 (sibling): was hardcoded 8192 — keep the client-side trim in sync with the num_ctx this request sends to the server
         val reservedOutput = persona.maxTokens.coerceAtLeast(1024)
-        // num_ctx overflow fix: when the fixed parts (system prompt + current message
-        // + reserved output) already exceed the context window, rawBudget goes
-        // negative — forcing a history floor here would ADD history on top of an
-        // already-overflowing request and make server-side truncation worse, not
-        // better. If the fixed parts don't fit, adding history never helps, so zero
-        // history is the correct fallback, not a forced floor.
-        val rawBudget = contextWindow - reservedOutput - estimateTokens(finalSystemPrompt) - estimateTokens(modelText)
-        val budget = rawBudget.coerceAtLeast(0)
+        // Fix #6 (numCtx overflow): shared budget math + pre-flight refusal — see
+        // resolveHistoryBudget(). Throws (and sends nothing) when the system prompt,
+        // this message/attachment and the reserved output alone already exceed the
+        // window, since no history trimming can make such a request fit.
+        val budget = resolveHistoryBudget(contextWindow, reservedOutput, finalSystemPrompt, modelText)
 
         // A1: positional slice — the caller says whether the current user turn is
         // already the last entry in _messages (text flow appends it before the
@@ -1423,14 +1420,10 @@ private suspend fun AssistantService.buildCloudRequest(api: CloudApiSetting, per
     // Budget-aware history selection
     val contextWindow = persona.numCtx // Fix #3: was hardcoded 128000 — the persona's own Context Window Size setting is now the trimming budget 
     val reservedOutput = persona.maxTokens.coerceAtLeast(1024)
-    // num_ctx overflow fix: when the fixed parts (system prompt + current message
-    // + reserved output) already exceed the context window, rawBudget goes
-    // negative — forcing a history floor here would ADD history on top of an
-    // already-overflowing request and make server-side truncation worse, not
-    // better. If the fixed parts don't fit, adding history never helps, so zero
-    // history is the correct fallback, not a forced floor.
-    val rawBudget = contextWindow - reservedOutput - estimateTokens(finalSystemPrompt) - estimateTokens(modelText)
-    val budget = rawBudget.coerceAtLeast(0)
+    // Fix #6 (numCtx overflow): same shared budget math + pre-flight refusal as the
+    // direct-Ollama path — see resolveHistoryBudget(). A cloud request whose fixed
+    // parts don't fit the persona's Context Window Size is refused the same way.
+    val budget = resolveHistoryBudget(contextWindow, reservedOutput, finalSystemPrompt, modelText)
     
     // A1: positional slice — the caller says whether the current user turn is already
     // the last entry in _messages (text flow appends it; voice flow does not). No
@@ -1719,6 +1712,43 @@ fun AssistantService.syncOpenRouterPricing(force: Boolean = false) {
 private fun Response.decodeTextHeader(name: String, fallback: String): String {
     val encoded = this.header(name) ?: return fallback
     return try { String(Base64.decode(encoded, Base64.DEFAULT), Charsets.UTF_8) } catch (e: Exception) { fallback }
+}
+
+// Fix #6 (numCtx overflow): the ONE place the client-side history budget is computed,
+// shared by the two budgeted request builders — performDirectOllamaChat and
+// buildCloudRequest. The gateway/multipart paths deliberately don't come through here:
+// they hand the request to the server, which manages its own context window.
+//
+// The budget is what is left for history once the parts that cannot be trimmed are
+// accounted for: the output tokens reserved for the reply, the system prompt (plus any
+// injected news/search/RAG context) and the current message (with attachment text already
+// inlined by buildModelPrompt). When those fixed parts alone already exceed the persona's
+// Context Window Size, the budget goes negative — forcing a history floor there would ADD
+// history on top of an already-overflowing request and make server-side truncation worse,
+// not better, so zero history remains the fallback for a budget of exactly 0.
+//
+// A negative budget, however, cannot be fixed by dropping history: by definition no
+// history is involved yet. Previously that request was sent anyway and the server
+// silently truncated the system prompt, the message or the attachment, leaving the user
+// with a degraded or nonsensical answer and no explanation. So instead we refuse to send
+// it and say exactly what happened and what to change. The cause is deliberately not
+// distinguished — a long system prompt, a long message, a large attachment or any
+// combination of them are one and the same problem here, and take the same fix — which is
+// why the check lives in this single shared helper rather than at each call site.
+private fun AssistantService.resolveHistoryBudget(contextWindow: Int, reservedOutput: Int, systemPrompt: String, modelText: String): Int {
+    val systemPromptTokens = estimateTokens(systemPrompt)
+    val modelTextTokens = estimateTokens(modelText)
+    val promptTokens = systemPromptTokens + modelTextTokens
+    val rawBudget = contextWindow - reservedOutput - promptTokens
+    if (rawBudget < 0) {
+        val fixedTokens = promptTokens + reservedOutput
+        android.util.Log.w("AssistantService", "numCtx overflow — refusing request: contextWindow=$contextWindow, reservedOutput=$reservedOutput, systemPrompt=$systemPromptTokens, currentMessage=$modelTextTokens, fixedTotal=$fixedTokens tokens")
+        throw Exception(
+            "Your message and system prompt (~$fixedTokens tokens) exceed this persona's Context Window Size ($contextWindow). " +
+                "Try a shorter message, a smaller attachment, or increase Context Window Size in this persona's settings."
+        )
+    }
+    return rawBudget
 }
 
 private fun AssistantService.estimateTokens(text: String): Int = (text.length / 4.0).toInt().coerceAtLeast(1)
