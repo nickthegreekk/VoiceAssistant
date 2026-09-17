@@ -1070,7 +1070,8 @@ fun ControlBar(
     // Stage-1 streaming overlay: non-null while a Direct-Ollama stream is in
     // flight. Rendered as a trailing in-progress bubble with a typing cursor
     // in the voice-mode mini box; text mode streams into the chat list the
-    // same way.
+    // same way. A non-blank value also suppresses the "..." dots below
+    // (Fix #4) — once real text is on screen the dots must not sit under it.
     streamingText: String?,
     ttsPlaybackFraction: Float?,
     ttsWordTimestamps: String?,
@@ -1287,7 +1288,20 @@ fun ControlBar(
                                     }
                                 )
                             }
-                            if (state == AssistantState.THINKING) {
+                            // Fix #4: the Direct-Ollama stream keeps state == THINKING
+                            // for its ENTIRE duration, while the accumulated stream
+                            // text is already rendered as the trailing placeholder
+                            // message in `messages` (see the note below) — so the old
+                            // unconditional dots sat underneath the growing response
+                            // for the whole generation. Gate them on there being no
+                            // visible assistant content yet: a non-blank streamingText
+                            // only exists once the placeholder has been appended and
+                            // populated (published in the same loop iteration, right
+                            // after updatePlaceholder()), so the dots yield to it.
+                            // Thinking-only chunks (persona.enableThinking) leave
+                            // streamingText blank, so the dots correctly persist until
+                            // real answer text begins.
+                            if (state == AssistantState.THINKING && streamingText.isNullOrBlank()) {
                                 Text("...", color = personaColor.copy(alpha = 0.7f), style = MaterialTheme.typography.bodyMedium, modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center)
                             }
                             // Stage-1 streaming: the placeholder message in

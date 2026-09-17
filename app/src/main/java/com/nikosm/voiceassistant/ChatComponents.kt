@@ -193,8 +193,11 @@ fun ChatList(
     state: AssistantState,
     personaColor: Color,
     revealedChars: Int,
-    // Stage-1 streaming overlay (Direct-Ollama): rendered as a trailing
-    // in-progress assistant bubble with a typing cursor while non-null.
+    // Stage-1 streaming overlay (Direct-Ollama): non-null while a Direct-Ollama
+    // stream is in flight. The growing text itself arrives via the trailing
+    // placeholder message in `messages`; this value additionally gates the
+    // "Thinking..." dots below (Fix #4) so they vanish as soon as real text is
+    // visible instead of persisting for the whole stream.
     streamingText: String? = null,
     ttsPlaybackFraction: Float? = null,
     ttsWordTimestamps: String? = null,
@@ -291,7 +294,15 @@ fun ChatList(
                     }
                 }
             }
-            if (state == AssistantState.THINKING) {
+            // Fix #4: state stays THINKING for the WHOLE Direct-Ollama stream, and the
+            // accumulated stream text is already rendered as the trailing placeholder
+            // message through itemsIndexed above (see the note below) — so the dots
+            // used to persist alongside the growing response in text mode too. Show
+            // them only while no visible assistant content exists yet: a non-blank
+            // streamingText is published only after the placeholder has been appended
+            // and populated, so the dots are suppressed from the first real chunk on.
+            // A thinking-only chunk (empty content) leaves it blank → dots still show.
+            if (state == AssistantState.THINKING && streamingText.isNullOrBlank()) {
                 item { Text("Thinking...", style = MaterialTheme.typography.bodySmall, color = personaColor.copy(alpha = 0.5f)) }
             }
             // Stage-1 streaming: the placeholder message in messages already
