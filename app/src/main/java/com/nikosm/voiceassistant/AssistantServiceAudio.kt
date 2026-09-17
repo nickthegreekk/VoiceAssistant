@@ -8,6 +8,7 @@ import android.media.AudioManager
 import android.media.AudioTrack
 import android.media.MediaPlayer
 import android.os.Build
+import android.os.SystemClock
 import android.util.Log
 import androidx.compose.ui.graphics.Color
 import kotlinx.coroutines.Dispatchers
@@ -24,13 +25,29 @@ fun AssistantService.toggleEarpieceMode() {
     _earpieceMode.value = !earpieceMode.value
 }
 
+// A4: bounded retry for the AUDIOFOCUS_REQUEST_DELAYED case. DELAYED is only ever returned
+// while the framework cannot reassign focus (the top of the audio-focus stack is a locked
+// owner — a ringing/off-hook call, or a system app's AUDIOFOCUS_FLAG_LOCK request), so the
+// same immediate request is re-issued at most AUDIO_FOCUS_RETRY_COUNT more times,
+// AUDIO_FOCUS_RETRY_DELAY_MS apart — a worst case of ~1.5s — before this gives up exactly as
+// it did before. Short-lived contention that clears inside that window now lands a GRANTED;
+// an exhausted window is unchanged behavior (additive resilience, not a guarantee).
+private const val AUDIO_FOCUS_RETRY_COUNT = 3
+private const val AUDIO_FOCUS_RETRY_DELAY_MS = 500L
+
 /**
  * Requests audio focus for assistant playback (A1/A2 fix). The request object is reused
  * across calls and only rebuilt when the earpiece/speaker mode changes; the focus result
  * is honored instead of discarded.
  *
- * @return true when focus was granted (playback may proceed); false when the request
- * failed or is still delayed. Note: callers do not check this return value yet.
+ * A4: a DELAYED result is retried a bounded number of times (see [retryDelayedAudioFocus])
+ * before this gives up. GRANTED and FAILED are untouched by that — both are still handled on
+ * the first attempt, with the same latency and the same branch as before — because the retry
+ * loop is only ever entered from DELAYED and it returns the first non-DELAYED answer it gets.
+ *
+ * @return true when focus was granted (playback may proceed); false when the request failed,
+ * or is still delayed after the retries are exhausted. Note: callers do not check this return
+ * value yet.
  */
 internal fun AssistantService.requestAssistantFocus(): Boolean {
     val isEarpiece = earpieceMode.value
@@ -47,9 +64,24 @@ internal fun AssistantService.requestAssistantFocus(): Boolean {
                     .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                     .build()
             )
-            // NOTE (review A1): delayed focus gain is only honored for AUDIOFOCUS_GAIN,
-            // so this flag is effectively inert with GAIN_TRANSIENT. Left unchanged
-            // pending a separate decision.
+            // A4 (corrects the former "effectively inert" A1 note, which was wrong about the
+            // RESULT): this flag is exactly what makes the framework answer
+            // AUDIOFOCUS_REQUEST_DELAYED instead of AUDIOFOCUS_REQUEST_FAILED when it cannot
+            // reassign focus right now — and it does so for GAIN_TRANSIENT too; there is no
+            // AUDIOFOCUS_GAIN precondition. Traced on android13-release
+            // MediaFocusControl.requestAudioFocus():
+            //   if (!canReassignAudioFocus()) {
+            //       if ((flags & AUDIOFOCUS_FLAG_DELAY_OK) == 0) return REQUEST_FAILED;
+            //       else focusGrantDelayed = true;              // ...falls through to:
+            //   }
+            //   if (focusGrantDelayed) return pushBelowLockedFocusOwnersAndPropagate(nfr);
+            // and pushBelowLockedFocusOwnersAndPropagate() ends in REQUEST_DELAYED.
+            // canReassignAudioFocus() is false while the top of the focus stack is a locked
+            // owner: IN_VOICE_COMM_FOCUS_ID (ringing / off-hook call) or a system app's
+            // AUDIOFOCUS_FLAG_LOCK request. Re-requesting is not a leak — the same call
+            // removes this client's previous stack entry before inserting the new
+            // FocusRequester. The gain that eventually arrives once the lock clears is
+            // dispatched to the shared listener below.
             .setAcceptsDelayedFocusGain(true)
             .setOnAudioFocusChangeListener(audioFocusChangeListener)
             .build()
@@ -61,7 +93,13 @@ internal fun AssistantService.requestAssistantFocus(): Boolean {
     }
     audioFocusRequest = request
     // A1: honor the request result instead of discarding it.
-    return when (val result = audioManager.requestAudioFocus(request)) {
+    // A4: the retry loop is entered ONLY from DELAYED — a first-attempt GRANTED or FAILED
+    // never reaches it, so both keep their previous latency and their previous branch.
+    var result = audioFocusRequester(request)
+    if (result == AudioManager.AUDIOFOCUS_REQUEST_DELAYED) {
+        result = retryDelayedAudioFocus(request)
+    }
+    return when (result) {
         AudioManager.AUDIOFOCUS_REQUEST_GRANTED -> {
             if (isEarpiece) {
                 audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
@@ -84,7 +122,10 @@ internal fun AssistantService.requestAssistantFocus(): Boolean {
             true
         }
         AudioManager.AUDIOFOCUS_REQUEST_DELAYED -> {
-            android.util.Log.w("AssistantService", "requestAssistantFocus: focus DELAYED (result=$result, isEarpiece=$isEarpiece) — request left pending; audio mode not switched until AUDIOFOCUS_GAIN arrives")
+            // A4: reached only after the bounded retry window ran out. The give-up path is
+            // unchanged from before this change — log, leave the request pending, do not
+            // switch the audio mode (the caller lands in IDLE) — just reported as exhausted.
+            android.util.Log.w("AssistantService", "requestAssistantFocus: focus DELAYED after $AUDIO_FOCUS_RETRY_COUNT retries over ${AUDIO_FOCUS_RETRY_COUNT * AUDIO_FOCUS_RETRY_DELAY_MS}ms (result=$result, isEarpiece=$isEarpiece) — request left pending; audio mode not switched until AUDIOFOCUS_GAIN arrives")
             false
         }
         else -> { // AudioManager.AUDIOFOCUS_REQUEST_FAILED
@@ -93,6 +134,56 @@ internal fun AssistantService.requestAssistantFocus(): Boolean {
             false
         }
     }
+}
+
+/**
+ * A4: bounded retry for the AUDIOFOCUS_REQUEST_DELAYED case.
+ *
+ * DELAYED does not mean the request was refused — it means the framework could not reassign
+ * focus yet because the top of the audio-focus stack is a locked owner, and that lock does
+ * not have to outlive this attempt: a ringing call the caller hangs up, or a system lock that
+ * is released, clears inside a short window and the SAME request is then granted. So rather
+ * than switching focus types (which would change what this app asks of every other app on the
+ * device, and which AOSP does not require here — AUDIOFOCUS_FLAG_DELAY_OK already produces
+ * DELAYED for GAIN_TRANSIENT), the existing immediate request is re-issued on the SAME
+ * AudioFocusRequest instance at most [attempts] times, [delayMs] apart.
+ *
+ * Additive and bounded: the loop exits on the first answer that is not DELAYED, so a GRANTED
+ * that arrives during the window is honored (the caller then applies routing and returns
+ * true), a FAILED inside the window is returned unchanged (and the caller's FAILED cleanup
+ * runs), and an exhausted window returns DELAYED, which the caller handles exactly as it did
+ * before this change. Worst-case added latency is attempts × delayMs (~1.5s), and only for a
+ * request that would otherwise have been given up on immediately.
+ *
+ * Re-issuing the same request is safe and is not a leak: MediaFocusControl.requestAudioFocus()
+ * removes this client's previous stack entry (removeFocusStackEntry) before inserting the new
+ * FocusRequester, so repeated attempts cannot grow the focus stack, and each attempt re-uses
+ * the one request object (and listener) the caller already installed.
+ *
+ * The wait deliberately blocks the calling thread: every call site acts on the boolean result
+ * immediately (start playback vs. land in IDLE), so the outcome has to be known before
+ * returning. DELAYED only happens while focus is locked — a call is ringing or in progress —
+ * which is rare and bounded to the window below.
+ *
+ * @param request the same request instance the caller's first attempt used; the framework keys
+ * the pending delayed request on the client id, so a rebuilt instance would gain nothing.
+ * @return the first non-DELAYED result, or DELAYED when every attempt was exhausted.
+ */
+internal fun AssistantService.retryDelayedAudioFocus(
+    request: AudioFocusRequest,
+    attempts: Int = AUDIO_FOCUS_RETRY_COUNT,
+    delayMs: Long = AUDIO_FOCUS_RETRY_DELAY_MS,
+): Int {
+    var result = AudioManager.AUDIOFOCUS_REQUEST_DELAYED
+    for (attempt in 1..attempts) {
+        // SystemClock.sleep() rather than Thread.sleep(): the Android helper keeps the
+        // no-interruption contract without a checked exception / try-catch in the loop.
+        SystemClock.sleep(delayMs)
+        result = audioFocusRequester(request)
+        android.util.Log.d("AssistantService", "retryDelayedAudioFocus: attempt $attempt/$attempts result=$result after ${attempt * delayMs}ms")
+        if (result != AudioManager.AUDIOFOCUS_REQUEST_DELAYED) return result
+    }
+    return result
 }
 
 /**

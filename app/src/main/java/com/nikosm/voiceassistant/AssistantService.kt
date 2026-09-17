@@ -469,6 +469,19 @@ class AssistantService : Service() {
     var audioFocusRequest: AudioFocusRequest? = null
     private var pausedByFocusLoss = false
 
+    // A4 test seam: the framework's AUDIOFOCUS_REQUEST_DELAYED result cannot be reproduced on
+    // a physical device. It is returned only while the top of the audio-focus stack is a
+    // LOCKED owner — the telephony voice-comm client during ringing / an off-hook call, or a
+    // system app's AUDIOFOCUS_FLAG_LOCK request (MediaFocusControl.canReassignAudioFocus()) —
+    // and neither can be fabricated here (there is no public API to inject a call, and
+    // AUDIOFOCUS_FLAG_LOCK is refused to non-system callers). The overridable function
+    // therefore IS the one framework call the DELAYED retry loop re-issues; its default is
+    // exactly the previous direct `audioManager.requestAudioFocus(request)`, so production is
+    // unchanged and never writes this. Tests restore the captured default in teardown — a
+    // stale override would pin every later focus request in the same process to a scripted
+    // result.
+    internal var audioFocusRequester: (AudioFocusRequest) -> Int = { audioManager.requestAudioFocus(it) }
+
     // -----------------------------------------------------------------------
     // Proximity barge-in (SPEAKING only): waving a hand over the phone during
     // playback interrupts it via the SAME mechanism as the physical STOP
