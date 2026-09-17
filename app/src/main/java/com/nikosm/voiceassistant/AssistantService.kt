@@ -555,15 +555,60 @@ class AssistantService : Service() {
         stopEverything()
     }
 
-    // Point-in-time check at trigger time via the non-deprecated
-    // TelephonyManager.callState property (API 31+, correct for this project's
-    // minSdk 31 — PhoneStateListener is deprecated and CallStateListener is a
-    // continuous monitor we don't need). The coarse call state requires NO
-    // permission: READ_PHONE_STATE is only needed for precise per-subscription
-    // state, which this deliberately avoids. On any unexpected failure, treat
-    // as "no call" so the barge-in feature itself never breaks.
-    private fun isPhoneCallActive(): Boolean = try {
-        val state = telephonyManager?.callState
+    // Test seam for the guard below: the OS call state cannot be fabricated on a device
+    // (there is no public API to inject a call, and placing a real one is neither
+    // scriptable nor acceptable), so the state SOURCE is overridable. Production never
+    // writes this — it stays on the default reader, which honours the permission gate.
+    // Tests restore the captured default in teardown: a stale override would pin the
+    // guard to a constant for every later test in the same process.
+    // The property itself is deprecated at API 31+ (in favour of per-subscription readers),
+    // but it is the correct API for this point-in-time, subscription-agnostic check — the
+    // same deliberate choice the method below documents.
+    @Suppress("DEPRECATION")
+    internal var callStateReader: () -> Int? = {
+        // Only cross the Binder when the permission is actually held. Without it the
+        // framework's own check throws SecurityException on every trigger (see below), so
+        // denial short-circuits here instead of being exception-driven control flow.
+        if (hasPhoneStatePermission()) telephonyManager?.callState else null
+    }
+
+    /** True when this app currently holds READ_PHONE_STATE — see isPhoneCallActive(). */
+    private fun hasPhoneStatePermission(): Boolean =
+        ContextCompat.checkSelfPermission(this, Manifest.permission.READ_PHONE_STATE) ==
+            PackageManager.PERMISSION_GRANTED
+
+    // Point-in-time call check at trigger time, via the non-deprecated
+    // TelephonyManager.callState property (API 31+, correct for this project's minSdk 31 —
+    // PhoneStateListener is deprecated and CallStateListener is a continuous monitor we
+    // don't need).
+    //
+    // READ_PHONE_STATE is genuinely REQUIRED here; the previous comment on this method
+    // claimed the coarse call state needed no permission, which was true before API 31 and
+    // is false for this app's targetSdk (37). Traced end to end on Android 13
+    // (android-13.0.0_r1):
+    //   TelephonyManager.getCallState()               -> delegates to TelecomManager
+    //   TelecomManager.getCallState()                 -> ITelecomService.getCallStateUsingPackage()
+    //                                                    (catches only RemoteException, so a
+    //                                                     SecurityException propagates to us)
+    //   TelecomServiceImpl.getCallStateUsingPackage() -> under the compat change
+    //       ENABLE_GET_CALL_STATE_PERMISSION_PROTECTION, declared
+    //       @EnabledSince(targetSdkVersion = Build.VERSION_CODES.S) and therefore enabled for
+    //       this app, calls canReadPhoneState(), which does
+    //       enforceCallingOrSelfPermission(READ_PHONE_STATE) and throws
+    //       SecurityException("getCallState API requires READ_PHONE_STATE for API version 31+")
+    // Consequence before the manifest declaration existed: that exception reached the catch
+    // below on EVERY trigger, so every call — ringing or off-hook — was reported as "no
+    // call" and this guard could never skip. A hand waved over the phone during a real call
+    // therefore stopped the assistant's playback.
+    //
+    // Permission-denied degradation is deliberate and unchanged: the permission is
+    // requested, never required. A user who declines gets `null` from the default reader
+    // (the check above), i.e. "no call", and the catch still maps ANY unexpected failure —
+    // revoked-at-runtime, dead telephony service, RemoteException — to "no call" as well.
+    // The barge-in feature can therefore never crash, block, or misbehave for a user who
+    // declines; they simply keep the pre-fix behaviour of having no call-state guard.
+    internal fun isPhoneCallActive(): Boolean = try {
+        val state = callStateReader()
         val active =
             state == TelephonyManager.CALL_STATE_OFFHOOK || state == TelephonyManager.CALL_STATE_RINGING
         if (active) {

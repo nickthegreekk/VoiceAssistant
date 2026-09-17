@@ -413,11 +413,16 @@ fun MainScreen(service: AssistantService?) {
         attachedFiles = (attachedFiles + uris).distinct()
     }
 
-    // Fix #12: RECORD_AUDIO and POST_NOTIFICATIONS must be requested through ONE
+    // Fix #12: every still-missing runtime permission must be requested through ONE
     // multi-permission launcher. Launching two single-permission requests back-to-back
     // on the same ActivityResultLauncher displaces the first request before its result
     // callback fires — the mic grant/deny result was lost and promoteToForeground()
     // (which depends on that result) never ran until the flow was manually retriggered.
+    // READ_PHONE_STATE (proximity barge-in's call guard) joined this set, so its dialog is
+    // part of the same single prompt rather than a second sequential request. It needs no
+    // branch in the result handler below: only RECORD_AUDIO's grant drives
+    // promoteToForeground(), and the service re-reads the call-state permission at every
+    // trigger, so a later change (including a grant from Settings) needs no UI reaction.
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { grants ->
@@ -675,6 +680,16 @@ fun MainScreen(service: AssistantService?) {
                 ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
             ) {
                 add(Manifest.permission.POST_NOTIFICATIONS)
+            }
+            // Proximity barge-in's call guard (AssistantService.isPhoneCallActive): on API
+            // 31+ the coarse call-state read is permission-gated for apps targeting 31 or
+            // newer, so without this grant the guard silently never skips a wave-to-
+            // interrupt during a real call. Declining is supported — the guard then sees
+            // "no call", its documented pre-fix behaviour — so nothing blocks on the
+            // result here. Requested on every launch where it is still missing, which also
+            // gives a user who declined once a way back to it.
+            if (ContextCompat.checkSelfPermission(context, Manifest.permission.READ_PHONE_STATE) != PackageManager.PERMISSION_GRANTED) {
+                add(Manifest.permission.READ_PHONE_STATE)
             }
         }
         if (needed.isNotEmpty()) permissionLauncher.launch(needed.toTypedArray())

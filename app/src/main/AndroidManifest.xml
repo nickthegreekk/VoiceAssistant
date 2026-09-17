@@ -7,6 +7,20 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!--
+        Proximity barge-in's call guard. AssistantService.isPhoneCallActive() reads the
+        coarse call state at trigger time so a wave-to-interrupt gesture is skipped while
+        a call is ringing/off-hook (holding the phone to the ear for a real call must not
+        stop playback). On API 31+ the framework enforces READ_PHONE_STATE on that read
+        for apps targeting 31 or newer, and this app targets 37: the Telephony -> Telecom
+        path throws SecurityException("getCallState API requires READ_PHONE_STATE for API
+        version 31+") instead of returning CALL_STATE_IDLE. Without this declaration the
+        guard's read failed on EVERY trigger, so the guard could never skip. Requested at
+        runtime alongside RECORD_AUDIO/POST_NOTIFICATIONS; declining it is fully supported
+        and the guard then degrades to "no call detected", which is exactly its pre-fix
+        behaviour. Nothing else in the app depends on this permission.
+    -->
+    <uses-permission android:name="android.permission.READ_PHONE_STATE" />
         <application
         android:allowBackup="true"
         android:networkSecurityConfig="@xml/network_security_config"
