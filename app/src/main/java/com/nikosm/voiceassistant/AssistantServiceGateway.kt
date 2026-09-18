@@ -77,8 +77,75 @@ internal suspend fun detectGatewayResponseLanguage(text: String): String {
     }
 }
 
+// ---------------------------------------------------------------------------
+// M1: the single gateway-credential resolver.
+//
+// Every flow that talks to the user's gateway (transcription, TTS synthesis, the
+// "Test Voice" button) authenticates with the credentials of a *configured*
+// Servers entry — those credentials exist nowhere else. Matching a persona's
+// Backend URL to that entry used to be a raw `it.url == url` comparison backed by
+// a credential-less `?: ServerConfig(..., url)` fallback, so any non-byte-identical
+// URL (a trailing slash, surrounding whitespace, or a name-based Backend URL that
+// the audio-chat path already accepts) silently produced an UNAUTHENTICATED
+// request: a 401 whose reply text appeared but was never spoken. The resolver
+// below is now the one place that matching happens.
+// ---------------------------------------------------------------------------
+
+/**
+ * Normalizes a gateway URL for comparison: trims surrounding whitespace and drops
+ * trailing slashes, so `http://host:8880`, ` http://host:8880/` and
+ * `http://host:8880//` all compare equal.
+ */
+internal fun normalizeGatewayUrl(raw: String): String = raw.trim().trimEnd('/')
+
+/**
+ * Resolves the configured gateway entry a persona actually means, or null when
+ * nothing matches. Matches on any of:
+ *  - [displayName] — the `[Name] model` tag the audio-chat path resolves by name,
+ *  - the entry's NAME against the persona's Backend URL (a name-based Backend URL),
+ *  - the normalized entry URL against the normalized Backend URL.
+ *
+ * Deliberately never invents a config: a null result means the caller has no
+ * credentials to authenticate with, and must fail visibly rather than send an
+ * unauthenticated request.
+ */
+internal fun resolveGatewayConfig(
+    gateways: List<ServerConfig>,
+    backendUrl: String,
+    displayName: String? = null
+): ServerConfig? {
+    val wanted = backendUrl.trim()
+    val wantedUrl = normalizeGatewayUrl(backendUrl)
+    if (wanted.isEmpty() && wantedUrl.isEmpty() && displayName.isNullOrBlank()) return null
+    return gateways.firstOrNull { gw ->
+        (!displayName.isNullOrBlank() && gw.name == displayName) ||
+            (wanted.isNotEmpty() && gw.name == wanted) ||
+            (wantedUrl.isNotEmpty() && normalizeGatewayUrl(gw.url) == wantedUrl)
+    }
+}
+
+/** [resolveGatewayConfig] against this service's live gateway list. */
+internal fun AssistantService.findGatewayConfig(backendUrl: String, displayName: String? = null): ServerConfig? =
+    resolveGatewayConfig(_serverBases.value, backendUrl, displayName)
+
 internal fun AssistantService.testGatewayVoice(text: String, url: String, language: String, engine: String, kokoroVoice: String) {
-    val gw = _serverBases.value.find { it.url == url } ?: ServerConfig("Test", url)
+    // M1: resolve through the shared resolver (trim + trailing-slash normalization +
+    // name match) instead of the old credential-less `?: ServerConfig("Test", url)`
+    // fallback. A Backend URL that wasn't byte-identical to the saved entry used to
+    // go out unauthenticated — a 401 the user never saw. A URL that maps to no
+    // configured entry now fails visibly instead of silently.
+    val gw = findGatewayConfig(url)
+    if (gw == null) {
+        android.util.Log.e(
+            "AssistantService",
+            "Gateway voice test refused — '$url' does not match any configured gateway, so its " +
+                "credentials cannot be resolved. Add it in Servers settings, or fix the Backend URL."
+        )
+        // Visible, non-silent failure. Deliberately does NOT touch assistantState:
+        // a refused test must not disturb whatever turn owns the state machine.
+        updateNotification("Gateway not found: $url")
+        return
+    }
     serviceScope.launch {
         _state.value = AssistantState.THINKING
         updateNotification("Testing Gateway...")
@@ -103,7 +170,7 @@ internal fun AssistantService.testGatewayVoice(text: String, url: String, langua
                     .build()
                 
                 val requestBuilder = Request.Builder()
-                    .url(url.trimEnd('/') + "/synthesize")
+                    .url(gw.url.trimEnd('/') + "/synthesize")
                     .post(requestBody)
                 
                 when (gw.effectiveAuthType) {
@@ -153,7 +220,17 @@ internal fun AssistantService.testGatewayVoice(text: String, url: String, langua
         } catch (e: Exception) {
             android.util.Log.e("AssistantService", "Gateway test failed", e)
         } finally {
-            if (_state.value == AssistantState.THINKING) {
+            // H2: SAME ownership guard as the sibling finally blocks (the voice and
+            // cloud chat flows in AssistantServiceChat.kt both check
+            // `isChatRequestCurrent(generation)` before touching state/focus). Without the
+            // generation check a slow "Test Voice" fetch that completed AFTER a newer turn
+            // had started still saw that newer turn's THINKING and forced it to IDLE
+            // ("Ready to help") — and because the newer turn's own finally then failed
+            // its `_state == THINKING` guard, a turn that had retained the audio focus
+            // (stopRecording keeps it through THINKING) never abandoned it either,
+            // leaving other apps ducked indefinitely. A superseded test now leaves the
+            // newer turn's state and focus lifecycle completely untouched.
+            if (_state.value == AssistantState.THINKING && isChatRequestCurrent(generation)) {
                 _state.value = AssistantState.IDLE
                 updateNotification("Ready to help")
             }
@@ -166,7 +243,22 @@ internal suspend fun AssistantService.synthesizeWithGateway(text: String, person
     val url = persona.backendUrl
     if (url.isBlank()) return Pair(null, null)
     
-    val gw = _serverBases.value.find { it.url == url } ?: ServerConfig("Gateway", url)
+    // M1: resolve the persona's gateway entry through the shared resolver. The old
+    // credential-less `?: ServerConfig("Gateway", url)` fallback sent an
+    // UNAUTHENTICATED request whose 401 was swallowed as "no audio", so the reply
+    // appeared in the transcript but was silently never spoken. A Backend URL that
+    // maps to no configured entry is now refused before any request is built.
+    val gw = findGatewayConfig(url)
+    if (gw == null) {
+        android.util.Log.e(
+            "AssistantService",
+            "Gateway synthesis refused — Backend URL '$url' for persona '${persona.name}' does not " +
+                "match any configured gateway, so its credentials cannot be resolved. No request was " +
+                "sent; the reply cannot be spoken until the Backend URL matches a Servers entry."
+        )
+        return Pair(null, null)
+    }
+    val baseUrl = gw.url.trimEnd('/')
     // Non-Translator personas keep targetLanguage at its "English" default no matter
     // what language the model actually replied in, so the gateway would apply an
     // English voice to foreign text. Detect the response language on-device instead.
@@ -193,7 +285,7 @@ internal suspend fun AssistantService.synthesizeWithGateway(text: String, person
                 .build()
             
             val requestBuilder = Request.Builder()
-                .url(url.trimEnd('/') + "/synthesize")
+                .url("$baseUrl/synthesize")
                 .post(requestBody)
             
             when (gw.effectiveAuthType) {
@@ -245,9 +337,13 @@ internal suspend fun AssistantService.synthesizeWithGateway(text: String, person
 internal suspend fun AssistantService.transcribeWithGateway(file: File, persona: Persona): String? {
     val allGateways = _serverBases.value
 
-    // S2: resolve preferred gateway from persona's configured backendUrl
+    // S2: resolve preferred gateway from persona's configured backendUrl.
+    // M1: through the shared resolver, so trim / trailing-slash differences and a
+    // name-based Backend URL (which the audio-chat path already accepts) resolve to
+    // the configured entry instead of failing with "not in the configured gateway
+    // list" against an entry that plainly exists.
     val preferredGateway = if (persona.backendUrl.isNotBlank()) {
-        allGateways.find { it.url == persona.backendUrl }
+        resolveGatewayConfig(allGateways, persona.backendUrl)
     } else null
 
     // Build gwsToTry using the same failover logic as sendTextMessageToServer/sendAudioToServer
@@ -320,7 +416,10 @@ internal suspend fun AssistantService.transcribeWithGateway(file: File, persona:
             // Update status to working since we just had a successful call
             withContext(Dispatchers.Main) {
                 val statusMap = _serverStatus.value.toMutableMap()
-                _serverBases.value.find { it.url == url }?.let { statusMap[it.url] = "Online" }
+                // M1: the shared resolver, so the entry this attempt actually used is the
+                // one whose status is updated (a name-based Backend URL used to leave the
+                // status dot untouched).
+                resolveGatewayConfig(_serverBases.value, url)?.let { statusMap[it.url] = "Online" }
                 _serverStatus.value = statusMap
             }
 
@@ -339,14 +438,17 @@ internal suspend fun AssistantService.transcribeWithGateway(file: File, persona:
             // Mark failed with cooldown
             withContext(Dispatchers.Main) {
                 val statusMap = _serverStatus.value.toMutableMap()
-                _serverBases.value.find { it.url == url }?.let { cfg ->
-                    val failureLabel = if (e is java.net.SocketTimeoutException || e is java.net.UnknownHostException) {
-                        "connection/timeout"
-                    } else {
-                        e.message?.take(30)
+                _serverBases.value.let { gateways ->
+                    // M1: resolved through the same shared resolver as the attempt above.
+                    resolveGatewayConfig(gateways, url)?.let { cfg ->
+                        val failureLabel = if (e is java.net.SocketTimeoutException || e is java.net.UnknownHostException) {
+                            "connection/timeout"
+                        } else {
+                            e.message?.take(30)
+                        }
+                        statusMap[cfg.url] = "failed: $failureLabel"
+                        serverFailCooldownUntilMillis[cfg.url] = System.currentTimeMillis() + FAILED_COOLDOWN_MS
                     }
-                    statusMap[cfg.url] = "failed: $failureLabel"
-                    serverFailCooldownUntilMillis[cfg.url] = System.currentTimeMillis() + FAILED_COOLDOWN_MS
                 }
                 _serverStatus.value = statusMap
             }

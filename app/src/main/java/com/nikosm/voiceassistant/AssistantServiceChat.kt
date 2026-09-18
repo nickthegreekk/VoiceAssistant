@@ -191,7 +191,48 @@ internal fun AssistantService.sendAudioToServer(file: File, currentPersona: Pers
                         // health/cooldown status.
                         throw Exception("Empty transcription result")
                     }
-                    performCloudChat(transcribedText, currentPersona, useDeviceVoice, startTime, currentTurnInHistory = false, generation = generation)
+                    // H1: the user's spoken turn must reach the transcript before the
+                    // response is requested, exactly as the gateway-voice (apply-time
+                    // append) and text-flow (append-before-send) call sites do.
+                    // performCloudChat only ever appends the ASSISTANT message, so a
+                    // cloud voice turn used to leave the question out of _messages and
+                    // out of the persisted history. That is not just a display gap:
+                    // buildCloudRequest assembles the next request FROM _messages, and
+                    // an Anthropic persona runs `history.dropWhile { it.role != "user" }`
+                    // over it — with an assistant-only history that dropped EVERYTHING,
+                    // so a cloud voice conversation had no memory between turns (and
+                    // Gemini/OpenAI personas lost the user side of the prior turn).
+                    // Same ownership gates as the failure path below, so a superseded or
+                    // persona-switched turn can never leave an orphaned user message.
+                    if (!isChatRequestCurrent(generation)) {
+                        // Stop / a newer request owns the transcript and the focus —
+                        // append nothing and skip the (now pointless, paid) model call.
+                        android.util.Log.d(
+                            "AssistantService",
+                            "Voice transcript discarded — superseded before it could be applied"
+                        )
+                        return@launch
+                    }
+                    if (!isChatContextCurrent(generation, personaName)) {
+                        // The active persona changed: never write this turn into another
+                        // persona's transcript. performCloudChat never runs, so its
+                        // finally won't release the focus this turn retained — do it here.
+                        android.util.Log.d(
+                            "AssistantService",
+                            "Voice transcript discarded — active persona changed"
+                        )
+                        abandonAssistantFocus()
+                        _state.value = AssistantState.IDLE
+                        updateNotification("Ready to help")
+                        return@launch
+                    }
+                    _messages.value = _messages.value + ChatMessage("user", transcribedText)
+                    saveSettings()
+                    // currentTurnInHistory = true: the user turn is now the last entry in
+                    // _messages, so buildCloudRequest drops exactly that entry from the
+                    // history slice and re-appends it as the current turn — it reaches
+                    // the model once, and the prior turns stay intact.
+                    performCloudChat(transcribedText, currentPersona, useDeviceVoice, startTime, currentTurnInHistory = true, generation = generation)
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
@@ -305,8 +346,11 @@ internal fun AssistantService.sendAudioToServer(file: File, currentPersona: Pers
 
                 // S2: data (audio/transcripts) is only sent to the persona's configured
                 // backend unless the persona explicitly opts into gateway failover.
+                // M1: routed through the shared resolver, which keeps this path's
+                // match-by-name (the `[Name] model` tag) AND adds trailing-slash/trim
+                // normalization — the same resolution the gateway flows now use.
                 val preferredGateway = if (currentPersona.backendUrl.isNotBlank()) {
-                    allGateways.find { it.name == displayServer || it.url == currentPersona.backendUrl }
+                    resolveGatewayConfig(allGateways, currentPersona.backendUrl, displayServer)
                 } else null
 
                 val gwsToTry: List<ServerConfig> = if (currentPersona.allowGatewayFailover) {
@@ -1078,6 +1122,15 @@ private fun AssistantService.performCloudChat(text: String, persona: Persona, us
                 playbackRequested = true
                 playResponse(persona, deviceText = responseData.third)
             } else if (persona.voiceMode == VoiceMode.GATEWAY) {
+                // M1: synthesis authenticates with the persona's gateway entry, so
+                // resolve it first and make a resolution failure VISIBLE. Previously an
+                // unmatched Backend URL fell back to a credential-less config, the
+                // request 401'd, synthesizeWithGateway swallowed it as "no audio" and
+                // the reply was appended but silently never spoken — a paid turn with
+                // no audio and no explanation. The text still lands in the transcript
+                // (nothing is thrown here), followed by an error bubble naming the
+                // misconfiguration.
+                val ttsGatewayResolved = findGatewayConfig(persona.backendUrl) != null
                 val (audioBytes, _) = synthesizeWithGateway(responseData.first, persona)
                 val audioPath = if (audioBytes != null) {
                     val outFile = File(cacheDir, "response_${System.currentTimeMillis()}.wav")
@@ -1091,6 +1144,16 @@ private fun AssistantService.performCloudChat(text: String, persona: Persona, us
                 if (audioPath != null) {
                     playbackRequested = true
                     playResponse(persona, file = File(audioPath))
+                } else if (!ttsGatewayResolved) {
+                    // No synthesis request was sent at all — say why, at the point of use.
+                    _messages.value = _messages.value + ChatMessage(
+                        "assistant",
+                        "Error: no configured gateway matches this persona's Backend URL " +
+                            "'${persona.backendUrl}', so the reply could not be spoken. Fix the Backend URL in " +
+                            "the persona settings (or add the gateway in Servers), then resend.",
+                        isError = true
+                    )
+                    saveSettings()
                 }
             } else {
                 _messages.value = _messages.value + ChatMessage("assistant", responseData.first, responseData.second, responseTimeMs = responseTimeMs)
