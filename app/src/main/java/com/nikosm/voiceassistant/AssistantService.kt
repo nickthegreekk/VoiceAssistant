@@ -178,15 +178,138 @@ class AssistantService : Service() {
     // _messages (appended on the stream's first chunk, replaced by the final
     // message at apply, removed if it ended up blank). Nullable — null when no
     // stream is in flight or the placeholder was already resolved.
+    //
+    // H3 (ownership): the index alone is service-global state, so a STALE turn
+    // unwinding (superseded mid-stream, or Stop pressed while it was blocked on a
+    // read) could read/clear the placeholder of whatever NEWER turn was streaming
+    // by then — deleting that newer turn's in-progress bubble, or finalizing the
+    // wrong index. Every placeholder therefore records the chat-request generation
+    // it belongs to, and every read/write/clear is gated on the caller owning it
+    // (see takeStreamedPlaceholderIfOwned / releaseStreamedPlaceholderIfOwned /
+    // removeBlankPlaceholderSvc). Same treatment for the published streaming text:
+    // _streamingText drives the trailing streaming bubble in the UI, and a stale
+    // clear used to blank the newer turn's partially-streamed content (producing a
+    // duplicated/empty bubble pair when the stale catch then also appended).
     internal var streamedPlaceholderIndex: Int? = null
 
-    internal fun removeBlankPlaceholderSvc() {
-        val idx = streamedPlaceholderIndex ?: return
+    // Generation that owns `streamedPlaceholderIndex` (null ⇒ no live placeholder).
+    @Volatile
+    internal var streamedPlaceholderGeneration: Long? = null
+
+    // Generation that owns the currently published `_streamingText`
+    // (null ⇒ nothing published). Tracked separately from the placeholder index
+    // because a stream publishes progressive text on every chunk while the
+    // placeholder is only adopted once.
+    @Volatile
+    internal var streamingTextGeneration: Long? = null
+
+    /**
+     * H3: true when [generation] is the RECORDED owner of the placeholder — i.e. the
+     * placeholder in `_messages` is this turn's own in-progress bubble.
+     *
+     * This single check is what excludes a stale turn from touching a NEWER turn's
+     * placeholder: the newer turn's own `adoptStreamedPlaceholder` re-records ownership,
+     * so the stale turn's recorded generation no longer matches and null is returned.
+     *
+     * Deliberately does NOT additionally require isChatRequestCurrent. Two reasons:
+     *  - Cleanup of a turn's OWN artifacts (blank-bubble removal, releasing the index,
+     *    clearing its published overlay text) must still happen when that turn was
+     *    superseded or Stopped — Stop bumps the sequence synchronously, so the unwinding
+     *    turn is *never* current, and a currency requirement would strand its blank
+     *    bubble in the transcript and leave its streamed overlay text stuck on screen.
+     *  - Recorded-ownership matching ALREADY makes cross-turn clobbering impossible,
+     *    which is the property H3 is about.
+     *
+     * Currency is enforced where it actually matters — on WRITES into the live
+     * transcript/UI — by [ownsStreamedPlaceholderSvc] for the progressive writers, and by
+     * each flow's existing isChatRequestCurrent apply/catch/finally gates.
+     */
+    internal fun ownsStreamedPlaceholderRecord(generation: Long): Boolean =
+        streamedPlaceholderGeneration == generation
+
+    /**
+     * H3: true when [generation] is the recorded placeholder owner AND still the current
+     * request — i.e. this turn may still write into the LIVE transcript as if nothing had
+     * happened. Used by the progressive writers (per-chunk placeholder text): those must
+     * not repaint a bubble once the turn is dead.
+     */
+    internal fun ownsStreamedPlaceholderSvc(generation: Long): Boolean =
+        isChatRequestCurrent(generation) && ownsStreamedPlaceholderRecord(generation)
+
+    /** H3: true when [generation] is the recorded owner of the published streaming text. */
+    internal fun ownsStreamingText(generation: Long): Boolean =
+        streamingTextGeneration == generation
+
+    /** H3: the recorded placeholder index of [generation], or null when it is not the owner. */
+    internal fun streamedPlaceholderIndexIfRecorded(generation: Long): Int? =
+        if (ownsStreamedPlaceholderRecord(generation)) streamedPlaceholderIndex else null
+
+    /** H3: adopts [index] as [generation]'s in-progress placeholder (overwrites a stale owner). */
+    internal fun adoptStreamedPlaceholder(generation: Long, index: Int) {
+        streamedPlaceholderIndex = index
+        streamedPlaceholderGeneration = generation
+    }
+
+    /**
+     * H3: consumes this generation's placeholder index, or null when the caller no
+     * longer owns it (a newer turn adopted its own placeholder, or the index was already
+     * released). A null result means "do not touch the message list by index" — the
+     * caller falls back to a plain append.
+     *
+     * Recorded-ownership gated: the callers (apply blocks) are already behind an
+     * isChatRequestCurrent gate, and a claimed index can only ever be the caller's OWN.
+     */
+    internal fun takeStreamedPlaceholderIfOwned(generation: Long): Int? {
+        if (!ownsStreamedPlaceholderRecord(generation)) return null
+        val idx = streamedPlaceholderIndex
+        streamedPlaceholderIndex = null
+        streamedPlaceholderGeneration = null
+        return idx
+    }
+
+    /** H3: drops this generation's placeholder ownership WITHOUT touching _messages. */
+    internal fun releaseStreamedPlaceholderIfOwned(generation: Long) {
+        if (!ownsStreamedPlaceholderRecord(generation)) return
+        streamedPlaceholderIndex = null
+        streamedPlaceholderGeneration = null
+    }
+
+    /** H3: publishes progressive streamed text on behalf of [generation]. */
+    internal fun publishStreamingText(generation: Long, text: String?) {
+        _streamingText.value = text
+        streamingTextGeneration = if (text == null) null else generation
+    }
+
+    /** H3: clears the published streaming text only when [generation] owns it. */
+    internal fun clearStreamingTextIfOwned(generation: Long) {
+        if (!ownsStreamingText(generation)) return
+        _streamingText.value = null
+        streamingTextGeneration = null
+    }
+
+    /**
+     * H3: removes this generation's placeholder from `_messages` if it is still blank.
+     *
+     * Recorded-ownership gated (NOT currency): a turn that was superseded or Stopped must
+     * still clear its OWN blank bubble — Stop bumps the sequence synchronously, so the
+     * unwinding turn is never "current" and a currency gate would strand the bubble. It
+     * can still never reach a newer turn's placeholder, because that turn re-recorded
+     * ownership. A placeholder holding partial text is deliberately KEPT (D2: a stopped
+     * stream's partial response stays as real history).
+     */
+    internal fun removeBlankPlaceholderSvc(generation: Long) {
+        if (!ownsStreamedPlaceholderRecord(generation)) return
+        val idx = streamedPlaceholderIndex ?: run {
+            streamedPlaceholderGeneration = null
+            return
+        }
         val current = _messages.value.toMutableList()
         if (idx in current.indices && current[idx].text.isBlank()) {
             current.removeAt(idx)
             _messages.value = current
         }
+        streamedPlaceholderIndex = null
+        streamedPlaceholderGeneration = null
     }
 
     // RAG knowledge-base upload progress/outcome. Hoisted to the service (instead of
@@ -213,6 +336,33 @@ class AssistantService : Service() {
     internal fun currentChatRequestSeq(): Long = chatRequestSeq
     internal fun isChatContextCurrent(seq: Long, personaName: String): Boolean =
         seq == chatRequestSeq && currentPersonaName == personaName
+
+    // M2 (ownership): the generation of the turn that currently OWNS a THINKING state —
+    // and, through it, the audio focus a voice turn retains across THINKING
+    // (stopRecording keeps it; only the owning turn's terminal path releases it).
+    //
+    // Recorded at every THINKING entry and released by the owning turn's own terminal
+    // reset, so `owner != null && isChatRequestCurrent(owner)` is a GENUINE in-flight
+    // check rather than a restatement of `state == THINKING`: a THINKING whose owner has
+    // since been superseded or Stopped fails the currency half and is normalized to IDLE.
+    //
+    // Read by stopVadListening() (and its test) so toggling hands-free off can no longer
+    // force IDLE underneath a live turn. That force-reset made the live turn's own
+    // `_state.value == THINKING` finally guard fail, so the turn skipped abandoning the
+    // focus it had retained through THINKING — with the UI already on IDLE, nothing could
+    // ever release it and other apps stayed ducked indefinitely.
+    @Volatile
+    internal var thinkingOwnerGeneration: Long? = null
+
+    /** M2: records [generation] as the owner of the THINKING state entered next. */
+    internal fun recordThinkingOwner(generation: Long) {
+        thinkingOwnerGeneration = generation
+    }
+
+    /** M2: releases THINKING ownership held by [generation] (no-op for a stale owner). */
+    internal fun clearThinkingOwnerIfOwned(generation: Long) {
+        if (thinkingOwnerGeneration == generation) thinkingOwnerGeneration = null
+    }
 
     val _sessionUsage = MutableStateFlow(UsageInfo())
     val sessionUsage = _sessionUsage.asStateFlow()
@@ -905,7 +1055,14 @@ class AssistantService : Service() {
         serviceScope.launch {
             assistantState.collect { state ->
                 when (state) {
-                    AssistantState.IDLE -> vadRecorder?.resume()
+                    // M2 companion: the hands-free toggle releases the recorder, so this
+                    // collector must not resurrect a stopped VAD session. Before M2 the
+                    // unconditional IDLE write in stopVadListening() self-suppressed the
+                    // resume (a resume() on a released AudioRecord is a no-op too), but
+                    // with the ownership check that write is now skipped while a turn is
+                    // in flight — so the guard has to live here where the recorder itself
+                    // is decided.
+                    AssistantState.IDLE -> if (_handsFreeMode.value) vadRecorder?.resume()
                     AssistantState.SPEAKING -> vadRecorder?.pause()
                     else -> {}
                 }
@@ -2173,8 +2330,66 @@ class AssistantService : Service() {
         vadRecorder?.stop()
         vadRecorder = null
         _handsFreeMode.value = false
-        _state.value = AssistantState.IDLE
-        updateNotification("Ready to help")
+        // M2 (ownership): this used to be an unconditional `_state.value = IDLE`.
+        // Toggling hands-free off while a VAD-initiated turn was in flight therefore
+        // force-reset THINKING even though that turn was still running, and its own
+        // finally guard (`if (_state.value == THINKING && isChatRequestCurrent(gen))`)
+        // then failed — skipping the abandonment of the audio focus the turn had
+        // retained through THINKING (stopRecording keeps it; only an in-flight turn's
+        // terminal path releases it). Other apps stayed ducked indefinitely, with the
+        // UI already back on IDLE so nothing could ever release it.
+        //
+        // Deliberate behaviour: stopping hands-free does NOT discard a turn the user
+        // already spoke. The turn's own gates publish its reply and release its focus;
+        // the toggle only stops listening. (Bumping the generation would be the
+        // rejected alternative: it supersedes the turn, so the apply-gates silently
+        // throw the user's question away and the focus would have to be abandoned here
+        // instead — an accidental answer to "which turn owns the focus", not a
+        // deliberate one.)
+        //
+        // So the reset is gated on OWNERSHIP of the state the in-flight turn itself set:
+        //  - THINKING is set exclusively by a chat turn that also recorded itself as the
+        //    state's owner (`recordThinkingOwner(generation)`, called at all four THINKING
+        //    entries: the voice/text/cloud flows in AssistantServiceChat.kt and Test Voice
+        //    in AssistantServiceGateway.kt) and that retained the audio focus through it.
+        //    The guard consults that OWNER's generation:
+        //      * owner recorded and still current -> a live turn owns THINKING (and the
+        //        focus it retained), so the toggle leaves both untouched;
+        //      * owner recorded but since superseded/Stopped -> that turn's own finally
+        //        deliberately skipped its reset, so the dead THINKING is normalized to IDLE;
+        //      * no owner recorded -> this THINKING is not a chat turn's (the Gateway
+        //        synthesis feedback path in AssistantServiceAudio.kt), so it is normalized
+        //        to IDLE exactly as the unconditional write always did.
+        //    Consulting the RECORDED owner (not a fresh snapshot of the sequence) is what
+        //    makes this a genuine in-flight test: `currentChatRequestSeq()` is current by
+        //    definition, so comparing against it would merely restate
+        //    `state == THINKING`. (The sequence cannot advance inside this Main-confined
+        //    method, so there is no interleaving to guard against here — only ownership.)
+        //  - SPEAKING is playback: forcing the UI to IDLE mid-playback desynced it from the
+        //    audio still coming out of the speaker (only playback's own teardown stops it
+        //    and writes IDLE), so the toggle leaves it be as well.
+        // Every other state (IDLE, and LISTENING — the armed-but-no-turn case) still
+        // lands on IDLE with a fresh notification, exactly as the unconditional write
+        // always did.
+        val stateBeforeToggle = _state.value
+        val thinkingOwner = thinkingOwnerGeneration
+        val inFlightTurnOwnsState = stateBeforeToggle == AssistantState.THINKING &&
+            thinkingOwner != null && isChatRequestCurrent(thinkingOwner)
+        if (inFlightTurnOwnsState || stateBeforeToggle == AssistantState.SPEAKING) {
+            android.util.Log.d(
+                "AssistantService",
+                "Hands-free stopped while a turn owns $stateBeforeToggle (owner generation $thinkingOwner) — " +
+                    "leaving its state/focus lifecycle to the turn"
+            )
+        } else {
+            if (stateBeforeToggle == AssistantState.THINKING) {
+                // Normalizing a THINKING no live turn owns — drop the dead owner so
+                // nothing can mistake it for a live turn later.
+                thinkingOwnerGeneration = null
+            }
+            _state.value = AssistantState.IDLE
+            updateNotification("Ready to help")
+        }
     }
 }
 

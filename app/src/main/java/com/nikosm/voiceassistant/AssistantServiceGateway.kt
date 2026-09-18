@@ -147,14 +147,17 @@ internal fun AssistantService.testGatewayVoice(text: String, url: String, langua
         return
     }
     serviceScope.launch {
-        _state.value = AssistantState.THINKING
-        updateNotification("Testing Gateway...")
         // B4: capture the current request generation before the fetch starts (read
         // only — never bumps the chat sequence, so it can't discard an in-flight
         // chat response). Stop (stopEverything) and any newer chat request bump the
         // sequence, so this snapshot goes stale the moment either happens; it is
         // re-checked immediately before playback below.
+        // M2: captured before the THINKING write so that write can record this
+        // generation as the owner of the state (same read-only snapshot, no bump).
         val generation = currentChatRequestSeq()
+        recordThinkingOwner(generation)
+        _state.value = AssistantState.THINKING
+        updateNotification("Testing Gateway...")
         try {
             val bytes = withContext(Dispatchers.IO) {
                 val requestBody = MultipartBody.Builder()
@@ -231,6 +234,8 @@ internal fun AssistantService.testGatewayVoice(text: String, url: String, langua
             // leaving other apps ducked indefinitely. A superseded test now leaves the
             // newer turn's state and focus lifecycle completely untouched.
             if (_state.value == AssistantState.THINKING && isChatRequestCurrent(generation)) {
+                // M2: leaving THINKING — release state ownership (see stopVadListening()).
+                clearThinkingOwnerIfOwned(generation)
                 _state.value = AssistantState.IDLE
                 updateNotification("Ready to help")
             }

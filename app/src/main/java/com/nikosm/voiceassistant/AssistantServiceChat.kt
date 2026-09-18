@@ -174,6 +174,13 @@ internal fun AssistantService.sendAudioToServer(file: File, currentPersona: Pers
         // applied only if both are still current when it arrives.
         val generation = nextChatRequestSeq()
         val personaName = currentPersona.name
+        // M2: record this turn as the owner of the THINKING state it is about to set.
+        // The ownership pair (owner generation + `_state == THINKING`) is what
+        // stopVadListening() consults, so toggling hands-free off cannot force IDLE
+        // underneath a live turn — and thereby cannot make that turn's own
+        // `_state == THINKING` finally guard fail, which used to leak the audio focus
+        // the turn retained through THINKING.
+        recordThinkingOwner(generation)
         _state.value = AssistantState.THINKING
         updateNotification("Thinking...")
 
@@ -488,9 +495,10 @@ internal fun AssistantService.sendAudioToServer(file: File, currentPersona: Pers
             // placeholder is already in the list (content built up during the
             // stream) but the user turn is NOT (voice flow appends user+assistant
             // together at apply). Swap: drop the placeholder, append user+final.
-            val streamedIdx = streamedPlaceholderIndex
-            streamedPlaceholderIndex = null
-            _streamingText.value = null
+            // H3: consume only OUR OWN placeholder (null ⇒ a newer turn owns it, or this
+            // one was superseded), and never clear a newer turn's published streaming text.
+            val streamedIdx = takeStreamedPlaceholderIfOwned(generation)
+            clearStreamingTextIfOwned(generation)
             if (streamedIdx != null && streamedIdx < _messages.value.size) {
                 val base = _messages.value.toMutableList().also { it.removeAt(streamedIdx) }.toList()
                 _messages.value = base +
@@ -524,8 +532,16 @@ internal fun AssistantService.sendAudioToServer(file: File, currentPersona: Pers
             // D2: Stop interrupted a mid-stream voice turn — keep the partial as
             // genuine history: user turn + partial assistant message (the voice
             // flow's apply would have appended both).
-            if (currentPersonaName == personaName && e.partialContent.isNotBlank()) {
-                val streamedIdx = streamedPlaceholderIndex
+            // H3: ownership FIRST. This block used to be guarded only by the persona
+            // name, so a superseded turn's stop-unwind could append its stale partial
+            // into the newer turn's transcript AND unconditionally clear the newer
+            // turn's placeholder index + published streaming text — which left the
+            // newer turn's own bubble to be appended AGAIN at apply (the duplicated
+            // bubble pair). A turn that no longer owns the request touches nothing.
+            if (!isChatRequestCurrent(generation)) {
+                android.util.Log.d("AssistantService", "Voice stream cancelled — superseded by a newer request; partial discarded")
+            } else if (currentPersonaName == personaName && e.partialContent.isNotBlank()) {
+                val streamedIdx = takeStreamedPlaceholderIfOwned(generation)
                 val base = if (streamedIdx != null && streamedIdx < _messages.value.size) {
                     _messages.value.toMutableList().also { it.removeAt(streamedIdx) }.toList()
                 } else _messages.value
@@ -534,17 +550,18 @@ internal fun AssistantService.sendAudioToServer(file: File, currentPersona: Pers
                     ChatMessage("assistant", e.partialContent, e.partialThinking.ifBlank { null })
                 saveSettings()
             } else {
-                removeBlankPlaceholderSvc()
+                removeBlankPlaceholderSvc(generation)
             }
-            streamedPlaceholderIndex = null
-            _streamingText.value = null
+            releaseStreamedPlaceholderIfOwned(generation)
+            clearStreamingTextIfOwned(generation)
             android.util.Log.d("AssistantService", "Voice stream cancelled by user — partial kept (${e.partialContent.length} chars)")
             currentCall = null
         } catch (e: StreamPersonaChangedException) {
             // Partial already written back into the previous persona's persisted
             // history inside performDirectOllamaChat — nothing to apply here.
-            streamedPlaceholderIndex = null
-            _streamingText.value = null
+            // H3: still only release OUR OWN placeholder / published streaming text.
+            releaseStreamedPlaceholderIfOwned(generation)
+            clearStreamingTextIfOwned(generation)
             android.util.Log.d("AssistantService", "Voice stream cancelled — persona changed; partial kept in previous persona history")
             currentCall = null
         } catch (e: Exception) {
@@ -564,9 +581,12 @@ internal fun AssistantService.sendAudioToServer(file: File, currentPersona: Pers
                 currentCall = null
             }
         } finally {
-            removeBlankPlaceholderSvc()
-            streamedPlaceholderIndex = null
-            _streamingText.value = null
+            // H3: every one of these is ownership-gated — a stale turn unwinding here
+            // must not delete a newer turn's in-progress placeholder or blank its
+            // published streaming text (see the helper block in AssistantService.kt).
+            removeBlankPlaceholderSvc(generation)
+            releaseStreamedPlaceholderIfOwned(generation)
+            clearStreamingTextIfOwned(generation)
             if (_state.value == AssistantState.THINKING && isChatRequestCurrent(generation)) {
                 // Focus-retention counterpart (see playbackRequested above): the
                 // turn terminated without handing off to playback (server error,
@@ -579,6 +599,9 @@ internal fun AssistantService.sendAudioToServer(file: File, currentPersona: Pers
                 if (!playbackRequested) {
                     abandonAssistantFocus()
                 }
+                // M2: this turn is leaving THINKING — it no longer owns the state, so a
+                // later hands-free-off toggle must not treat the stale owner as live.
+                clearThinkingOwnerIfOwned(generation)
                 _state.value = AssistantState.IDLE
                 updateNotification("Ready to help")
             }
@@ -625,6 +648,8 @@ internal fun AssistantService.sendTextMessageToServer(inputText: String, current
         return
     }
     serviceScope.launch {
+        // M2: this turn owns the THINKING state it sets here (see stopVadListening()).
+        recordThinkingOwner(generation)
         _state.value = AssistantState.THINKING
         updateNotification("Thinking...")
         try {
@@ -859,9 +884,11 @@ internal fun AssistantService.sendTextMessageToServer(inputText: String, current
             // Stage-1 streaming: when this turn streamed, the trailing assistant
             // placeholder is already in the list with the content built up —
             // finalize it IN PLACE (single final write; never a second append).
-            val streamedIdx = streamedPlaceholderIndex
-            streamedPlaceholderIndex = null
-            _streamingText.value = null
+            // H3: consume/finalize only OUR OWN placeholder (null ⇒ a newer turn owns it,
+            // or this one was superseded — fall back to a plain append, never a wrong-index
+            // in-place finalize).
+            val streamedIdx = takeStreamedPlaceholderIfOwned(generation)
+            clearStreamingTextIfOwned(generation)
             if (streamedIdx != null && streamedIdx < _messages.value.size) {
                 _messages.value = _messages.value.mapIndexed { i, m ->
                     if (i == streamedIdx) m.copy(
@@ -900,20 +927,27 @@ internal fun AssistantService.sendTextMessageToServer(inputText: String, current
             // D2: Stop interrupted a mid-stream text turn — the trailing
             // placeholder already holds the partial text (updated per chunk);
             // persist it as genuine history. No TTS (partial only).
-            if (currentPersonaName == personaName && e.partialContent.isNotBlank()) {
+            // H3: ownership first (see the voice flow) — a superseded turn must not
+            // persist its stale partial, and must not clear a newer turn's in-flight
+            // placeholder/published text.
+            if (!isChatRequestCurrent(generation)) {
+                android.util.Log.d("AssistantService", "Stream cancelled — superseded by a newer request; partial discarded")
+            } else if (currentPersonaName == personaName && e.partialContent.isNotBlank()) {
                 saveSettings()
             } else {
-                removeBlankPlaceholderSvc()
+                removeBlankPlaceholderSvc(generation)
             }
-            streamedPlaceholderIndex = null
-            _streamingText.value = null
+            releaseStreamedPlaceholderIfOwned(generation)
+            clearStreamingTextIfOwned(generation)
             android.util.Log.d("AssistantService", "Stream cancelled by user — partial kept (${e.partialContent.length} chars)")
             currentCall = null
         } catch (e: StreamPersonaChangedException) {
             // Partial already written back into the previous persona's persisted
             // history inside performDirectOllamaChat — nothing to apply here.
-            streamedPlaceholderIndex = null
-            _streamingText.value = null
+            // H3: still ownership-gated, so an unwind from an older turn can never
+            // clear a newer turn's in-flight placeholder or published text.
+            releaseStreamedPlaceholderIfOwned(generation)
+            clearStreamingTextIfOwned(generation)
             android.util.Log.d("AssistantService", "Stream cancelled — persona changed; partial kept in previous persona history")
             currentCall = null
         } catch (e: Exception) {
@@ -933,14 +967,19 @@ internal fun AssistantService.sendTextMessageToServer(inputText: String, current
                 currentCall = null
             }
         } finally {
-            removeBlankPlaceholderSvc()
-            streamedPlaceholderIndex = null
-            _streamingText.value = null
+            // H3: ownership-gated everywhere — an unwinding OLDER turn must never
+            // remove/clear a NEWER turn's placeholder (that was the duplicated-bubble
+            // path). Non-owner is a no-op; the owner clears once.
+            removeBlankPlaceholderSvc(generation)
+            releaseStreamedPlaceholderIfOwned(generation)
+            clearStreamingTextIfOwned(generation)
             if (_state.value == AssistantState.THINKING && isChatRequestCurrent(generation)) {
                 // Focus-retention counterpart (see playbackRequested above).
                 if (!playbackRequested) {
                     abandonAssistantFocus()
                 }
+                // M2: leaving THINKING — release state ownership (see stopVadListening()).
+                clearThinkingOwnerIfOwned(generation)
                 _state.value = AssistantState.IDLE
                 updateNotification("Ready to help")
             }
@@ -1059,6 +1098,8 @@ private fun AssistantService.isCloudModel(model: String): Boolean {
 
 private fun AssistantService.performCloudChat(text: String, persona: Persona, useDeviceVoice: Boolean = false, startTime: Long, currentTurnInHistory: Boolean, generation: Long, attachments: List<Uri> = emptyList()) {
     serviceScope.launch {
+        // M2: this turn owns the THINKING state it sets here (see stopVadListening()).
+        recordThinkingOwner(generation)
         _state.value = AssistantState.THINKING
         updateNotification("Thinking (Cloud)...")
         // Focus-retention guard (same contract as sendAudioToServer): a voice
@@ -1184,6 +1225,8 @@ private fun AssistantService.performCloudChat(text: String, persona: Persona, us
                 if (!playbackRequested) {
                     abandonAssistantFocus()
                 }
+                // M2: leaving THINKING — release state ownership (see stopVadListening()).
+                clearThinkingOwnerIfOwned(generation)
                 _state.value = AssistantState.IDLE
                 updateNotification("Ready to help")
             }
@@ -1336,11 +1379,17 @@ private suspend fun AssistantService.performDirectOllamaChat(baseUrl: String, mo
             fun appendPlaceholderIfNeeded() {
                 if (placeholderAppended) return
                 _messages.value = _messages.value + ChatMessage("assistant", "")
-                streamedPlaceholderIndex = _messages.value.size - 1
+                // H3: record this generation as the placeholder's owner, so a
+                // superseded turn unwinding later cannot claim/clear it.
+                adoptStreamedPlaceholder(generation, _messages.value.size - 1)
                 placeholderAppended = true
             }
 
             fun updatePlaceholder() {
+                // H3: only ever update OUR OWN placeholder — a stale turn must not
+                // rewrite a newer turn's in-progress bubble (that produced the
+                // "content jumps to the other turn's partial text" symptom).
+                if (!ownsStreamedPlaceholderSvc(generation)) return
                 val idx = streamedPlaceholderIndex ?: return
                 val current = _messages.value.toMutableList()
                 if (idx in current.indices) {
@@ -1353,13 +1402,19 @@ private suspend fun AssistantService.performDirectOllamaChat(baseUrl: String, mo
             }
 
             fun removeBlankPlaceholder() {
+                // H3: gated on recorded ownership — the old unconditional body cleared
+                // streamedPlaceholderIndex even when the index belonged to a newer
+                // turn, which stranded that turn's empty bubble in the transcript.
+                // Recorded (not currency) so this turn can still drop its OWN blank
+                // bubble on a mid-stream network failure even if it was superseded.
+                if (!ownsStreamedPlaceholderRecord(generation)) return
                 val idx = streamedPlaceholderIndex ?: return
                 val current = _messages.value.toMutableList()
                 if (idx in current.indices && current[idx].text.isBlank()) {
                     current.removeAt(idx)
                     _messages.value = current
                 }
-                streamedPlaceholderIndex = null
+                releaseStreamedPlaceholderIfOwned(generation)
             }
 
             try {
@@ -1393,7 +1448,7 @@ private suspend fun AssistantService.performDirectOllamaChat(baseUrl: String, mo
                     // persisted history so no empty stub is stranded there.
                     if (!isChatContextCurrent(generation, persona.name)) {
                         call.cancel()
-                        val idx = streamedPlaceholderIndex
+                        val idx = streamedPlaceholderIndexIfRecorded(generation)
                         if (idx != null) {
                             val saved = settingsManager.getPersonaMessages(persona.name) ?: emptyList()
                             if (idx < saved.size) {
@@ -1406,8 +1461,11 @@ private suspend fun AssistantService.performDirectOllamaChat(baseUrl: String, mo
                                 }
                             }
                         }
-                        streamedPlaceholderIndex = null
-                        _streamingText.value = null
+                        // H3: ownership-gated clears (defensive — generation is still
+                        // current in this branch, but every placeholder write/clear now
+                        // funnels through the owned helpers).
+                        releaseStreamedPlaceholderIfOwned(generation)
+                        clearStreamingTextIfOwned(generation)
                         throw StreamPersonaChangedException(content.toString(), thinkingBuf.toString())
                     }
 
@@ -1420,20 +1478,25 @@ private suspend fun AssistantService.performDirectOllamaChat(baseUrl: String, mo
                     // happens in the caller's apply block, guarded as always.
                     appendPlaceholderIfNeeded()
                     updatePlaceholder()
-                    _streamingText.value = content.toString()
+                    // H3: publish the overlay text only while OUR generation still owns
+                    // the slot — a superseded turn must not flash its partial over a
+                    // newer turn's bubble (per-chunk guard above already throws, this
+                    // closes the race between that check and this write). Recording the
+                    // owner here is what lets the matching clear be ownership-gated.
+                    if (isChatRequestCurrent(generation)) publishStreamingText(generation, content.toString())
                 }
             } catch (e: java.io.IOException) {
                 if (call.isCanceled()) {
                     // Stop pressed mid-read: hand the partial back so the
                     // caller's cancellation branch can persist it (D2).
-                    _streamingText.value = null
+                    clearStreamingTextIfOwned(generation)
                     throw StreamCancelledByUserException(content.toString(), thinkingBuf.toString())
                 }
                 // Generic stream failure (network drop mid-generation): drop a
                 // blank placeholder, keep any partial text in place, and let
                 // the error-bubble flow handle the failure.
                 removeBlankPlaceholder()
-                _streamingText.value = null
+                clearStreamingTextIfOwned(generation)
                 throw e
             }
 
