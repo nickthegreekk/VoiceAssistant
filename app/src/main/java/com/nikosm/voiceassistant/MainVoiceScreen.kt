@@ -1198,6 +1198,23 @@ fun ControlBar(
                     if (expectedBubbleMessageId == null ||
                         layoutRefs.bubbleMessageId != expectedBubbleMessageId
                     ) return@LaunchedEffect
+                    // Belt-and-braces on top of the identity gate above (#2 of the
+                    // last sweep, deliberately cheap): a ref can still go stale
+                    // BETWEEN the gate's read and the measurement below — the
+                    // fraction emission that launched this effect can already have
+                    // been in flight when a clear-chat/persona switch published a
+                    // new list, and the anchor's node is removed during the layout
+                    // pass that follows. LayoutCoordinates.isAttached is the
+                    // coordinates' own liveness flag (O(1), no hierarchy walk);
+                    // measuring detached coordinates is exactly what
+                    // localPositionOf cannot do safely (it falls back to
+                    // findCommonAncestor and throws for nodes detached in
+                    // different chains — an uncaught crash inside a
+                    // composition-controlled coroutine). Bail out instead: the next
+                    // fraction emission (~150 ms later) re-runs the full gate
+                    // against whatever is attached then, so a bail costs at most
+                    // one scroll step, never the highlight overall.
+                    if (!container.isAttached || !bubble.isAttached) return@LaunchedEffect
                     // Bubble top in CONTENT space: both refs measure inside the
                     // scroll's coordinate space, so localPositionOf returns the
                     // position in the scrollable content — the scroll offset is

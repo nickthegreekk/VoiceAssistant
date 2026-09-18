@@ -847,6 +847,31 @@ fun AssistantService.playResponse(persona: Persona, file: File? = null, deviceTe
 // the entire sequence is stale and must not continue.
 
 // Stage-2 streaming TTS: sequential chunked synthesis + gapless playback.
+// Transient chunk files (`tts_chunk_<generation>_<chunkIdx>.wav`) are MediaPlayer data
+// sources for ONE playback: each sequence writes its own set, nothing deleted them, and
+// over a long session they silently accumulated in cacheDir (a ~12s 22kHz mono WAV is
+// ~500KB, so a chatty day of chunked replies is real space). Android only evicts cache
+// files under system-wide storage pressure, so "eventually" was effectively "never".
+// The sweep deletes files of strictly OLDER generations only: a live player always
+// belongs to the current generation (stopAudio() bumps the generation BEFORE releasing
+// the player, and every generation-mismatch path releases and gives up), so anything
+// older is provably unread; the CURRENT generation's files may still be open in the
+// player mid-sequence or mid-write by the synthesis loop, and a later turn's sweep
+// reclaims them. After every completed sequence, at most one generation's files exist.
+private fun AssistantService.sweepCompletedTtsChunkFiles(beforeGeneration: Long) {
+    val files = cacheDir.listFiles() ?: return
+    for (file in files) {
+        // tts_chunk_<generation>_<chunkIdx>.wav
+        if (!file.name.startsWith("tts_chunk_") || !file.name.endsWith(".wav")) continue
+        val generation = file.name.removePrefix("tts_chunk_")
+            .substringBefore('_').toLongOrNull() ?: continue
+        if (generation < beforeGeneration) runCatching { file.delete() }
+    }
+}
+
+// Stage-2 streaming TTS: sequential chunked synthesis + gapless playback.
+// Returns the list of chunk file paths (for debugging) - playback is managed
+// internally. SPEAKING spans the full sequence.
 // Returns the list of chunk file paths (for debugging) - playback is managed
 // internally. SPEAKING spans the full sequence.
 internal suspend fun AssistantService.playChunkedTtsGateway(
@@ -973,6 +998,10 @@ internal suspend fun AssistantService.playChunkedTtsGateway(
         _state.value = AssistantState.IDLE
         updateNotification("Ready to help")
     }
+
+    // Housekeeping (see sweepCompletedTtsChunkFiles): this sequence completed, so its
+    // own player is done — every generation older than this one is unreferenced now.
+    sweepCompletedTtsChunkFiles(myTtsGeneration)
     return chunkFiles
 }
 
