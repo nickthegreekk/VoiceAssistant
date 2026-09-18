@@ -106,6 +106,10 @@ class H3StaleStreamUnwindInstrumentedTest {
             instrumentation.runOnMainSync {
                 service._messages.value = messagesBefore
                 service.currentPersonaName = personaNameBefore
+                // L5: the history owner follows the restored selection — persistSettings() below
+                // saves the (owner, messages) pair, so leaving the owner on the probe persona's
+                // name would file this test's transcript under the probe key.
+                service.messagesOwnerName = personaNameBefore
                 // `sendTextMessageToServer` persists settings, so removing the stub entry from
                 // memory is not enough — write the original list back to disk too.
                 service._ollamaBaseUrls.value = ollamaBasesBefore
@@ -268,6 +272,10 @@ class H3StaleStreamUnwindInstrumentedTest {
         mainSync {
             service._ollamaBaseUrls.value = listOf(ServerConfig(PROBE_SERVER_NAME, server.url))
             service.currentPersonaName = PROBE_PERSONA.name
+            // L5: the history owner moves with the selection, exactly as switchPersona does —
+            // this test's probe turns are saved under the probe persona's key (which tearDown
+            // deletes), not under whichever persona the service bound with.
+            service.messagesOwnerName = PROBE_PERSONA.name
             service._messages.value = emptyList()
             service._streamingText.value = null
             service.streamedPlaceholderIndex = null

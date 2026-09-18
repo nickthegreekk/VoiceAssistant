@@ -320,6 +320,38 @@ class AssistantService : Service() {
 
     internal var currentPersonaName: String? = null
 
+    // L5: persona history lives in SharedPreferences as one JSON blob per persona, and both
+    // switchPersona and clearMessages used to read/write it ON THE MAIN THREAD — a persona tap
+    // serialized the outgoing history, wrote it, and parsed the incoming one inline. That IO now
+    // runs on Dispatchers.IO, so a swap is no longer instantaneous and needs bookkeeping:
+    //  - messagesOwnerName: the persona whose history `_messages` currently holds. It equals
+    //    currentPersonaName in every settled state; the two differ only while a swap's load is
+    //    still in flight (the name has already moved to the incoming persona while the outgoing
+    //    messages are still on screen). persistSettings saves THIS pair — never "live name +
+    //    live messages" — so a save from onTaskRemoved/onDestroy/the settings UI can never file
+    //    one persona's messages under another persona's name. internal (like currentPersonaName)
+    //    so tests can stage that mid-swap state.
+    //  - personaHistoryLoadSeq: bumped when a swap/clear starts; a load only publishes if it is
+    //    still the newest one, so fast A->B->A taps cannot show an older persona's messages.
+    //  - historyIoJob: the running history operation. The next one joins it, so a clear and a
+    //    swap (or two swaps) can never interleave their write/read — the old synchronous
+    //    save-then-load ordering is preserved, just off Main.
+    // All three are written only from Main — a Main-thread entry point or a job body that
+    // resumes on Main — like currentPersonaName. The debounced persistSettings() reads
+    // messagesOwnerName from Dispatchers.IO, exactly the (benign, best-effort) cross-thread
+    // read it has always done for currentPersonaName.
+    internal var messagesOwnerName: String? = null
+    private var personaHistoryLoadSeq: Long = 0
+    private var historyIoJob: Job? = null
+
+    // L5: awaits the running persona-history operation (swap/clear). Persona-history IO is
+    // asynchronous now, so anything that needs a SETTLED swap — an instrumented test asserting
+    // that the outgoing history was saved, or that the incoming one was loaded — joins here
+    // instead of racing the IO. No-op when no operation is in flight.
+    internal suspend fun awaitPersonaHistoryIo() {
+        historyIoJob?.join()
+    }
+
     // A2/B1: monotonically increasing chat request sequence. Bumped every time a new
     // chat request starts; a response may only be APPLIED if it belongs to the most
     // recent request (isChatRequestCurrent) AND the active persona is unchanged
@@ -1249,7 +1281,14 @@ class AssistantService : Service() {
         settingsManager.saveCloudApis(_cloudApis.value)
         settingsManager.saveCustomCloudApis(_customCloudApis.value)
         settingsManager.savePersonas(_personas.value)
-        currentPersonaName?.let { name ->
+        // L5: save the pair that actually belongs together. `currentPersonaName` and
+        // `_messages` disagree only while a persona-history swap is in flight (the name has
+        // already moved to the incoming persona while the outgoing messages are still on
+        // screen), so the recorded owner of the visible messages wins; when no owner was ever
+        // recorded the live name is the right key (the unchanged pre-L5 behavior). Keying off
+        // the live name here would file one persona's messages under another's name — e.g. a
+        // save from onTaskRemoved/onDestroy that lands mid-swap.
+        (messagesOwnerName ?: currentPersonaName)?.let { name ->
             settingsManager.savePersonaMessages(name, _messages.value)
         }
         settingsManager.saveOllamaBases(_ollamaBaseUrls.value)
@@ -1482,8 +1521,32 @@ class AssistantService : Service() {
                 // at it — same in-memory conversation, just a new identity, so no
                 // reload and no visible switch.
                 settingsManager.migratePersonaHistory(oldName, persona.name)
+                // L5: the migration itself stays synchronous — anything that saves right after
+                // this rename (persistSettings below) must already see the new key. But a
+                // persona-history swap that was already in flight may still be writing this
+                // persona's outgoing history, and that write would recreate the very entry the
+                // migration just removed. Re-running the migration inside the history-IO lane,
+                // after that write, closes the window (safe and idempotent: it moves at most
+                // the same snapshot again, and no-ops when the old entry is gone).
+                historyIoJob?.let { inFlight ->
+                    val renamedFrom = oldName
+                    val renamedTo = persona.name
+                    historyIoJob = serviceScope.launch {
+                        inFlight.join()
+                        withContext(Dispatchers.IO) {
+                            settingsManager.migratePersonaHistory(renamedFrom, renamedTo)
+                        }
+                    }
+                }
                 if (currentPersonaName == oldName) {
                     currentPersonaName = persona.name
+                }
+                // L5: the in-memory conversation keeps belonging to this persona — it was just
+                // migrated to the new name-keyed entry — so the recorded owner must move with
+                // it, or the next persistSettings would save it back under the old (now
+                // orphaned) key and undo the migration.
+                if (messagesOwnerName == oldName) {
+                    messagesOwnerName = persona.name
                 }
             }
             current[index] = persona
@@ -1524,16 +1587,21 @@ class AssistantService : Service() {
                 val fallback = current.firstOrNull()
                 if (fallback != null) {
                     // Detach first: switchPersona saves the outgoing persona's in-memory
-                    // history under currentPersonaName — with the removed persona still
-                    // selected that would write it to the deleted persona's orphaned key.
-                    // Detached, that save is skipped: the deleted conversation dies with
-                    // its persona, and the fallback loads its OWN saved history.
+                    // history under its recorded owner, which while the removed persona is
+                    // still selected IS the deleted persona — the save would write it to the
+                    // deleted persona's orphaned key. Detached (name null, owner still the
+                    // removed persona, L5), that save is skipped: the deleted conversation dies
+                    // with its persona, and the fallback loads its OWN saved history.
                     currentPersonaName = null
                     switchPersona(fallback)
                 } else {
                     // Removed the last persona: the documented no-selection state.
                     // The UI re-seeds the default personas on its next bind.
                     currentPersonaName = null
+                    // L5: nothing is on screen for a persona any more, so the recorded owner
+                    // goes with the name (persistSettings would otherwise keep keying the
+                    // history saves off the deleted persona's name).
+                    messagesOwnerName = null
                     _messages.value = emptyList()
                 }
             }
@@ -1543,7 +1611,19 @@ class AssistantService : Service() {
             // behind on disk. (Rename is handled by migratePersonaHistory in
             // updatePersona and MIGRATES rather than deletes, so this only ever fires
             // on true removal. Removing a name with no saved entry is a no-op.)
-            settingsManager.deletePersonaHistory(removedName)
+            // L5: the delete runs in the persona-history IO lane (joining the swap/clear above
+            // first), because the swap it just started — and the persistSettings() a few lines
+            // below, which still keys off the removed persona's recorded owner — may write that
+            // history entry; ordering the delete last guarantees nothing resurrects it
+            // afterwards.
+            val deletedHistoryName = removedName
+            val previousHistoryIo = historyIoJob
+            historyIoJob = serviceScope.launch {
+                previousHistoryIo?.join()
+                withContext(Dispatchers.IO) {
+                    settingsManager.deletePersonaHistory(deletedHistoryName)
+                }
+            }
             // Artwork cleanup rides along with the history cleanup above: the persona's
             // app-owned icon/background JPEGs are unreachable once it is gone, so they
             // would sit in filesDir forever. Driven off the captured Persona object
@@ -1995,7 +2075,10 @@ class AssistantService : Service() {
         // isChatContextCurrent discard it at each apply-gate).
         // Deliberately ordered BEFORE the outgoing-history save below: stopEverything()
         // does not touch _messages, so that save still persists exactly the conversation
-        // the user was looking at when they switched. Idle switches (the common case)
+        // the user was looking at when they switched. (L5: that save is asynchronous now —
+        // the IO runs on Dispatchers.IO — so the outgoing snapshot is still taken
+        // synchronously HERE, at the same point in the sequence; only the IO moved.)
+        // Idle switches (the common case)
         // are cheap — every teardown step self-guards: currentPlayer/currentAudioTrack/
         // recorder/outputFile/audioFocusRequest are all null and _state is already IDLE,
         // so the state+notification reset is skipped entirely (tts.stop() is still called
@@ -2005,13 +2088,44 @@ class AssistantService : Service() {
         // only the two counter bumps (ttsGeneration, chatRequestSeq) — the same bumps the
         // Stop button makes, and harmless with no in-flight work for them to invalidate.
         stopEverything()
-        // Save current persona history before switching
-        currentPersonaName?.let { oldName ->
-            settingsManager.savePersonaMessages(oldName, _messages.value)
-        }
-        
+        // L5: capture the outgoing conversation and the incoming load in ONE asynchronous
+        // operation, off Main:
+        //  - the snapshot is taken synchronously here, before `currentPersonaName` moves, so it
+        //    is still exactly the conversation the user was looking at;
+        //  - outgoingOwner is the persona those visible messages BELONG to. It matches
+        //    outgoingName in every settled state; when it does not (a previous swap's load never
+        //    published, so what is on screen is somebody else's conversation), the outgoing
+        //    write is skipped — that persona's stored history is still the authoritative one
+        //    and overwriting it with a foreign list would corrupt it;
+        //  - the write is chained BEFORE the incoming read inside the same job, and each job
+        //    joins the previous one, so the original save-then-load ordering is preserved;
+        //  - the load only publishes when it is still the newest swap (swapSeq), so a fast
+        //    A->B->A tap sequence cannot end up showing the older persona's messages.
+        val outgoingName = currentPersonaName
+        val outgoingOwner = messagesOwnerName ?: outgoingName
+        val outgoingHistory = _messages.value
+        val outgoingLoaded = outgoingOwner != null && outgoingOwner == outgoingName
+        // Non-null write target: the job below must not need a safe call (which would read
+        // as "the save is optional") to prove what outgoingLoaded already proved.
+        val outgoingSaveTarget = outgoingOwner?.takeIf { outgoingLoaded }
+        val swapSeq = ++personaHistoryLoadSeq
+        val previousHistoryIo = historyIoJob
         currentPersonaName = persona.name
-        _messages.value = settingsManager.getPersonaMessages(persona.name) ?: emptyList()
+        historyIoJob = serviceScope.launch {
+            previousHistoryIo?.join()
+            if (outgoingSaveTarget != null) {
+                withContext(Dispatchers.IO) {
+                    settingsManager.savePersonaMessages(outgoingSaveTarget, outgoingHistory)
+                }
+            }
+            val restored = withContext(Dispatchers.IO) {
+                settingsManager.getPersonaMessages(persona.name)
+            }
+            if (swapSeq == personaHistoryLoadSeq) {
+                _messages.value = restored ?: emptyList()
+                messagesOwnerName = persona.name
+            }
+        }
         // Just activated a persona mid-session — if it voices through bundled eSpeak,
         // start building that engine now on Dispatchers.IO instead of paying lazy init
         // on Main at the first playback. Idempotent (no-op if already warmed/built).
@@ -2036,8 +2150,22 @@ class AssistantService : Service() {
         // in-flight apply-gate discards. Ordered before the empty-list write below, which
         // is the only thing that touches _messages here.
         stopEverything()
+        // L5: the empty-list write is what must be observed synchronously (the tests and the
+        // UI both read it right after), but the persisted history is IO — so publish the empty
+        // list here and clear the owner (nothing on screen belongs to a persona any more),
+        // then write the empty history to disk off Main. saveSettings() below then saves the
+        // live name + the empty list it just published, i.e. the same pair as before.
+        personaHistoryLoadSeq++
         _messages.value = emptyList()
-        currentPersonaName?.let { settingsManager.savePersonaMessages(it, emptyList()) }
+        messagesOwnerName = null
+        val clearedName = currentPersonaName
+        val previousHistoryIo = historyIoJob
+        historyIoJob = serviceScope.launch {
+            previousHistoryIo?.join()
+            withContext(Dispatchers.IO) {
+                clearedName?.let { settingsManager.savePersonaMessages(it, emptyList()) }
+            }
+        }
         saveSettings() 
     }
     fun updateMessage(index: Int, newText: String) {

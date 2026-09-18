@@ -57,6 +57,7 @@ class AssistantReplayRoutingInstrumentedTest {
     private var connection: ServiceConnection? = null
     private var ttsStub: StubTtsServer? = null
     private var chunkFileWritten: File? = null
+    private var serverBasesBefore: List<ServerConfig> = emptyList()
     private var silencedWasToggled = false
 
     @Before
@@ -82,6 +83,7 @@ class AssistantReplayRoutingInstrumentedTest {
         )
         assertTrue("AssistantService did not bind within 30s", bound.await(30, TimeUnit.SECONDS))
         service = boundService!!
+        serverBasesBefore = service._serverBases.value
     }
 
     @After
@@ -90,6 +92,17 @@ class AssistantReplayRoutingInstrumentedTest {
         // release() drops the MediaPlayer's fd, so deleting the chunk afterwards is safe.
         runCatching {
             InstrumentationRegistry.getInstrumentation().runOnMainSync { service.stopAudio() }
+        }
+        runCatching {
+            InstrumentationRegistry.getInstrumentation().runOnMainSync {
+                // The stub gateway was registered in memory and already reached disk through
+                // the debounced save the replay's synthesis path triggers. Restoring memory
+                // alone would leak a dead 127.0.0.1 entry into the real Servers list whenever
+                // this unbind does not tear the service down (the onDestroy flush then never
+                // runs), so the original list goes back to disk directly as well.
+                service._serverBases.value = serverBasesBefore
+                service.settingsManager.saveServerBases(serverBasesBefore)
+            }
         }
         chunkFileWritten?.let { runCatching { it.delete() } }
         if (silencedWasToggled) runCatching { service.toggleSilence() }
@@ -122,6 +135,15 @@ class AssistantReplayRoutingInstrumentedTest {
         if (service.silenced.value) {
             service.toggleSilence()
             silencedWasToggled = true
+        }
+        // The M1 resolver refuses to synthesize for a Backend URL that maps to no configured
+        // Servers entry (the credentials could not be resolved), so the stub must be
+        // registered as the persona's gateway before the replay can reach it. tearDown puts
+        // the original list back (in memory AND on disk — see the note there).
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            service._serverBases.value =
+                serverBasesBefore.filterNot { it.name == PROBE_GATEWAY_SERVER } +
+                    ServerConfig(name = PROBE_GATEWAY_SERVER, url = stub.baseUrl)
         }
 
         val generationBefore = service.ttsGeneration
@@ -173,6 +195,11 @@ class AssistantReplayRoutingInstrumentedTest {
             Thread.sleep(50)
         }
         return null
+    }
+
+    private companion object {
+        /** Name the stub TTS gateway is registered under in Servers for this class. */
+        const val PROBE_GATEWAY_SERVER = "ReplayRoutingProbeGateway"
     }
 }
 

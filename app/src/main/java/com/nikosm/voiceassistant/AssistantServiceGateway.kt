@@ -34,8 +34,26 @@ import okhttp3.RequestBody.Companion.asRequestBody
  * languages, undetermined text, and short/noise-only samples fall through to
  * the caller's default.
  */
-private fun detectScriptLanguage(text: String): String? {
-    val sample = text.take(200) // enough to judge dominant script
+// internal, not private: the pure script classification is what M3/L1 fix, and it has no
+// Android surface, so the JVM unit test (ScriptLanguageDetectionTest) pins it directly
+// instead of going through the suspend wrapper's "English" fallback.
+internal fun detectScriptLanguage(text: String): String? {
+    // L1: examine the WHOLE text, not a leading window. Sampling only the first 200
+    // characters let a Latin-script preamble ("Here is the translation: …") crowd
+    // out the foreign-language content that followed it, so the reply was
+    // misclassified as English and spoken by the wrong voice. The cap never
+    // filtered anything: Latin characters contribute nothing to `scriptCounts`
+    // below (they map to null), so truncating could only ever lose evidence.
+    val sample = text
+    // M3: the mere PRESENCE of kana means Japanese, decided before any counting.
+    // Every kanji in Japanese text is in the Han range counted as "Chinese" below,
+    // and ordinary Japanese is frequently kanji-majority, so a raw character count
+    // let "Chinese" outvote the kana and routed Japanese replies to a Mandarin
+    // voice. Hiragana/katakana are exclusive to Japanese, so one kana is decisive
+    // regardless of the Han/kana ratio. (Kanji-only Japanese text has no kana to
+    // key off and is still reported as Chinese — a known limit of a zero-dependency
+    // script heuristic; detecting it would need real language identification.)
+    if (sample.any { it in '\u3040'..'\u30FF' }) return "Japanese"
     val scriptCounts = mutableMapOf<String, Int>()
     for (ch in sample) {
         val lang = when {
@@ -44,7 +62,8 @@ private fun detectScriptLanguage(text: String): String? {
             ch in '\u0590'..'\u05FF' -> "Hebrew"
             ch in '\u0600'..'\u06FF' -> "Arabic"
             ch in '\u4E00'..'\u9FFF' -> "Chinese"
-            ch in '\u3040'..'\u30FF' -> "Japanese"
+            // M3: no Japanese branch here — kana is settled by the short-circuit
+            // above, so Japanese can never reach this dominance count.
             ch in '\uAC00'..'\uD7AF' -> "Korean"
             ch in '\u0900'..'\u097F' -> "Hindi" // Devanagari — Hindi is a LANG_CONFIG language; omitting it would fall through to the English default (the original bug class)
             else -> null
@@ -64,7 +83,7 @@ private fun detectScriptLanguage(text: String): String? {
  *    too-short text) -> "English" (per spec).
  *  - detection failure (exception) -> "English".
  * The old "unmapped BCP-47 passthrough" branch is gone by construction: the
- * script heuristic only ever returns one of the seven supported non-Latin
+ * script heuristic only ever returns one of the eight supported non-Latin
  * language names, so no unsupported code can reach the gateway from here.
  */
 internal suspend fun detectGatewayResponseLanguage(text: String): String {

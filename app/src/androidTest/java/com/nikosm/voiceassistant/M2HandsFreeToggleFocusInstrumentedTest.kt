@@ -143,6 +143,10 @@ class M2HandsFreeToggleFocusInstrumentedTest {
             instrumentation.runOnMainSync {
                 service._messages.value = messagesBefore
                 service.currentPersonaName = personaNameBefore
+                // L5: the history owner follows the restored selection — persistSettings() below
+                // saves the (owner, messages) pair, so leaving the owner on the probe persona's
+                // name would file this test's transcript under the probe key.
+                service.messagesOwnerName = personaNameBefore
                 service._serverBases.value = serverBasesBefore
                 service._customCloudApis.value = customCloudApisBefore
                 service._serverStatus.value = serverStatusBefore
@@ -390,6 +394,10 @@ class M2HandsFreeToggleFocusInstrumentedTest {
     private fun activate(persona: Persona) {
         mainSync {
             service.currentPersonaName = persona.name
+            // L5: the history owner moves with the selection, exactly as switchPersona does —
+            // this test's probe turns are saved under the probe persona's key (which tearDown
+            // deletes), not under whichever persona the service bound with.
+            service.messagesOwnerName = persona.name
             service._messages.value = emptyList()
         }
     }

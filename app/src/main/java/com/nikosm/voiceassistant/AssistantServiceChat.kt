@@ -57,11 +57,28 @@ private val plaintextExtensions = setOf(
     "properties", "csv", "tsv", "ts", "tsx", "jsx", "dockerfile", "makefile", "gitignore"
 )
 
+// L4: the extension-vs-basename decision behind isPlainTextAttachment, split out (and
+// internal) because it is the part that was wrong and it needs no Android surface — a Uri
+// cannot be built in a JVM unit test, a file name can. PlainTextAttachmentNameTest pins
+// this directly.
+internal fun isPlainTextFileName(fileName: String): Boolean {
+    val name = fileName.lowercase()
+    // L4: a name WITH a dot is matched by its extension (`notes.md` -> "md"); a name
+    // WITHOUT one is matched as a whole basename (`Dockerfile`, `Makefile`, and the
+    // dot-prefixed `.gitignore` via its "gitignore" entry). plaintextExtensions holds
+    // those extension-less entries literally, but the old lookup required a literal dot
+    // in the filename, so `substringAfterLast(".", "")` returned "" for "Dockerfile"
+    // and a real Dockerfile/Makefile was rejected as an unsupported attachment.
+    val dot = name.lastIndexOf('.')
+    val candidate = if (dot >= 0) name.substring(dot + 1) else name
+    return candidate in plaintextExtensions
+}
+
 internal fun AssistantService.isPlainTextAttachment(uri: Uri): Boolean {
     val mime = contentResolver.getType(uri)
     if (mime != null && mime in plaintextMimeTypes) return true
-    val ext = uri.path?.substringAfterLast(".", "")?.lowercase() ?: ""
-    return ext in plaintextExtensions
+    val name = uri.path?.substringAfterLast('/') ?: return false
+    return isPlainTextFileName(name)
 }
 
 // Reads an attachment as strict UTF-8 text, capped at MAX_ATTACHMENT_BYTES. Fails
@@ -348,7 +365,6 @@ internal fun AssistantService.sendAudioToServer(file: File, currentPersona: Pers
                     }
                 }.build()
 
-                val statusMap = _serverStatus.value
                 val allGateways = _serverBases.value
 
                 // S2: data (audio/transcripts) is only sent to the persona's configured
@@ -706,7 +722,6 @@ internal fun AssistantService.sendTextMessageToServer(inputText: String, current
                 }
                 val requestBody = requestBuilder.build()
 
-                val statusMap = _serverStatus.value
                 val allGateways = _serverBases.value
 
                 // S2: data (prompts/attachments) is only sent to the persona's configured
@@ -993,95 +1008,111 @@ internal fun AssistantService.fetchModels(config: ServerConfig? = null) {
     incrementModelFetchCount()
 
     serviceScope.launch(Dispatchers.IO) {
-        // B3 (chat) fix: do NOT snapshot _serverStatus/_fetchedLocalModels at coroutine
-        // start and write them back wholesale at the end — two overlapping fetchModels
-        // calls for different servers would then let the second-finishing call clobber
-        // the first's results with its own stale snapshot. Instead, each iteration
-        // collects results for JUST its own targets, and the completion block updates
-        // only those specific entries in the LIVE state (read-modify-write), so a
-        // concurrent call for another server keeps its own updates untouched.
-        val perTargetResults = linkedMapOf<String, Pair<String, List<String>?>>() // url -> (status, models or null)
+        // L3: the in-flight counter was incremented above, so EVERY exit from this
+        // coroutine must release it. The completion block at the end of the body can throw
+        // (and a cancellation skips it entirely), which used to leave _isLoadingModels stuck
+        // true — the spinner would spin for the rest of the session. Mirroring
+        // fetchCloudModels, the whole body is wrapped in try/finally with a single
+        // Main-confined decrement point. No catch clause is needed here: the per-target loop
+        // already contains its own failures, so nothing else in this body is expected to
+        // throw, and swallowing surprises silently would hide them.
+        try {
 
-        for (target in targets) {
-            perTargetResults[target.url] = "Could not connect to server" to null
-            var base = target.url.trim().removeSuffix("/")
-            if (base.endsWith("/v1")) base = base.removeSuffix("/v1")
-            if (base.endsWith("/api")) base = base.removeSuffix("/api")
-
-            val endpoints = listOf("$base/api/tags", "$base/v1/models")
-            var success = false
-            var lastErrorMessage = "Could not connect to server"
-
-            for (url in endpoints) {
-                if (success) break
-                try {
-                    val requestBuilder = Request.Builder().url(url)
-                    if (!target.username.isNullOrBlank()) {
-                        requestBuilder.header("Authorization", Credentials.basic(target.username, target.password ?: ""))
-                    }
-
-                    fastClient.newCall(requestBuilder.build()).execute().use { response ->
-                        if (response.isSuccessful) {
-                            val body = response.body.string()
-                            val json = JSONObject(body)
-                            val serverModels = mutableListOf<String>()
-
-                            if (url.endsWith("/api/tags")) {
-                                val modelsArray = json.optJSONArray("models")
-                                if (modelsArray != null) {
-                                    for (i in 0 until modelsArray.length()) {
-                                        serverModels.add(modelsArray.getJSONObject(i).getString("name"))
+            // B3 (chat) fix: do NOT snapshot _serverStatus/_fetchedLocalModels at coroutine
+            // start and write them back wholesale at the end — two overlapping fetchModels
+            // calls for different servers would then let the second-finishing call clobber
+            // the first's results with its own stale snapshot. Instead, each iteration
+            // collects results for JUST its own targets, and the completion block updates
+            // only those specific entries in the LIVE state (read-modify-write), so a
+            // concurrent call for another server keeps its own updates untouched.
+            val perTargetResults = linkedMapOf<String, Pair<String, List<String>?>>() // url -> (status, models or null)
+    
+            for (target in targets) {
+                perTargetResults[target.url] = "Could not connect to server" to null
+                var base = target.url.trim().removeSuffix("/")
+                if (base.endsWith("/v1")) base = base.removeSuffix("/v1")
+                if (base.endsWith("/api")) base = base.removeSuffix("/api")
+    
+                val endpoints = listOf("$base/api/tags", "$base/v1/models")
+                var success = false
+                var lastErrorMessage = "Could not connect to server"
+    
+                for (url in endpoints) {
+                    if (success) break
+                    try {
+                        val requestBuilder = Request.Builder().url(url)
+                        if (!target.username.isNullOrBlank()) {
+                            requestBuilder.header("Authorization", Credentials.basic(target.username, target.password ?: ""))
+                        }
+    
+                        fastClient.newCall(requestBuilder.build()).execute().use { response ->
+                            if (response.isSuccessful) {
+                                val body = response.body.string()
+                                val json = JSONObject(body)
+                                val serverModels = mutableListOf<String>()
+    
+                                if (url.endsWith("/api/tags")) {
+                                    val modelsArray = json.optJSONArray("models")
+                                    if (modelsArray != null) {
+                                        for (i in 0 until modelsArray.length()) {
+                                            serverModels.add(modelsArray.getJSONObject(i).getString("name"))
+                                        }
+                                        success = true
                                     }
-                                    success = true
+                                } else {
+                                    val dataArray = json.optJSONArray("data")
+                                    if (dataArray != null) {
+                                        for (i in 0 until dataArray.length()) {
+                                            serverModels.add(dataArray.getJSONObject(i).getString("id"))
+                                        }
+                                        success = true
+                                    }
+                                }
+                                if (success) {
+                                    perTargetResults[target.url] = "Online" to serverModels.map { "[${target.name}] $it" }
                                 }
                             } else {
-                                val dataArray = json.optJSONArray("data")
-                                if (dataArray != null) {
-                                    for (i in 0 until dataArray.length()) {
-                                        serverModels.add(dataArray.getJSONObject(i).getString("id"))
-                                    }
-                                    success = true
+                                lastErrorMessage = when (response.code) {
+                                    401 -> "Unauthorized"
+                                    else -> "Server error: ${response.code}"
                                 }
                             }
-                            if (success) {
-                                perTargetResults[target.url] = "Online" to serverModels.map { "[${target.name}] $it" }
-                            }
-                        } else {
-                            lastErrorMessage = when (response.code) {
-                                401 -> "Unauthorized"
-                                else -> "Server error: ${response.code}"
-                            }
                         }
+                    } catch (e: Exception) {
+                        lastErrorMessage = "failed: offline"
                     }
-                } catch (e: Exception) {
-                    lastErrorMessage = "failed: offline"
+                }
+                if (!success) {
+                    perTargetResults[target.url] = lastErrorMessage to null
                 }
             }
-            if (!success) {
-                perTargetResults[target.url] = lastErrorMessage to null
-            }
-        }
-
-        withContext(Dispatchers.Main) {
-            // B3: apply only our targets' entries into the LIVE maps, never a stale
-            // full-map snapshot, so an overlapping fetch for a different server's
-            // results are preserved.
-            var localModelsMap = _fetchedLocalModels.value.toMutableMap()
-            for ((url, result) in perTargetResults) {
-                val (status, models) = result
-                val targetName = targets.firstOrNull { it.url == url }?.name ?: continue
-                if (models != null) {
-                    localModelsMap[targetName] = models
-                } else {
-                    localModelsMap.remove(targetName)
+    
+            withContext(Dispatchers.Main) {
+                // B3: apply only our targets' entries into the LIVE maps, never a stale
+                // full-map snapshot, so an overlapping fetch for a different server's
+                // results are preserved.
+                var localModelsMap = _fetchedLocalModels.value.toMutableMap()
+                for ((url, result) in perTargetResults) {
+                    val (status, models) = result
+                    val targetName = targets.firstOrNull { it.url == url }?.name ?: continue
+                    if (models != null) {
+                        localModelsMap[targetName] = models
+                    } else {
+                        localModelsMap.remove(targetName)
+                    }
+                    var statusMap = _serverStatus.value.toMutableMap()
+                    statusMap[url] = status
+                    _serverStatus.value = statusMap
                 }
-                var statusMap = _serverStatus.value.toMutableMap()
-                statusMap[url] = status
-                _serverStatus.value = statusMap
+                _fetchedLocalModels.value = localModelsMap
+                _availableModels.value = localModelsMap.values.flatten().distinct()
             }
-            _fetchedLocalModels.value = localModelsMap
-            _availableModels.value = localModelsMap.values.flatten().distinct()
-            decrementModelFetchCount()
+        } finally {
+            // L3/M1: the single decrement point for every exit of this coroutine — normal
+            // completion, a throw, or a cancellation. Unlike fetchCloudModels this one is
+            // reached with the counter Main-confined by construction (increment on Main,
+            // decrement here on Main).
+            withContext(Dispatchers.Main) { decrementModelFetchCount() }
         }
     }
 }
@@ -1744,35 +1775,89 @@ internal fun AssistantService.isKnownThinkingModel(modelName: String): Boolean {
         name.contains("v4-pro")
 }
 
-private fun AssistantService.calculateCost(persona: Persona, promptTokens: Int, completionTokens: Int): Double {
-    val model = persona.model.lowercase()
-    val pricingMap = settingsManager.getModelPricing()
-    
-    val actualModelId = persona.model.substringAfter("] ").lowercase().trim()
-    val provider = if (persona.model.startsWith("[")) persona.model.substring(1, persona.model.indexOf("]")).lowercase().trim() else ""
-    
+// L6: the OpenRouter pricing table is keyed by the provider's own model ids
+// ("anthropic/claude-3-5-sonnet-20241022"), while the active persona's model label is the
+// app's display form ("[Anthropic] claude-3-5-sonnet-latest"). Matching the two is a
+// keyword heuristic and stays one (the cost is display/telemetry only), but it used to be
+// non-deterministic: `maxByOrNull` keeps the FIRST maximum, so whenever two entries scored
+// the same — "openai/gpt-4o" and "openai/gpt-4o-mini" both match the bare label "gpt-4o"
+// on the tokens "gpt" and "4o" — the winner was decided by map iteration order, i.e. one
+// model's prices could be charged to another. It also threw on a hand-typed label with an
+// unclosed bracket ("[foo"), inside the response path. Extracted (internal, no Android
+// surface) so PricingMatchTest can pin the ordering down with a synthetic table.
+internal fun matchPricingEntry(
+    pricingMap: Map<String, ModelPricing>,
+    modelLabel: String
+): Pair<String, ModelPricing>? {
+    val actualModelId = modelLabel.substringAfter("] ").lowercase().trim()
+    val closingBracket = modelLabel.indexOf(']')
+    val provider = if (modelLabel.startsWith("[") && closingBracket > 1) {
+        modelLabel.substring(1, closingBracket).lowercase().trim()
+    } else ""
+
     val ignored = setOf("latest", "chat", "v1", "v2", "v3", "online")
     val modelParts = actualModelId.split("-", ".", "_").filter { it.isNotBlank() && it !in ignored }
     val vendorParts = provider.split("-", ".", "_").filter { it.isNotBlank() && it !in ignored }
-    val allParts = (modelParts + vendorParts).map { it.replace("-", "").replace("_", "").replace(".", "") }
+    val normalize = { part: String -> part.replace("-", "").replace("_", "").replace(".", "") }
+    val modelTokens = modelParts.map(normalize).filter { it.isNotBlank() }
+    val allParts = (modelTokens + vendorParts.map(normalize)).filter { it.isNotBlank() }
+    if (allParts.isEmpty()) return null
+
+    // "/" is deliberately kept in the normalized id: it separates the provider prefix from
+    // the model portion, which is what the specificity test below compares against.
+    val normalizedModelId = modelTokens.joinToString("")
+
+    return pricingMap.entries
+        .map { entry ->
+            val normalizedId = normalize(entry.key.lowercase())
+            PricingCandidate(
+                key = entry.key,
+                pricing = entry.value,
+                // Scoring is unchanged: how many of the label's tokens appear anywhere in
+                // the entry's id, needing at least two hits unless the label is one token.
+                score = allParts.count { normalizedId.contains(it) },
+                normalizedId = normalizedId
+            )
+        }
+        .filter { it.score >= minOf(2, allParts.size) }
+        .maxWithOrNull(
+            compareBy<PricingCandidate> { it.score }
+                // The entry that IS this model beats one that merely shares tokens: an exact
+                // match of the model portion, then an entry containing the whole label.
+                .thenBy {
+                    val entryModelId = it.normalizedId.substringAfterLast("/")
+                    when {
+                        entryModelId == normalizedModelId -> 2
+                        it.normalizedId.contains(normalizedModelId) -> 1
+                        else -> 0
+                    }
+                }
+                // Fewer qualifiers wins, so a dated/annotated entry loses to the canonical
+                // one ("openai/gpt-4o" over "openai/gpt-4o-mini-2024-07-18").
+                .thenBy { -it.normalizedId.length }
+                // Final, total tie-break — the answer no longer depends on map order.
+                .thenByDescending { it.key }
+        )
+        ?.let { it.key to it.pricing }
+}
+
+private data class PricingCandidate(
+    val key: String,
+    val pricing: ModelPricing,
+    val score: Int,
+    val normalizedId: String
+)
+
+private fun AssistantService.calculateCost(persona: Persona, promptTokens: Int, completionTokens: Int): Double {
+    val model = persona.model.lowercase()
+    val actualModelId = persona.model.substringAfter("] ").lowercase().trim()
 
     // Attempt best-effort match with OpenRouter pricing using keyword scoring
-    val matchedEntry = if (allParts.isEmpty()) null else {
-        pricingMap.entries
-            .map { entry ->
-                val idL = entry.key.lowercase()
-                val idNormalized = idL.replace("-", "").replace("_", "").replace(".", "").replace("/", "")
-                val score = allParts.count { idNormalized.contains(it) }
-                entry to score
-            }
-            .filter { it.second >= minOf(2, allParts.size) }
-            .maxByOrNull { it.second }?.first
-    }
-
+    val matchedEntry = matchPricingEntry(settingsManager.getModelPricing(), persona.model)
     if (matchedEntry != null) {
-        val pricing = matchedEntry.value
+        val (matchedKey, pricing) = matchedEntry
         val cost = (promptTokens * pricing.prompt) + (completionTokens * pricing.completion)
-        android.util.Log.d("UsageTracking", "Cost calc using dynamic rate for $actualModelId ($matchedEntry): $cost")
+        android.util.Log.d("UsageTracking", "Cost calc using dynamic rate for $actualModelId ($matchedKey=${pricing}): $cost")
         return cost
     }
 

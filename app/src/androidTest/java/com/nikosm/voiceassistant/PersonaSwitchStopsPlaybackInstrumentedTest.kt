@@ -26,6 +26,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.concurrent.thread
+import kotlinx.coroutines.runBlocking
 
 /**
  * Pins the "a persona switch / clear-chat must stop the outgoing turn" contract:
@@ -72,7 +73,9 @@ class PersonaSwitchStopsPlaybackInstrumentedTest {
     private lateinit var service: AssistantService
     private var connection: ServiceConnection? = null
     private var personaNameBefore: String? = null
+    private var messagesOwnerBefore: String? = null
     private var messagesBefore: List<ChatMessage> = emptyList()
+    private var serverBasesBefore: List<ServerConfig> = emptyList()
     private var silencedWasToggled = false
 
     @Before
@@ -99,7 +102,9 @@ class PersonaSwitchStopsPlaybackInstrumentedTest {
         assertTrue("AssistantService did not bind within 30s", bound.await(30, TimeUnit.SECONDS))
         service = boundService!!
         personaNameBefore = service.currentPersonaName
+        messagesOwnerBefore = service.messagesOwnerName
         messagesBefore = service._messages.value
+        serverBasesBefore = service._serverBases.value
         // Known baseline: the probe personas start with no stored history, so "the incoming
         // persona's list loaded" is a real observation rather than whatever a previous run
         // (or a previous test in this class) left behind.
@@ -118,9 +123,29 @@ class PersonaSwitchStopsPlaybackInstrumentedTest {
         runCatching {
             InstrumentationRegistry.getInstrumentation().runOnMainSync { service.stopEverything() }
         }
+        // L5: persona-history reads/writes run on a background lane now, so a write from the
+        // test's last gesture can still be in flight. Let it land before the probe entries are
+        // deleted below — otherwise that write would recreate an entry after the cleanup and
+        // leak into whichever test binds the service next.
+        runCatching { runBlocking { service.awaitPersonaHistoryIo() } }
         runCatching {
             service._messages.value = messagesBefore
             service.currentPersonaName = personaNameBefore
+            // The visible list and its recorded owner must move together: persistSettings
+            // saves under the owner, so restoring one without the other would file whichever
+            // conversation is on screen under the wrong persona.
+            service.messagesOwnerName = messagesOwnerBefore
+        }
+        runCatching {
+            InstrumentationRegistry.getInstrumentation().runOnMainSync {
+                // The stub gateway was registered in memory and already reached disk through
+                // the debounced save that clearMessages() triggers. Restoring memory alone
+                // would leak a dead 127.0.0.1 entry into the real Servers list whenever this
+                // unbind does not tear the service down (the onDestroy flush then never runs),
+                // so the original list goes back to disk directly as well.
+                service._serverBases.value = serverBasesBefore
+                service.settingsManager.saveServerBases(serverBasesBefore)
+            }
         }
         runCatching {
             service._ttsPlaybackFraction.value = null
@@ -178,6 +203,11 @@ class PersonaSwitchStopsPlaybackInstrumentedTest {
 
             InstrumentationRegistry.getInstrumentation()
                 .runOnMainSync { service.switchPersona(INCOMING_PROBE_PERSONA) }
+            // L5: the history half of a switch (save outgoing, load incoming) is a background
+            // operation now, so it is joined here rather than assumed complete. Everything in
+            // stopEverything() — the part (a)-(c) below assert — still runs synchronously
+            // inside switchPersona; only (d), the history, depends on this join.
+            runBlocking { service.awaitPersonaHistoryIo() }
 
             // (a) audio actually stopped, synchronously: stopAudio() releases the player and
             // stopEverything() lands the state, so no waiting is needed here.
@@ -272,6 +302,13 @@ class PersonaSwitchStopsPlaybackInstrumentedTest {
         )
         StubGatewayTtsServer().use { stub ->
             setActiveConversation(OUTGOING_PROBE_PERSONA, outgoingMessages)
+            // Fixture guard: with a real stored history the "persisted history is empty"
+            // assertion below is an observation rather than the trivially-null entry the
+            // deleted-history @Before leaves behind.
+            service.settingsManager.savePersonaMessages(
+                OUTGOING_PROBE_PERSONA.name,
+                outgoingMessages
+            )
             startGatewaySequenceAndAwaitPlayback(
                 stub,
                 OUTGOING_PROBE_PERSONA.copy(backendUrl = stub.url)
@@ -280,6 +317,9 @@ class PersonaSwitchStopsPlaybackInstrumentedTest {
 
             InstrumentationRegistry.getInstrumentation()
                 .runOnMainSync { service.clearMessages() }
+            // L5: the emptied history is written to disk off the main thread; join it so the
+            // "persisted history is gone" assertion below is a real observation.
+            runBlocking { service.awaitPersonaHistoryIo() }
 
             assertNull("clear-chat left the chunked sequence playing", service.currentPlayer)
             assertNull("clear-chat left an AudioTrack alive", service.currentAudioTrack)
@@ -341,6 +381,9 @@ class PersonaSwitchStopsPlaybackInstrumentedTest {
 
         InstrumentationRegistry.getInstrumentation()
             .runOnMainSync { service.switchPersona(INCOMING_PROBE_PERSONA) }
+        // L5: the swap's save-outgoing/load-incoming is a background operation; join it so the
+        // two history assertions below observe the settled state.
+        runBlocking { service.awaitPersonaHistoryIo() }
 
         assertEquals(
             "an idle persona switch changed the assistant state",
@@ -377,6 +420,10 @@ class PersonaSwitchStopsPlaybackInstrumentedTest {
     /** Points the service at [persona] with [messages] in memory — the pre-switch world. */
     private fun setActiveConversation(persona: Persona, messages: List<ChatMessage>) {
         service.currentPersonaName = persona.name
+        // L5: stage the pre-switch world as a SETTLED state — the visible conversation and its
+        // recorded owner belong to the same persona, which is what every production path
+        // maintains (see messagesOwnerName). tearDown restores the owner it captured at bind.
+        service.messagesOwnerName = persona.name
         service._messages.value = messages
     }
 
@@ -386,6 +433,14 @@ class PersonaSwitchStopsPlaybackInstrumentedTest {
      * sequence that is actually running rather than an assumed one.
      */
     private fun startGatewaySequenceAndAwaitPlayback(stub: StubGatewayTtsServer, persona: Persona) {
+        // M1's resolver refuses to speak for a Backend URL that maps to no configured Servers
+        // entry (the credentials could not be resolved), so the stub must be registered as the
+        // persona's gateway before the sequence can start. tearDown puts the original list back.
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            service._serverBases.value =
+                serverBasesBefore.filterNot { it.name == PROBE_GATEWAY_SERVER } +
+                    ServerConfig(name = PROBE_GATEWAY_SERVER, url = stub.url)
+        }
         service.synthesizeGatewayTextForPlayback(SINGLE_CHUNK_TEXT, persona) { /* no-audio path unused */ }
         awaitCondition(20_000, "the stub-backed chunked Gateway sequence never reached SPEAKING") {
             service.assistantState.value == AssistantState.SPEAKING && service.currentPlayer != null
@@ -582,6 +637,9 @@ class PersonaSwitchStopsPlaybackInstrumentedTest {
             kokoroVoice = "af_heart",
             targetLanguage = "English"
         )
+
+        /** Name the stub TTS gateway is registered under in Servers for this class. */
+        const val PROBE_GATEWAY_SERVER = "StopOnSwitchProbeGateway"
 
         /** The persona whose turn is in flight when the user switches away. */
         val OUTGOING_PROBE_PERSONA = probePersona("StopOnSwitchProbeOutgoing")
