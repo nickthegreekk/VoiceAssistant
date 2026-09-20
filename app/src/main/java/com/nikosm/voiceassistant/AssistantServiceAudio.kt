@@ -570,6 +570,7 @@ fun AssistantService.stopAudio(abandonFocus: Boolean = true) {
 fun AssistantService.stopEverything() {
     currentCall?.cancel()
     currentCall = null
+    _micAmplitude.value = 0f
     // Stop-semantics fix: invalidate any in-flight turn through the same generation
     // mechanism used for superseded requests. currentCall only tracks the main chat
     // request — standalone transcription/synthesis/RAG calls either don't set it or

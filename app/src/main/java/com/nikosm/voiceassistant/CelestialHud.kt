@@ -90,6 +90,7 @@ fun CelestialHudBody(
     sessionUsage: UsageInfo,
     messages: List<ChatMessage>,
     revealedChars: Int,
+    micAmplitude: Float,
     onMicClick: () -> Unit,
     onStopClick: () -> Unit,
     onTextModeToggle: () -> Unit,
@@ -102,7 +103,11 @@ fun CelestialHudBody(
     val faint = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.30f)
 
     Box(modifier = Modifier.fillMaxSize()) {
-        Starfield(personaTint = personaColor, modifier = Modifier.fillMaxSize())
+        Starfield(
+            personaTint = personaColor,
+            modifier = Modifier.fillMaxSize(),
+            micAmplitude = if (state == AssistantState.LISTENING) micAmplitude else 0f
+        )
 
         Column(modifier = Modifier.fillMaxSize()) {
             Row(
@@ -126,7 +131,8 @@ fun CelestialHudBody(
                     state = state,
                     personaColor = personaColor,
                     onTap = onMicClick,
-                    modifier = Modifier.size(250.dp)
+                    modifier = Modifier.size(250.dp),
+                    micAmplitude = if (state == AssistantState.LISTENING) micAmplitude else 0f
                 )
             }
 
@@ -182,7 +188,7 @@ private fun usageReadout(usage: UsageInfo): String =
 
 /** Seeded starfield with a slow twinkle phase - deterministic across recompositions. */
 @Composable
-private fun Starfield(personaTint: Color, modifier: Modifier) {
+private fun Starfield(personaTint: Color, modifier: Modifier, micAmplitude: Float = 0f) {
     val stars = remember {
         val rng = kotlin.random.Random(7)
         List(110) { Triple(rng.nextFloat(), rng.nextFloat(), rng.nextFloat()) } // x, y, phase
@@ -197,11 +203,17 @@ private fun Starfield(personaTint: Color, modifier: Modifier) {
         val w = size.width
         val h = size.height
         stars.forEach { (x, y, phase) ->
-            val tw = 0.22f + 0.5f * (0.5f + 0.5f * sin((phase + t) * 2f * Math.PI.toFloat()))
+            // Base twinkle
+            val baseTw = 0.22f + 0.5f * (0.5f + 0.5f * sin((phase + t) * 2f * Math.PI.toFloat()))
+            // Reaction to mic: stars get brighter and slightly larger
+            val react = micAmplitude * 0.8f
+            val tw = (baseTw + react).coerceAtMost(1.0f)
+            val radiusReact = if (micAmplitude > 0) micAmplitude * 1.5f else 0f
+            
             drawCircle(
                 color = if (phase > 0.82f) personaTint.copy(alpha = tw * 0.8f)
                 else Color.White.copy(alpha = tw),
-                radius = if (phase > 0.9f) 2.2f else 1.4f,
+                radius = (if (phase > 0.9f) 2.2f else 1.4f) + radiusReact,
                 center = Offset(x * w, y * h)
             )
         }
@@ -214,10 +226,12 @@ private fun PlanetStage(
     state: AssistantState,
     personaColor: Color,
     onTap: () -> Unit,
-    modifier: Modifier
+    modifier: Modifier,
+    micAmplitude: Float = 0f
 ) {
     val speaking = state == AssistantState.SPEAKING
     val thinking = state == AssistantState.THINKING
+    val listening = state == AssistantState.LISTENING
 
     val outerAngle by rememberInfiniteTransition(label = "orbit1").animateFloat(
         initialValue = 0f, targetValue = 360f,
@@ -229,9 +243,14 @@ private fun PlanetStage(
         animationSpec = infiniteRepeatable(tween(14000, easing = LinearEasing)),
         label = "inner"
     )
+    // Breathing speed increases with amplitude
+    val breatheDuration = if (listening && micAmplitude > 0) {
+        (3400 / (1f + micAmplitude * 2f)).toInt()
+    } else 3400
+
     val breathe by rememberInfiniteTransition(label = "breathe").animateFloat(
         initialValue = 0.96f, targetValue = 1.04f,
-        animationSpec = infiniteRepeatable(tween(3400, easing = LinearEasing), RepeatMode.Reverse),
+        animationSpec = infiniteRepeatable(tween(breatheDuration, easing = LinearEasing), RepeatMode.Reverse),
         label = "breathe"
     )
 
@@ -244,13 +263,16 @@ private fun PlanetStage(
             val outerR = min(size.width, size.height) / 2f - 4f
             val innerR = outerR * 0.78f
 
+            // Reaction to mic: expand the orbits slightly
+            val orbitReact = if (listening) micAmplitude * 15f else 0f
+
             // HUD ticks at cardinal points
             listOf(0f, 90f, 180f, 270f).forEach { deg ->
                 rotate(deg) {
                     drawLine(
                         color = personaColor.copy(alpha = 0.55f),
-                        start = Offset(c.x, c.y - outerR - 6f),
-                        end = Offset(c.x, c.y - outerR - 14f),
+                        start = Offset(c.x, c.y - outerR - 6f - orbitReact),
+                        end = Offset(c.x, c.y - outerR - 14f - orbitReact),
                         strokeWidth = 2f
                     )
                 }
@@ -259,10 +281,10 @@ private fun PlanetStage(
             // Outer dashed orbit + riding moon
             rotate(outerAngle) {
                 drawCircle(
-                    color = personaColor.copy(alpha = 0.30f), radius = outerR, center = c,
+                    color = personaColor.copy(alpha = 0.30f), radius = outerR + orbitReact, center = c,
                     style = Stroke(width = 1.5f, pathEffect = PathEffect.dashPathEffect(floatArrayOf(10f, 12f)))
                 )
-                translate(left = c.x - 4f, top = c.y - outerR - 4f) {
+                translate(left = c.x - 4f, top = c.y - outerR - 4f - orbitReact) {
                     drawCircle(color = personaColor, radius = 4f)
                     drawCircle(color = personaColor.copy(alpha = 0.25f), radius = 9f)
                 }
@@ -271,26 +293,29 @@ private fun PlanetStage(
             // Inner dashed orbit (counter-rotating)
             rotate(innerAngle) {
                 drawCircle(
-                    color = personaColor.copy(alpha = 0.18f), radius = innerR, center = c,
+                    color = personaColor.copy(alpha = 0.18f), radius = innerR + orbitReact * 0.5f, center = c,
                     style = Stroke(width = 1f, pathEffect = PathEffect.dashPathEffect(floatArrayOf(6f, 14f)))
                 )
             }
 
             // Persona-tinted ambient glow
+            val glowReact = if (listening) micAmplitude * 0.4f else 0f
             drawCircle(
                 brush = Brush.radialGradient(
                     colors = listOf(
-                        personaColor.copy(alpha = 0.22f),
-                        personaColor.copy(alpha = 0.10f),
+                        personaColor.copy(alpha = 0.22f + glowReact),
+                        personaColor.copy(alpha = 0.10f + glowReact * 0.5f),
                         Color.Transparent
                     ),
-                    center = c, radius = outerR
+                    center = c, radius = outerR + orbitReact
                 ),
-                radius = outerR * 0.9f, center = c
+                radius = (outerR * 0.9f + orbitReact).coerceAtLeast(1f), center = c
             )
 
             // Planet sphere (breathing)
-            val r = outerR * 0.42f * breathe
+            // Extra breathing from mic
+            val extraBreathe = if (listening) micAmplitude * 0.1f else 0f
+            val r = outerR * 0.42f * (breathe + extraBreathe)
             drawCircle(
                 brush = Brush.radialGradient(
                     colors = listOf(
@@ -309,10 +334,11 @@ private fun PlanetStage(
                 radius = r * 0.16f,
                 center = Offset(c.x - r * 0.34f, c.y - r * 0.4f)
             )
-            // Glow ring pulse while speaking/thinking
-            if (speaking || thinking) {
+            // Glow ring pulse while speaking/thinking/listening
+            if (speaking || thinking || (listening && micAmplitude > 0.05f)) {
+                val ringAlpha = if (listening) micAmplitude * 0.5f else 0.25f
                 drawCircle(
-                    color = personaColor.copy(alpha = 0.25f),
+                    color = personaColor.copy(alpha = ringAlpha),
                     radius = r * 1.25f, center = c,
                     style = Stroke(width = 2f)
                 )

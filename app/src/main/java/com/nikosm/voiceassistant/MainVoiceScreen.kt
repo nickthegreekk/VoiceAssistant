@@ -367,6 +367,7 @@ fun MainScreen(service: AssistantService?) {
     // so flipping it in settings swaps the voice screen reactively.
     var celestialUi by remember(service) { mutableStateOf(service?.celestialUi?.value ?: false) }
     var streamingText by remember { mutableStateOf<String?>(null) }
+    var micAmplitude by remember { mutableStateOf(0f) }
     // Fix #3: latest reveal-restart request from the service (non-chunked replay).
     // The effect below keys on it, so a request re-runs the reveal logic immediately.
     var revealRestartRequest by remember { mutableStateOf<RevealRestartRequest?>(null) }
@@ -388,6 +389,7 @@ fun MainScreen(service: AssistantService?) {
             launch { service.handsFreeMode.collect { handsFreeMode = it } }
             launch { service.celestialUi.collect { celestialUi = it } }
             launch { service.streamingText.collect { streamingText = it } }
+            launch { service.micAmplitude.collect { micAmplitude = it } }
             launch { service.ttsPlaybackFraction.collect { ttsPlaybackFraction = it } }
             launch { service.ttsWordTimestamps.collect { ttsWordTimestamps = it } }
             launch { service.revealRestartRequest.collect { revealRestartRequest = it } }
@@ -822,6 +824,7 @@ fun MainScreen(service: AssistantService?) {
                             messages = messages,
                             revealedChars = revealedChars,
                             streamingText = streamingText,
+                            micAmplitude = micAmplitude,
                             ttsPlaybackFraction = ttsPlaybackFraction,
                             ttsWordTimestamps = ttsWordTimestamps,
                             onMicClick = {

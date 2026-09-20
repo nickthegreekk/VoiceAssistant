@@ -31,6 +31,7 @@ import android.os.Build
 import android.os.IBinder
 import android.speech.tts.TextToSpeech
 import android.util.Base64
+import android.util.Log
 import androidx.annotation.RequiresPermission
 import androidx.compose.ui.graphics.Color
 import androidx.core.app.NotificationCompat
@@ -173,6 +174,13 @@ class AssistantService : Service() {
     // karaoke highlight. See RevealRestartRequest.
     val _revealRestartRequest = MutableStateFlow<RevealRestartRequest?>(null)
     val revealRestartRequest = _revealRestartRequest.asStateFlow()
+
+    // Real-time microphone amplitude (0.0 - 1.0), used by the Celestial HUD
+    // visualizer during LISTENING. Polled from MediaRecorder in startRecording()
+    // and pushed from VADAudioRecorder in startVadListening(). Reset to 0f
+    // whenever LISTENING ends.
+    val _micAmplitude = MutableStateFlow(0f)
+    val micAmplitude = _micAmplitude.asStateFlow()
 
     // Index of the in-flight Direct-Ollama streaming placeholder inside
     // _messages (appended on the stream's first chunk, replaced by the final
@@ -1975,6 +1983,22 @@ class AssistantService : Service() {
         outputFile = file
         _state.value = AssistantState.LISTENING
         updateNotification("Listening...")
+
+        // Poll amplitude for the Celestial HUD visualizer while manual recording is active.
+        serviceScope.launch {
+            while (recorder == mr && _state.value == AssistantState.LISTENING) {
+                try {
+                    val max = mr.maxAmplitude
+                    val amp = (max / 32767f).coerceIn(0f, 1f)
+                    if (amp > 0.001f) Log.d("MicAmplitude", "Manual: $amp")
+                    _micAmplitude.value = amp
+                } catch (e: Exception) {
+                    break
+                }
+                delay(100)
+            }
+            _micAmplitude.value = 0f
+        }
     }
 
     fun stopRecording(currentPersona: Persona) {
@@ -2028,6 +2052,8 @@ class AssistantService : Service() {
     // reachable during LISTENING). The partial output file is left for the caller:
     // stopRecording() sends it, stopEverything() discards it.
     fun stopActiveRecording() {
+        Log.d("MicAmplitude", "Reset to 0 (stopActiveRecording)")
+        _micAmplitude.value = 0f
         try {
             recorder?.stop()
         } catch (e: Exception) {
@@ -2446,6 +2472,14 @@ class AssistantService : Service() {
                     val resolvedPersona = currentPersonaName?.let { name -> personas.value.find { it.name == name } }
                         ?: personas.value.firstOrNull() ?: DEFAULT_PERSONAS[0]
                     sendAudioToServer(file, resolvedPersona)
+                },
+                onAmplitudeUpdate = { amp ->
+                    if (amp > 0.001f) Log.d("MicAmplitude", "VAD: $amp")
+                    if (_state.value == AssistantState.LISTENING) {
+                        _micAmplitude.value = amp
+                    } else {
+                        _micAmplitude.value = 0f
+                    }
                 }
             )
         }
@@ -2455,9 +2489,11 @@ class AssistantService : Service() {
     }
 
     fun stopVadListening() {
+        Log.d("MicAmplitude", "Reset to 0 (stopVadListening)")
         vadRecorder?.stop()
         vadRecorder = null
         _handsFreeMode.value = false
+        _micAmplitude.value = 0f
         // M2 (ownership): this used to be an unconditional `_state.value = IDLE`.
         // Toggling hands-free off while a VAD-initiated turn was in flight therefore
         // force-reset THINKING even though that turn was still running, and its own

@@ -18,7 +18,8 @@ class VADAudioRecorder(
     private val cacheDir: File,
     private val scope: CoroutineScope,
     private val onSpeechStart: () -> Unit,
-    private val onSpeechEnd: (File) -> Unit
+    private val onSpeechEnd: (File) -> Unit,
+    private val onAmplitudeUpdate: (Float) -> Unit = {}
 ) {
     private var job: Job? = null
 
@@ -154,6 +155,7 @@ class VADAudioRecorder(
                             }
                             detector.reset()
                         }
+                        onAmplitudeUpdate(0f)
                         delay(200)
                         continue
                     }
@@ -163,6 +165,14 @@ class VADAudioRecorder(
                         Log.w("VADAudioRecorder", "Unexpected read size: $read (expected $chunkSize)")
                     }
                     if (read == chunkSize) {
+                        // Max absolute amplitude for the visualizer
+                        var maxAmp = 0
+                        for (i in 0 until chunkSize) {
+                            val abs = Math.abs(buffer[i].toInt())
+                            if (abs > maxAmp) maxAmp = abs
+                        }
+                        onAmplitudeUpdate(maxAmp / 32767f)
+
                         val floatData = FloatArray(chunkSize) { buffer[it] / 32768.0f }
                         val prob = detector.isSpeech(floatData)
                         
@@ -244,6 +254,7 @@ class VADAudioRecorder(
         job?.cancel()
         job = null
         isRecording = false
+        onAmplitudeUpdate(0f)
         // Runs on Main while the IO loop may be mid-iteration; the lock makes this clear
         // atomic against add() and saveToWav()'s snapshot (the CME source). The loop can
         // still append one orphan chunk if it already passed its flag check — harmless,
