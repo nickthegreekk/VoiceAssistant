@@ -1708,6 +1708,9 @@ class AssistantService : Service() {
     // (the caller then keeps the persona's previous artwork).
     suspend fun savePersonaImage(uri: Uri, slot: String): String? =
         withContext(Dispatchers.IO) { settingsManager.savePersonaImage(uri, slot) }
+
+    suspend fun saveMessageImage(uri: Uri): String? =
+        withContext(Dispatchers.IO) { settingsManager.saveMessageImage(uri) }
     fun importBackup(json: String): Boolean {
         val success = settingsManager.importBackup(json)
         if (success) loadSettings()
@@ -2176,6 +2179,13 @@ class AssistantService : Service() {
         // in-flight apply-gate discards. Ordered before the empty-list write below, which
         // is the only thing that touches _messages here.
         stopEverything()
+        
+        // File cleanup: delete all audio/image files in the transcript before clearing it.
+        _messages.value.forEach { msg ->
+            msg.audioFilePath?.let { path -> try { File(path).delete() } catch (_: Exception) {} }
+            msg.imagePath?.let { path -> try { File(path).delete() } catch (_: Exception) {} }
+        }
+
         // L5: the empty-list write is what must be observed synchronously (the tests and the
         // UI both read it right after), but the persisted history is IO — so publish the empty
         // list here and clear the owner (nothing on screen belongs to a persona any more),
@@ -2206,8 +2216,16 @@ class AssistantService : Service() {
     fun deleteMessage(index: Int) {
         val current = _messages.value.toMutableList()
         if (index in current.indices) {
-            current.removeAt(index)
+            val removed = current.removeAt(index)
             _messages.value = current
+            // File cleanup: drop the message's cached audio/image now that it's
+            // gone from the transcript, so they don't leak in filesDir.
+            removed.audioFilePath?.let { path ->
+                try { File(path).delete() } catch (_: Exception) { }
+            }
+            removed.imagePath?.let { path ->
+                try { File(path).delete() } catch (_: Exception) { }
+            }
             saveSettings()
         }
     }

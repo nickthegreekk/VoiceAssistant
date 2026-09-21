@@ -15,6 +15,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.*
@@ -349,6 +350,7 @@ fun MainScreen(service: AssistantService?) {
     var revealRestartCount by remember { mutableStateOf(-1) }
     var revealRestartStarted by remember { mutableStateOf(false) }
     var attachedFiles by rememberSaveable(stateSaver = AttachedFilesSaver) { mutableStateOf<List<Uri>>(emptyList()) }
+    var attachedImage by rememberSaveable { mutableStateOf<Uri?>(null) }
     var isFirstRun by remember(service) { mutableStateOf(service?.isFirstRun() ?: false) }
 
     var state by remember { mutableStateOf(AssistantState.IDLE) }
@@ -413,6 +415,10 @@ fun MainScreen(service: AssistantService?) {
 
     val attachmentLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         attachedFiles = (attachedFiles + uris).distinct()
+    }
+
+    val imageLauncher = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+        if (uri != null) attachedImage = uri
     }
 
     // Fix #12: every still-missing runtime permission must be requested through ONE
@@ -846,6 +852,7 @@ fun MainScreen(service: AssistantService?) {
                         textInput = textInput,
                         onTextInputChange = { textInput = it },
                         attachedFiles = attachedFiles,
+                        attachedImage = attachedImage,
                         onAttachClick = { attachmentLauncher.launch(arrayOf(
                             "text/plain", "text/markdown", "text/x-markdown",
                             "application/json", "text/x-json",
@@ -860,16 +867,20 @@ fun MainScreen(service: AssistantService?) {
                             "text/x-java-source",
                             "text/x-ruby", "text/x-sql", "text/x-csharp", "text/x-go-source", "text/x-rust"
                         )) },
+                        onImageAttachClick = { imageLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) },
                         onRemoveAttachment = { attachedFiles = attachedFiles - it },
+                        onRemoveImage = { attachedImage = null },
                         onSendClick = {
                             // Defensive copy: the composition's attachedFiles is a
                             // state-backed mutable list. We snapshot it BEFORE clearing the
                             // UI, so the synchronous `attachedFiles = emptyList()` below
                             // can't leave the in-flight send reading an emptied list.
                             val filesToSend = attachedFiles.toList()
-                            service?.sendTextMessageToServer(textInput, currentPersona, filesToSend)
+                            val imgToSend = attachedImage
+                            service?.sendTextMessageToServer(textInput, currentPersona, filesToSend, imgToSend)
                             textInput = ""
                             attachedFiles = emptyList()
+                            attachedImage = null
                         },
                         onMicClick = {
                             if (state == AssistantState.IDLE) service?.startRecording()
@@ -1049,8 +1060,11 @@ fun ControlBar(
     textInput: String,
     onTextInputChange: (String) -> Unit,
     attachedFiles: List<Uri>,
+    attachedImage: Uri?,
     onAttachClick: () -> Unit,
+    onImageAttachClick: () -> Unit,
     onRemoveAttachment: (Uri) -> Unit,
+    onRemoveImage: () -> Unit,
     onSendClick: () -> Unit,
     onMicClick: () -> Unit,
     onStopClick: () -> Unit,
@@ -1105,13 +1119,26 @@ fun ControlBar(
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            if (attachedFiles.isNotEmpty()) {
+            if (attachedFiles.isNotEmpty() || attachedImage != null) {
                 Row(modifier = Modifier.padding(bottom = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     attachedFiles.forEach { uri ->
                         Box(modifier = Modifier.size(50.dp).clip(MaterialTheme.shapes.small).background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.1f))) {
                             Icon(Icons.Default.AttachFile, null, modifier = Modifier.align(Alignment.Center))
                             IconButton(onClick = { onRemoveAttachment(uri) }, modifier = Modifier.size(16.dp).align(Alignment.TopEnd)) {
                                 Icon(Icons.Default.Close, null, modifier = Modifier.size(10.dp))
+                            }
+                        }
+                    }
+                    attachedImage?.let { uri ->
+                        Box(modifier = Modifier.size(50.dp).clip(MaterialTheme.shapes.small)) {
+                            AsyncImage(
+                                model = uri,
+                                contentDescription = null,
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier.fillMaxSize()
+                            )
+                            IconButton(onClick = onRemoveImage, modifier = Modifier.size(16.dp).align(Alignment.TopEnd).background(Color.Black.copy(alpha = 0.5f), CircleShape)) {
+                                Icon(Icons.Default.Close, null, tint = Color.White, modifier = Modifier.size(10.dp))
                             }
                         }
                     }
@@ -1122,13 +1149,15 @@ fun ControlBar(
                 textInput = textInput,
                 onTextInputChange = onTextInputChange,
                 onAttachClick = onAttachClick,
+                onImageAttachClick = onImageAttachClick,
                 onSendClick = onSendClick,
                 onMicClick = onMicClick,
                 onStopClick = onStopClick,
                 state = state,
                 personaColor = personaColor,
                 focusRequester = focusRequester,
-                attachedFiles = attachedFiles
+                attachedFiles = attachedFiles,
+                attachedImage = attachedImage
             )
         } else {
             Column(
@@ -1388,5 +1417,97 @@ fun ControlBar(
                 }
             }
         }
+    }
+}
+
+@Composable
+fun TextInputRow(
+    textInput: String,
+    onTextInputChange: (String) -> Unit,
+    onAttachClick: () -> Unit,
+    onImageAttachClick: () -> Unit,
+    onSendClick: () -> Unit,
+    onMicClick: () -> Unit,
+    onStopClick: () -> Unit,
+    state: AssistantState,
+    personaColor: Color,
+    focusRequester: FocusRequester,
+    attachedFiles: List<Uri>,
+    attachedImage: Uri?
+) {
+    val hasContent = textInput.isNotBlank() || attachedFiles.isNotEmpty() || attachedImage != null
+    val isListening = state == AssistantState.LISTENING
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        OutlinedTextField(
+            value = textInput,
+            onValueChange = onTextInputChange,
+            modifier = Modifier.weight(1f).focusRequester(focusRequester),
+            placeholder = { Text("Type something...", style = MaterialTheme.typography.bodyMedium) },
+            shape = RoundedCornerShape(24.dp),
+            leadingIcon = {
+                Row {
+                    IconButton(onClick = onAttachClick, modifier = Modifier.size(32.dp)) {
+                        Icon(
+                            Icons.Default.Add, 
+                            null,
+                            tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                    IconButton(onClick = onImageAttachClick, modifier = Modifier.size(32.dp)) {
+                        Icon(
+                            Icons.Default.Image, 
+                            null,
+                            tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                }
+            },
+            trailingIcon = {
+                IconButton(
+                    onClick = { 
+                        if (state == AssistantState.SPEAKING) onStopClick()
+                        else if (isListening) onMicClick() // Stop
+                        else if (hasContent) onSendClick() 
+                        else onMicClick() // Start
+                    },
+                    modifier = Modifier
+                        .size(40.dp)
+                        .background(
+                            if (hasContent || isListening || state == AssistantState.SPEAKING) personaColor.copy(alpha = 0.1f) else Color.Transparent, 
+                            CircleShape
+                        )
+                ) {
+                    Icon(
+                        imageVector = when {
+                            state == AssistantState.SPEAKING -> Icons.AutoMirrored.Filled.VolumeOff
+                            isListening -> Icons.Default.Stop
+                            hasContent -> Icons.AutoMirrored.Filled.Send
+                            else -> Icons.Default.Mic
+                        },
+                        contentDescription = null,
+                        tint = when {
+                            state == AssistantState.SPEAKING -> personaColor
+                            isListening -> Color.Red
+                            hasContent -> personaColor
+                            else -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f)
+                        },
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+            },
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedBorderColor = personaColor.copy(alpha = 0.5f),
+                unfocusedBorderColor = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)
+            ),
+            singleLine = false,
+            maxLines = 4
+        )
     }
 }

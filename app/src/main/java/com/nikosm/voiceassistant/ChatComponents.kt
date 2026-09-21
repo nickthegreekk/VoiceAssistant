@@ -60,11 +60,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import coil3.compose.AsyncImage
+import java.io.File
 
 @Composable
 fun ChatMessageBubble(
@@ -166,6 +169,24 @@ fun ChatMessageBubble(
             textAlign = if (isCompact) TextAlign.Center else TextAlign.Start,
             modifier = textModifier
         )
+
+        if (isUser && message.imagePath != null) {
+            Spacer(modifier = Modifier.height(8.dp))
+            Surface(
+                modifier = Modifier
+                    .width(200.dp)
+                    .height(150.dp),
+                shape = MaterialTheme.shapes.small,
+                color = MaterialTheme.colorScheme.surfaceVariant
+            ) {
+                AsyncImage(
+                    model = File(message.imagePath),
+                    contentDescription = "Attached image",
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
+        }
 
         if (!isUser && onReplayAudio != null && !isCompact) {
             IconButton(

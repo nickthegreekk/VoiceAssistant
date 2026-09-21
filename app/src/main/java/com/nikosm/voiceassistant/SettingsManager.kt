@@ -44,6 +44,7 @@ class SettingsManager(context: Context) {
         // payload (a 4/3 size inflation) from ballooning.
         const val ICON_MAX_DIM = 512
         const val BACKGROUND_MAX_DIM = 1080
+        const val MESSAGE_IMAGE_MAX_DIM = 1024
     }
 
     private fun createEncryptedPrefsWithRecovery(context: Context): SharedPreferences {
@@ -294,11 +295,14 @@ class SettingsManager(context: Context) {
     fun savePersonaMessages(personaName: String, messages: List<ChatMessage>) {
         // C3: cap persisted history at 200 messages per persona. Trim from the oldest
         // end (keep most recent 200). Before discarding any evicted message, delete its
-        // audio cache file if present — otherwise WAV files become orphaned on disk.
+        // audio/image cache files if present — otherwise files become orphaned on disk.
         val capped = if (messages.size > MAX_PERSONA_MESSAGES) {
             val evicted = messages.subList(0, messages.size - MAX_PERSONA_MESSAGES)
             evicted.forEach { msg ->
                 msg.audioFilePath?.let { path ->
+                    try { File(path).delete() } catch (_: Exception) { /* already gone */ }
+                }
+                msg.imagePath?.let { path ->
                     try { File(path).delete() } catch (_: Exception) { /* already gone */ }
                 }
             }
@@ -421,6 +425,21 @@ class SettingsManager(context: Context) {
         }
     }
 
+    fun saveMessageImage(source: Uri): String? {
+        return try {
+            val bitmap = decodeDownsampled(source, MESSAGE_IMAGE_MAX_DIM) ?: return null
+            val file = newArtworkFile("msg")
+            FileOutputStream(file).use { out ->
+                bitmap.compress(Bitmap.CompressFormat.JPEG, 85, out)
+            }
+            bitmap.recycle()
+            file.absolutePath
+        } catch (e: Exception) {
+            Log.e("SettingsManager", "Failed to save message image", e)
+            null
+        }
+    }
+
     // Deletes one app-owned artwork file. This is the single choke point every
     // artwork deletion goes through: persona removal, a save that replaced or cleared
     // a slot, and the backup-import orphan sweep. Missing files are ignored — a
@@ -476,13 +495,16 @@ class SettingsManager(context: Context) {
     // display it again, and it leaks forever). Rename is the only other history-entry
     // lifecycle event and it deliberately MIGRATES (migratePersonaHistory above)
     // rather than deletes, so this is never reached on a rename. Before removing the
-    // entry, delete the audio cache files its messages reference — same as eviction
-    // in savePersonaMessages — otherwise those WAVs would be orphaned in the entry's
-    // place. A corrupted (unparseable) entry is still removed; its audio files are
+    // entry, delete the audio/image cache files its messages reference — same as eviction
+    // in savePersonaMessages — otherwise those files would be orphaned in the entry's
+    // place. A corrupted (unparseable) entry is still removed; its files are
     // unrecoverable anyway.
     fun deletePersonaHistory(personaName: String) {
         getPersonaMessages(personaName)?.forEach { msg ->
             msg.audioFilePath?.let { path ->
+                try { File(path).delete() } catch (_: Exception) { /* already gone */ }
+            }
+            msg.imagePath?.let { path ->
                 try { File(path).delete() } catch (_: Exception) { /* already gone */ }
             }
         }

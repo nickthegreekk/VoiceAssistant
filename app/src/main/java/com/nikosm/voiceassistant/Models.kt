@@ -32,7 +32,8 @@ data class ChatMessage(
     val reasoning: String? = null,
     val isError: Boolean = false,
     val audioFilePath: String? = null,
-    val responseTimeMs: Long? = null
+    val responseTimeMs: Long? = null,
+    val imagePath: String? = null
 )
 
 /**

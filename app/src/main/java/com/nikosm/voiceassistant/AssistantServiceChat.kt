@@ -2,6 +2,7 @@ package com.nikosm.voiceassistant
 
 import android.net.Uri
 import android.util.Base64
+import android.util.Log
 import androidx.compose.ui.graphics.Color
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -15,6 +16,7 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.asRequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
@@ -231,7 +233,7 @@ internal fun AssistantService.sendAudioToServer(file: File, currentPersona: Pers
                     if (!isChatRequestCurrent(generation)) {
                         // Stop / a newer request owns the transcript and the focus —
                         // append nothing and skip the (now pointless, paid) model call.
-                        android.util.Log.d(
+                        Log.d(
                             "AssistantService",
                             "Voice transcript discarded — superseded before it could be applied"
                         )
@@ -625,45 +627,57 @@ internal fun AssistantService.sendAudioToServer(file: File, currentPersona: Pers
     }
 }
 
-internal fun AssistantService.sendTextMessageToServer(inputText: String, currentPersona: Persona, attachments: List<Uri> = emptyList()) {
-    if (inputText.isBlank() && attachments.isEmpty()) return
+// ─── Image Vision Support (Fix: stage 1) ───────────────────────────────────
+// Reads an app-owned image file and returns its base64-encoded bytes.
+private suspend fun encodeImageToBase64(path: String?): String? {
+    if (path.isNullOrBlank()) return null
+    return withContext(Dispatchers.IO) {
+        try {
+            val file = File(path)
+            if (!file.exists()) return@withContext null
+            Base64.encodeToString(file.readBytes(), Base64.NO_WRAP)
+        } catch (e: Exception) {
+            Log.e("Vision", "Failed to encode image at $path", e)
+            null
+        }
+    }
+}
+
+internal fun AssistantService.sendTextMessageToServer(inputText: String, currentPersona: Persona, attachments: List<Uri> = emptyList(), imageUri: Uri? = null) {
+    if (inputText.isBlank() && attachments.isEmpty() && imageUri == null) return
     val startTime = System.currentTimeMillis()
     _voiceDuration.value = 0
-    // A9: the display/history user message shows a concise filename list (not the full
-    // dumped content, which would clutter the transcript and every future turn's
-    // re-sent history). The full extracted text is what reaches the model via
-    // buildModelPrompt, in the current turn only.
-    _messages.value = _messages.value + ChatMessage("user",
-        if (attachments.isNotEmpty())
-            "$inputText\n\n(Attached: ${attachments.mapNotNull { it.lastPathSegment }.joinToString(", ")})"
-        else inputText)
-    saveSettings()
 
-    if (currentPersona.model.isBlank()) {
-        _messages.value = _messages.value + ChatMessage("assistant", "Please choose a model for this persona in its settings.", isError = true)
-        return
-    }
-
-    val useDeviceVoice = currentPersona.voiceMode != VoiceMode.GATEWAY
-
-    // A2/B1: capture the request identity (generation + persona) — this flow appended
-    // the user turn already, so the response applies only if both are still current.
-    val generation = nextChatRequestSeq()
-    val personaName = currentPersona.name
-
-    // Focus-retention guard (same contract as the voice flow): marks whether
-    // playback was handed off. Text turns normally hold no focus, so the
-    // finally's conditional abandon is a no-op — it only fires when THIS turn
-    // superseded a voice turn that had retained its focus through THINKING and
-    // then terminated without playing (the superseded flow's own finally skips
-    // its abandon because the request is no longer current).
-    var playbackRequested = false
-
-    if (currentPersona.isCloud && isCloudModel(currentPersona.model)) {
-        performCloudChat(inputText, currentPersona, useDeviceVoice, startTime, currentTurnInHistory = true, generation = generation)
-        return
-    }
     serviceScope.launch {
+        val imagePath = imageUri?.let { saveMessageImage(it) }
+
+        // A9: the display/history user message shows a concise filename list
+        _messages.value = _messages.value + ChatMessage("user",
+            if (attachments.isNotEmpty())
+                "$inputText\n\n(Attached: ${attachments.mapNotNull { it.lastPathSegment }.joinToString(", ")})"
+            else inputText,
+            imagePath = imagePath
+        )
+        saveSettings()
+
+        if (currentPersona.model.isBlank()) {
+            _messages.value = _messages.value + ChatMessage("assistant", "Please choose a model for this persona in its settings.", isError = true)
+            return@launch
+        }
+
+        val useDeviceVoice = currentPersona.voiceMode != VoiceMode.GATEWAY
+
+        // A2/B1: capture the request identity (generation + persona)
+        val generation = nextChatRequestSeq()
+        val personaName = currentPersona.name
+
+        var playbackRequested = false
+
+        if (currentPersona.isCloud && isCloudModel(currentPersona.model)) {
+            performCloudChat(inputText, currentPersona, useDeviceVoice, startTime, currentTurnInHistory = true, generation = generation, imagePath = imagePath)
+            return@launch
+        }
+
         // M2: this turn owns the THINKING state it sets here (see stopVadListening()).
         recordThinkingOwner(generation)
         _state.value = AssistantState.THINKING
@@ -687,16 +701,12 @@ internal fun AssistantService.sendTextMessageToServer(inputText: String, current
                 if (displayServer != null) {
                      val ollamaBase = _ollamaBaseUrls.value.find { it.name == displayServer }?.url
                      if (ollamaBase != null) {
-                         val directRes = performDirectOllamaChat(ollamaBase, actualModel, inputText, currentPersona, attachments = attachments, currentTurnInHistory = true, generation = generation)
+                         val directRes = performDirectOllamaChat(ollamaBase, actualModel, inputText, currentPersona, attachments = attachments, imagePath = imagePath, currentTurnInHistory = true, generation = generation)
                          // Fix #5: clean markdown for TTS on IO — the cleaned variant feeds
                          // the on-device engines; the chat bubble/history keep the original.
                          val cleanedForTts = cleanTextForTts(directRes.first)
 
                          // If it's a gateway voice mode: Stage-2 streaming TTS
-                         // skips the full-text synthesis here (returning null bytes)
-                         // so the caller can use the chunked sequential pipeline
-                         // (playChunkedTtsGateway) instead of blocking on one
-                         // monolithic Kokoro request.
                          if (currentPersona.voiceMode == VoiceMode.GATEWAY) {
                              return@withContext listOf(directRes.first, directRes.second, null, cleanedForTts)
                          }
@@ -1127,7 +1137,7 @@ private fun AssistantService.isCloudModel(model: String): Boolean {
            _customCloudApis.value.any { it.name == providerName }
 }
 
-private fun AssistantService.performCloudChat(text: String, persona: Persona, useDeviceVoice: Boolean = false, startTime: Long, currentTurnInHistory: Boolean, generation: Long, attachments: List<Uri> = emptyList()) {
+private fun AssistantService.performCloudChat(text: String, persona: Persona, useDeviceVoice: Boolean = false, startTime: Long, currentTurnInHistory: Boolean, generation: Long, attachments: List<Uri> = emptyList(), imagePath: String? = null) {
     serviceScope.launch {
         // M2: this turn owns the THINKING state it sets here (see stopVadListening()).
         recordThinkingOwner(generation)
@@ -1147,7 +1157,7 @@ private fun AssistantService.performCloudChat(text: String, persona: Persona, us
                     ?: throw Exception("No config for provider '$providerName'")
 
                 if (apiSetting.apiKey.isBlank() && apiSetting.icon != "C") throw Exception("API Key for ${apiSetting.name} is missing")
-                val request = buildCloudRequest(apiSetting, persona, text, currentTurnInHistory, attachments)
+                val request = buildCloudRequest(apiSetting, persona, text, currentTurnInHistory, attachments, imagePath)
                 // A6: track the call so the Stop button can cancel cloud requests too
                 // (previously execute() was called on an untracked Call).
                 val call = getDynamicClient(persona).newCall(request)
@@ -1265,7 +1275,7 @@ private fun AssistantService.performCloudChat(text: String, persona: Persona, us
     }
 }
 
-private suspend fun AssistantService.performDirectOllamaChat(baseUrl: String, model: String, text: String, persona: Persona, currentTurnInHistory: Boolean, generation: Long, attachments: List<Uri> = emptyList()): Triple<String, String?, ByteArray?> {
+private suspend fun AssistantService.performDirectOllamaChat(baseUrl: String, model: String, text: String, persona: Persona, currentTurnInHistory: Boolean, generation: Long, attachments: List<Uri> = emptyList(), imagePath: String? = null): Triple<String, String?, ByteArray?> {
     // Resolve backend URL: fallback if empty or mistakenly pointing to a gateway (8880)
     val stripped = baseUrl.trim()
     val resolvedBackend = if (stripped.isBlank() || stripped.contains(":8880")) {
@@ -1351,10 +1361,20 @@ private suspend fun AssistantService.performDirectOllamaChat(baseUrl: String, mo
 
         // A1: the current user turn is ALWAYS appended — repeated inputs must reach
         // the model as new turns even when identical text exists earlier in history.
-        msgsArray.put(JSONObject().put("role", "user").put("content", modelText))
+        val currentMsg = JSONObject().put("role", "user").put("content", modelText)
+        val base64Image = encodeImageToBase64(imagePath)
+        if (base64Image != null) {
+            currentMsg.put("images", JSONArray().put(base64Image))
+        }
+        msgsArray.put(currentMsg)
     }
 
     json.put("messages", msgsArray)
+
+    val payload = json.toString()
+    if (BuildConfig.DEBUG) {
+        Log.d("Vision", "Direct Ollama payload: ${payload.take(500)}... [length: ${payload.length}]")
+    }
 
     val options = JSONObject()
     options.put("temperature", persona.temperature)
@@ -1548,7 +1568,7 @@ private suspend fun AssistantService.performDirectOllamaChat(baseUrl: String, mo
 internal class StreamCancelledByUserException(val partialContent: String, val partialThinking: String) : java.io.IOException("Cancelled")
 internal class StreamPersonaChangedException(val partialContent: String, val partialThinking: String) : java.io.IOException("Persona changed mid-stream")
 
-private suspend fun AssistantService.buildCloudRequest(api: CloudApiSetting, persona: Persona, text: String, currentTurnInHistory: Boolean, attachments: List<Uri> = emptyList()): Request {
+private suspend fun AssistantService.buildCloudRequest(api: CloudApiSetting, persona: Persona, text: String, currentTurnInHistory: Boolean, attachments: List<Uri> = emptyList(), imagePath: String? = null): Request {
     val mediaType = "application/json; charset=utf-8".toMediaType()
     val json = JSONObject()
     
@@ -1603,6 +1623,8 @@ private suspend fun AssistantService.buildCloudRequest(api: CloudApiSetting, per
     val actualModel = persona.model.substringAfter("] ")
     val baseUrl = api.baseUrl.trim().removeSuffix("/")
 
+    val base64Image = encodeImageToBase64(imagePath)
+
     return when (api.icon) {
         "A" -> {
             json.put("model", actualModel).put("max_tokens", persona.maxTokens).put("system", finalSystemPrompt)
@@ -1611,19 +1633,33 @@ private suspend fun AssistantService.buildCloudRequest(api: CloudApiSetting, per
             // alternate roles. A1: same-role turns are MERGED (never silently
             // skipped), and the current user turn is always appended below.
             var lastRole = ""
-            fun appendAnthropicTurn(role: String, turnText: String) {
-                if (turnText.isBlank()) return
-                if (role == lastRole && msgArray.length() > 0) {
+            fun appendAnthropicTurn(role: String, turnText: String, imgB64: String? = null) {
+                if (turnText.isBlank() && imgB64 == null) return
+                if (role == lastRole && msgArray.length() > 0 && imgB64 == null) {
                     val prev = msgArray.getJSONObject(msgArray.length() - 1)
-                    prev.put("content", prev.getString("content") + "\n\n" + turnText)
+                    val content = prev.get("content")
+                    if (content is String) {
+                        prev.put("content", content + "\n\n" + turnText)
+                    } else if (content is JSONArray) {
+                        content.put(JSONObject().put("type", "text").put("text", "\n\n" + turnText))
+                    }
                 } else {
-                    msgArray.put(JSONObject().put("role", role).put("content", turnText))
+                    val msgObj = JSONObject().put("role", role)
+                    if (imgB64 != null) {
+                        val contentArr = JSONArray()
+                        contentArr.put(JSONObject().put("type", "image").put("source", JSONObject().put("type", "base64").put("media_type", "image/jpeg").put("data", imgB64)))
+                        contentArr.put(JSONObject().put("type", "text").put("text", turnText))
+                        msgObj.put("content", contentArr)
+                    } else {
+                        msgObj.put("content", turnText)
+                    }
+                    msgArray.put(msgObj)
                     lastRole = role
                 }
             }
             history.dropWhile { it.role != "user" }.forEach { msg -> appendAnthropicTurn(msg.role, msg.text) }
             // A1: the current user turn always reaches the model.
-            appendAnthropicTurn("user", modelText)
+            appendAnthropicTurn("user", modelText, base64Image)
             json.put("messages", msgArray)
             Request.Builder().url("$baseUrl/v1/messages").header("x-api-key", api.apiKey).header("anthropic-version", "2023-06-01").header("content-type", "application/json").post(json.toString().toRequestBody(mediaType)).build()
         }
@@ -1632,21 +1668,30 @@ private suspend fun AssistantService.buildCloudRequest(api: CloudApiSetting, per
             // Gemini requires user/model alternation too. A1: same-role turns are
             // merged as extra parts (never skipped), and the current user turn is
             // always appended below.
-            fun appendGeminiTurn(role: String, turnText: String) {
-                if (turnText.isBlank()) return
+            fun appendGeminiTurn(role: String, turnText: String, imgB64: String? = null) {
+                if (turnText.isBlank() && imgB64 == null) return
                 val geminiRole = if (role == "assistant") "model" else "user"
+                val parts = JSONArray()
+                if (imgB64 != null) {
+                    parts.put(JSONObject().put("inline_data", JSONObject().put("mime_type", "image/jpeg").put("data", imgB64)))
+                }
+                parts.put(JSONObject().put("text", turnText))
+
                 if (contents.length() > 0) {
                     val last = contents.getJSONObject(contents.length() - 1)
                     if (last.getString("role") == geminiRole) {
-                        last.getJSONArray("parts").put(JSONObject().put("text", turnText))
+                        val lastParts = last.getJSONArray("parts")
+                        for (i in 0 until parts.length()) {
+                            lastParts.put(parts.get(i))
+                        }
                         return
                     }
                 }
-                contents.put(JSONObject().put("role", geminiRole).put("parts", org.json.JSONArray().put(JSONObject().put("text", turnText))))
+                contents.put(JSONObject().put("role", geminiRole).put("parts", parts))
             }
             history.forEach { appendGeminiTurn(it.role, it.text) }
             // A1: the current user turn always reaches the model.
-            appendGeminiTurn("user", modelText)
+            appendGeminiTurn("user", modelText, base64Image)
             json.put("contents", contents)
 
             val genConfig = JSONObject()
@@ -1657,9 +1702,7 @@ private suspend fun AssistantService.buildCloudRequest(api: CloudApiSetting, per
             val sysInst = JSONObject().put("parts", org.json.JSONArray().put(JSONObject().put("text", finalSystemPrompt)))
             json.put("system_instruction", sysInst)
 
-            // S3: pass the key via the x-goog-api-key header (per Google's docs:
-            // "-H \"x-goog-api-key: YOUR_API_KEY\"") instead of the URL query string, so
-            // it can't leak into proxy/server logs or exception messages embedding the URL.
+            // S3: pass the key via the x-goog-api-key header
             Request.Builder()
                 .url("$baseUrl/v1beta/models/$actualModel:generateContent")
                 .header("x-goog-api-key", api.apiKey)
@@ -1670,9 +1713,23 @@ private suspend fun AssistantService.buildCloudRequest(api: CloudApiSetting, per
             json.put("model", actualModel).put("max_tokens", persona.maxTokens)
             val msgs = org.json.JSONArray().put(JSONObject().put("role", "system").put("content", finalSystemPrompt))
             history.forEach { msgs.put(JSONObject().put("role", it.role).put("content", it.text)) }
-            // A1: the current user turn is ALWAYS appended — no text-matching dedup.
-            msgs.put(JSONObject().put("role", "user").put("content", modelText))
+            
+            val currentMsg = JSONObject().put("role", "user")
+            if (base64Image != null) {
+                val contentArr = JSONArray()
+                contentArr.put(JSONObject().put("type", "text").put("text", modelText))
+                contentArr.put(JSONObject().put("type", "image_url").put("image_url", JSONObject().put("url", "data:image/jpeg;base64,$base64Image")))
+                currentMsg.put("content", contentArr)
+            } else {
+                currentMsg.put("content", modelText)
+            }
+            msgs.put(currentMsg)
+            
             json.put("messages", msgs)
+            val payload = json.toString()
+            if (BuildConfig.DEBUG) {
+                Log.d("Vision", "Request payload: ${payload.take(500)}... [length: ${payload.length}]")
+            }
             val url = if (baseUrl.endsWith("/chat/completions")) baseUrl else "$baseUrl/chat/completions"
             Request.Builder().url(url).header("Authorization", "Bearer ${api.apiKey}").post(json.toString().toRequestBody(mediaType)).build()
         }
