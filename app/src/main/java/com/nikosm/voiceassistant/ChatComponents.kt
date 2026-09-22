@@ -74,6 +74,7 @@ fun ChatMessageBubble(
     message: ChatMessage,
     displayText: String,
     personaColor: Color,
+    fontSize: Float = 14f,
     isCompact: Boolean = false,
     horizontalAlignment: Alignment.Horizontal = Alignment.Start,
     // Stage-2 karaoke: char range of the currently-spoken word + its color.
@@ -165,6 +166,7 @@ fun ChatMessageBubble(
                 isUser -> MaterialTheme.colorScheme.onSurface
                 else -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f)
             },
+            fontSize = fontSize.sp,
             style = if (isUser && isCompact) MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold) else MaterialTheme.typography.bodyMedium,
             textAlign = if (isCompact) TextAlign.Center else TextAlign.Start,
             modifier = textModifier
@@ -220,6 +222,7 @@ fun ChatList(
     // "Thinking..." dots below (Fix #4) so they vanish as soon as real text is
     // visible instead of persisting for the whole stream.
     streamingText: String? = null,
+    fontSize: Float = 14f,
     ttsPlaybackFraction: Float? = null,
     ttsWordTimestamps: String? = null,
     voiceDuration: Int,
@@ -263,11 +266,12 @@ fun ChatList(
                         highlightRange = if (isUser) null else highlightRange,
                         highlightColor = if (isUser) null else personaColor,
                         personaColor = personaColor,
+                        fontSize = fontSize,
                         isCompact = false,
                         horizontalAlignment = if (isUser) Alignment.End else Alignment.Start,
                         onLongClick = { menuMessageIndex = index },
                         onReplayAudio = { onReplayAudio(message) },
-                        modifier = Modifier.fillMaxWidth(0.85f)
+                        modifier = Modifier.fillMaxWidth(0.92f)
                     )
 
                     DropdownMenu(

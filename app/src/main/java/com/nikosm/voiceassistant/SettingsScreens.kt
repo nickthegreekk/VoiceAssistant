@@ -245,6 +245,11 @@ fun GeneralSettings(service: AssistantService, totalCost: Double, onDismiss: () 
         service.adaptiveTheme.collect { adaptiveTheme = it }
     }
 
+    var chatFontSize by remember { mutableStateOf(14f) }
+    LaunchedEffect(Unit) {
+        service.chatFontSize.collect { chatFontSize = it }
+    }
+
     // Fix #7: optional password encryption for exported backups. The password is
     // collected HERE (checkbox + fields + validation below), but the actual
     // encryption/decryption runs service-side on serviceScope — see
@@ -333,6 +338,42 @@ fun GeneralSettings(service: AssistantService, totalCost: Double, onDismiss: () 
                         // when the platform can't provide dynamic color.
                         enabled = dynamicSupported
                     )
+                }
+                HorizontalDivider(
+                    modifier = Modifier.padding(vertical = 12.dp),
+                    color = Color.White.copy(alpha = 0.05f)
+                )
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("Chat Font Size", style = MaterialTheme.typography.titleMedium)
+                        Text("${chatFontSize.toInt()} sp", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary)
+                    }
+                    Slider(
+                        value = chatFontSize,
+                        onValueChange = { service.setChatFontSize(it) },
+                        valueRange = 12f..24f,
+                        steps = 11, // 12, 13, ..., 24 -> 13 values, 12 gaps -> 11 steps
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    // Live preview
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 8.dp)
+                            .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.05f), RoundedCornerShape(8.dp))
+                            .padding(12.dp)
+                    ) {
+                        Text(
+                            "Sample message at ${chatFontSize.toInt()}sp size.",
+                            fontSize = chatFontSize.sp,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f)
+                        )
+                    }
                 }
             }
         }

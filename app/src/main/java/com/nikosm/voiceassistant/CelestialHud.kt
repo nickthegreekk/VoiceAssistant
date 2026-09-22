@@ -91,6 +91,7 @@ fun CelestialHudBody(
     messages: List<ChatMessage>,
     revealedChars: Int,
     micAmplitude: Float,
+    chatFontSize: Float = 14f,
     onMicClick: () -> Unit,
     onStopClick: () -> Unit,
     onTextModeToggle: () -> Unit,
@@ -146,6 +147,7 @@ fun CelestialHudBody(
                 messages = messages,
                 revealedChars = revealedChars,
                 mono = mono,
+                fontSize = chatFontSize,
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp).weight(1f)
             )
 
@@ -368,6 +370,7 @@ private fun HudTranscriptPanel(
     messages: List<ChatMessage>,
     revealedChars: Int,
     mono: FontFamily,
+    fontSize: Float = 14f,
     modifier: Modifier
 ) {
     // Karaoke sync: the text is always fully visible; the sync engine places a
@@ -459,19 +462,20 @@ private fun HudTranscriptPanel(
                             ttsPlaybackFraction = ttsPlaybackFraction,
                             ttsWordTimestamps = ttsWordTimestamps,
                             fontFamily = mono,
+                            fontSize = fontSize,
                             color = MaterialTheme.colorScheme.onBackground,
                             highlightColor = personaColor
                         )
                     } else if (state == AssistantState.THINKING) {
                         Text(
                             "...",
-                            fontFamily = mono, fontSize = 13.sp,
+                            fontFamily = mono, fontSize = fontSize.sp,
                             color = personaColor.copy(alpha = 0.7f)
                         )
                     } else {
                         Text(
                             "STANDBY - awaiting input",
-                            fontFamily = mono, fontSize = 12.sp,
+                            fontFamily = mono, fontSize = (fontSize * 0.9f).sp,
                             color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.3f)
                         )
                     }
@@ -578,6 +582,7 @@ private fun WordTimedText(
     ttsPlaybackFraction: Float?,
     ttsWordTimestamps: String?,
     fontFamily: FontFamily,
+    fontSize: Float = 14f,
     color: Color,
     highlightColor: Color
 ) {
@@ -585,7 +590,7 @@ private fun WordTimedText(
         Text(
             text = "",
             fontFamily = fontFamily,
-            fontSize = 13.sp,
+            fontSize = fontSize.sp,
             modifier = Modifier.padding(bottom = 8.dp)
         )
         return
@@ -606,8 +611,8 @@ private fun WordTimedText(
     Text(
         text = highlightedAnnotated(text, activeRange, highlightColor),
         fontFamily = fontFamily,
-        fontSize = 13.sp,
-        lineHeight = 20.sp,
+        fontSize = fontSize.sp,
+        lineHeight = (fontSize * 1.5f).sp,
         color = color,
         modifier = Modifier.padding(bottom = 8.dp)
     )

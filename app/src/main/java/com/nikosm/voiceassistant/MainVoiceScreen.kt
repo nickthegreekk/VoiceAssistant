@@ -370,6 +370,7 @@ fun MainScreen(service: AssistantService?) {
     var celestialUi by remember(service) { mutableStateOf(service?.celestialUi?.value ?: false) }
     var streamingText by remember { mutableStateOf<String?>(null) }
     var micAmplitude by remember { mutableStateOf(0f) }
+    var chatFontSize by remember { mutableStateOf(14f) }
     // Fix #3: latest reveal-restart request from the service (non-chunked replay).
     // The effect below keys on it, so a request re-runs the reveal logic immediately.
     var revealRestartRequest by remember { mutableStateOf<RevealRestartRequest?>(null) }
@@ -392,6 +393,7 @@ fun MainScreen(service: AssistantService?) {
             launch { service.celestialUi.collect { celestialUi = it } }
             launch { service.streamingText.collect { streamingText = it } }
             launch { service.micAmplitude.collect { micAmplitude = it } }
+            launch { service.chatFontSize.collect { chatFontSize = it } }
             launch { service.ttsPlaybackFraction.collect { ttsPlaybackFraction = it } }
             launch { service.ttsWordTimestamps.collect { ttsWordTimestamps = it } }
             launch { service.revealRestartRequest.collect { revealRestartRequest = it } }
@@ -831,6 +833,7 @@ fun MainScreen(service: AssistantService?) {
                             revealedChars = revealedChars,
                             streamingText = streamingText,
                             micAmplitude = micAmplitude,
+                            chatFontSize = chatFontSize,
                             ttsPlaybackFraction = ttsPlaybackFraction,
                             ttsWordTimestamps = ttsWordTimestamps,
                             onMicClick = {
@@ -853,6 +856,7 @@ fun MainScreen(service: AssistantService?) {
                         onTextInputChange = { textInput = it },
                         attachedFiles = attachedFiles,
                         attachedImage = attachedImage,
+                        chatFontSize = chatFontSize,
                         onAttachClick = { attachmentLauncher.launch(arrayOf(
                             "text/plain", "text/markdown", "text/x-markdown",
                             "application/json", "text/x-json",
@@ -1061,6 +1065,7 @@ fun ControlBar(
     onTextInputChange: (String) -> Unit,
     attachedFiles: List<Uri>,
     attachedImage: Uri?,
+    chatFontSize: Float = 14f,
     onAttachClick: () -> Unit,
     onImageAttachClick: () -> Unit,
     onRemoveAttachment: (Uri) -> Unit,
@@ -1070,9 +1075,6 @@ fun ControlBar(
     onStopClick: () -> Unit,
     state: AssistantState,
     personaColor: Color,
-    // Persona NAME (not just the color) so the mini box can derive the same
-    // "{persona}_{messageCount}_{textHash}" identity the reveal effect uses — the
-    // teleprompter re-checks the anchored bubble against it before measuring it.
     personaName: String,
     onTextModeToggle: () -> Unit,
     focusRequester: FocusRequester,
@@ -1084,11 +1086,6 @@ fun ControlBar(
     onHandsFreeToggle: () -> Unit,
     messages: List<ChatMessage>,
     revealedChars: Int,
-    // Stage-1 streaming overlay: non-null while a Direct-Ollama stream is in
-    // flight. Rendered as a trailing in-progress bubble with a typing cursor
-    // in the voice-mode mini box; text mode streams into the chat list the
-    // same way. A non-blank value also suppresses the "..." dots below
-    // (Fix #4) — once real text is on screen the dots must not sit under it.
     streamingText: String?,
     ttsPlaybackFraction: Float?,
     ttsWordTimestamps: String?,
@@ -1099,7 +1096,9 @@ fun ControlBar(
     onDeleteMessage: (Int) -> Unit,
     onReplayAudio: (ChatMessage) -> Unit
 ) {
-    Column(modifier = Modifier.fillMaxWidth().padding(16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+    // Task 2: Wider chat box. Padding reduced from 16.dp to 8.dp in text mode.
+    val horizontalPadding = if (textModeOpen) 8.dp else 16.dp
+    Column(modifier = Modifier.fillMaxWidth().padding(horizontal = horizontalPadding, vertical = 16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
         if (textModeOpen) {
             ChatList(
                 modifier = Modifier.weight(1f),
@@ -1109,6 +1108,7 @@ fun ControlBar(
                 personaColor = personaColor,
                 revealedChars = revealedChars,
                 streamingText = streamingText,
+                fontSize = chatFontSize,
                 ttsPlaybackFraction = ttsPlaybackFraction,
                 ttsWordTimestamps = ttsWordTimestamps,
                 voiceDuration = voiceDuration,
@@ -1120,7 +1120,8 @@ fun ControlBar(
             Spacer(modifier = Modifier.height(16.dp))
 
             if (attachedFiles.isNotEmpty() || attachedImage != null) {
-                Row(modifier = Modifier.padding(bottom = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                // Task 2: Horizontal padding for preview chips also reduced.
+                Row(modifier = Modifier.padding(bottom = 8.dp, start = 8.dp, end = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     attachedFiles.forEach { uri ->
                         Box(modifier = Modifier.size(50.dp).clip(MaterialTheme.shapes.small).background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.1f))) {
                             Icon(Icons.Default.AttachFile, null, modifier = Modifier.align(Alignment.Center))
@@ -1322,6 +1323,7 @@ fun ControlBar(
                                     highlightRange = highlightRange,
                                     highlightColor = personaColor,
                                     personaColor = personaColor,
+                                    fontSize = chatFontSize,
                                     isCompact = true,
                                     horizontalAlignment = Alignment.CenterHorizontally,
                                     modifier = if (isLastAssistant) {
@@ -1437,6 +1439,7 @@ fun TextInputRow(
 ) {
     val hasContent = textInput.isNotBlank() || attachedFiles.isNotEmpty() || attachedImage != null
     val isListening = state == AssistantState.LISTENING
+    var showAttachmentMenu by remember { mutableStateOf(false) }
 
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -1450,8 +1453,9 @@ fun TextInputRow(
             placeholder = { Text("Type something...", style = MaterialTheme.typography.bodyMedium) },
             shape = RoundedCornerShape(24.dp),
             leadingIcon = {
-                Row {
-                    IconButton(onClick = onAttachClick, modifier = Modifier.size(32.dp)) {
+                // Task 3: Merged attachment button.
+                Box {
+                    IconButton(onClick = { showAttachmentMenu = true }, modifier = Modifier.size(32.dp)) {
                         Icon(
                             Icons.Default.Add, 
                             null,
@@ -1459,12 +1463,25 @@ fun TextInputRow(
                             modifier = Modifier.size(20.dp)
                         )
                     }
-                    IconButton(onClick = onImageAttachClick, modifier = Modifier.size(32.dp)) {
-                        Icon(
-                            Icons.Default.Image, 
-                            null,
-                            tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
-                            modifier = Modifier.size(20.dp)
+                    DropdownMenu(
+                        expanded = showAttachmentMenu,
+                        onDismissRequest = { showAttachmentMenu = false }
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("Photo") },
+                            leadingIcon = { Icon(Icons.Default.Image, null, modifier = Modifier.size(18.dp)) },
+                            onClick = { 
+                                showAttachmentMenu = false
+                                onImageAttachClick() 
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("File") },
+                            leadingIcon = { Icon(Icons.Default.AttachFile, null, modifier = Modifier.size(18.dp)) },
+                            onClick = { 
+                                showAttachmentMenu = false
+                                onAttachClick() 
+                            }
                         )
                     }
                 }

@@ -45,6 +45,7 @@ class SettingsManager(context: Context) {
         const val ICON_MAX_DIM = 512
         const val BACKGROUND_MAX_DIM = 1080
         const val MESSAGE_IMAGE_MAX_DIM = 1024
+        const val DEFAULT_CHAT_FONT_SIZE = 14f
     }
 
     private fun createEncryptedPrefsWithRecovery(context: Context): SharedPreferences {
@@ -823,6 +824,14 @@ class SettingsManager(context: Context) {
 
     fun getLastUpdateCheckTimestamp(): Long {
         return prefs.getLong("last_update_check_ts", 0L)
+    }
+
+    fun getChatFontSize(): Float {
+        return prefs.getFloat("chat_font_size", DEFAULT_CHAT_FONT_SIZE)
+    }
+
+    fun saveChatFontSize(size: Float) {
+        prefs.edit().putFloat("chat_font_size", size).apply()
     }
 
     fun saveDismissedUpdateVersion(version: String) {

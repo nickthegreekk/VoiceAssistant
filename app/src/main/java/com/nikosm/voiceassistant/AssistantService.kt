@@ -452,6 +452,14 @@ class AssistantService : Service() {
         settingsManager.saveAdaptiveTheme(enabled)
     }
 
+    val _chatFontSize = MutableStateFlow(14f)
+    val chatFontSize = _chatFontSize.asStateFlow()
+
+    fun setChatFontSize(size: Float) {
+        _chatFontSize.value = size
+        settingsManager.saveChatFontSize(size)
+    }
+
     internal val _serverBases = MutableStateFlow<List<ServerConfig>>(emptyList())
     val serverBases = _serverBases.asStateFlow()
 
@@ -1257,6 +1265,7 @@ class AssistantService : Service() {
         _lastPriceSyncTimestamp.value = settingsManager.getLastPriceSyncTimestamp()
         _celestialUi.value = settingsManager.getCelestialUi()
         _adaptiveTheme.value = settingsManager.getAdaptiveTheme()
+        _chatFontSize.value = settingsManager.getChatFontSize()
 
         // Fetch models for all enabled cloud providers
         (_cloudApis.value + allCustom).forEach { api ->
