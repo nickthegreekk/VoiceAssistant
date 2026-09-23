@@ -878,27 +878,7 @@ fun PersonaEditor(
                         .padding(16.dp),
                     verticalArrangement = Arrangement.spacedBy(16.dp)
                 ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text("Edit System Prompt", style = MaterialTheme.typography.titleLarge)
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            TextButton(onClick = { showFullscreenPrompt = false }) {
-                                Text("Cancel")
-                            }
-                            Button(
-                                onClick = {
-                                    systemPrompt = tempPrompt
-                                    showFullscreenPrompt = false
-                                },
-                                colors = ButtonDefaults.buttonColors(containerColor = themeColor.copy(alpha = 0.8f))
-                            ) {
-                                Text("Save")
-                            }
-                        }
-                    }
+                    Text("Edit System Prompt", style = MaterialTheme.typography.titleLarge)
 
                     OutlinedTextField(
                         value = tempPrompt,
@@ -909,6 +889,26 @@ fun PersonaEditor(
                             .weight(1f),
                         maxLines = Int.MAX_VALUE
                     )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.End,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        TextButton(onClick = { showFullscreenPrompt = false }) {
+                            Text("Cancel")
+                        }
+                        Spacer(Modifier.width(8.dp))
+                        Button(
+                            onClick = {
+                                systemPrompt = tempPrompt
+                                showFullscreenPrompt = false
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = themeColor.copy(alpha = 0.8f))
+                        ) {
+                            Text("Save")
+                        }
+                    }
                 }
             }
         }
