@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -39,8 +40,13 @@ import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.ui.graphics.RectangleShape
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -207,7 +213,7 @@ fun ChatMessageBubble(
 }
 
 
-@OptIn(ExperimentalFoundationApi::class)
+@OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
 @Composable
 fun ChatList(
     modifier: Modifier = Modifier,
@@ -338,25 +344,56 @@ fun ChatList(
         if (editingMessageIndex != null) {
             AlertDialog(
                 onDismissRequest = { editingMessageIndex = null },
-                title = { Text("Edit Message") },
-                text = {
-                    OutlinedTextField(
-                        value = editingText,
-                        onValueChange = { editingText = it },
-                        modifier = Modifier.fillMaxWidth(),
-                        maxLines = 5
-                    )
-                },
-                confirmButton = {
-                    TextButton(onClick = {
-                        onEditMessage(editingMessageIndex!!, editingText)
-                        editingMessageIndex = null
-                    }) { Text("Save") }
-                },
-                dismissButton = {
-                    TextButton(onClick = { editingMessageIndex = null }) { Text("Cancel") }
+                modifier = Modifier.fillMaxSize(),
+                properties = DialogProperties(usePlatformDefaultWidth = false)
+            ) {
+                Surface(
+                    modifier = Modifier.fillMaxSize(),
+                    shape = RectangleShape,
+                    color = MaterialTheme.colorScheme.surface,
+                    tonalElevation = 6.dp
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(16.dp)
+                            .imePadding(),
+                        verticalArrangement = Arrangement.spacedBy(16.dp)
+                    ) {
+                        Text("Edit Message", style = MaterialTheme.typography.titleLarge)
+
+                        OutlinedTextField(
+                            value = editingText,
+                            onValueChange = { editingText = it },
+                            label = { Text("Message") },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .weight(1f),
+                            maxLines = Int.MAX_VALUE
+                        )
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.End,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            TextButton(onClick = { editingMessageIndex = null }) {
+                                Text("Cancel")
+                            }
+                            Spacer(Modifier.width(8.dp))
+                            Button(
+                                onClick = {
+                                    onEditMessage(editingMessageIndex!!, editingText)
+                                    editingMessageIndex = null
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = personaColor.copy(alpha = 0.8f))
+                            ) {
+                                Text("Save")
+                            }
+                        }
+                    }
                 }
-            )
+            }
         }
     }
 }
