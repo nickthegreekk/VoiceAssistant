@@ -18,6 +18,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -362,15 +364,20 @@ fun ChatList(
                     ) {
                         Text("Edit Message", style = MaterialTheme.typography.titleLarge)
 
-                        OutlinedTextField(
-                            value = editingText,
-                            onValueChange = { editingText = it },
-                            label = { Text("Message") },
+                        Box(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .weight(1f),
-                            maxLines = Int.MAX_VALUE
-                        )
+                                .weight(1f)
+                                .verticalScroll(rememberScrollState())
+                        ) {
+                            OutlinedTextField(
+                                value = editingText,
+                                onValueChange = { editingText = it },
+                                label = { Text("Message") },
+                                modifier = Modifier.fillMaxWidth(),
+                                maxLines = Int.MAX_VALUE
+                            )
+                        }
 
                         Row(
                             modifier = Modifier.fillMaxWidth(),
