@@ -37,13 +37,16 @@ import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material.icons.filled.Translate
 import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.filled.OpenInFull
 import androidx.compose.material.icons.filled.Wallpaper
 import androidx.compose.material3.AlertDialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -71,6 +74,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -121,6 +125,7 @@ fun SettingsSection(content: @Composable () -> Unit) {
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PersonaEditor(
     persona: Persona,
@@ -157,6 +162,7 @@ fun PersonaEditor(
     var kokoroVoice by remember(persona) { mutableStateOf(persona.kokoroVoice) }
     var backendUrl by remember(persona) { mutableStateOf(persona.backendUrl) }
     var showDeleteConfirm by rememberSaveable { mutableStateOf(false) }
+    var showFullscreenPrompt by rememberSaveable { mutableStateOf(false) }
 
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -555,13 +561,32 @@ fun PersonaEditor(
         }
 
         item {
-            OutlinedTextField(
-                value = systemPrompt,
-                onValueChange = { systemPrompt = it },
-                label = { Text("System Prompt") },
-                modifier = Modifier.fillMaxWidth().height(120.dp),
-                maxLines = 5
-            )
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("System Prompt", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f))
+                    IconButton(
+                        onClick = { showFullscreenPrompt = true },
+                        modifier = Modifier.size(32.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.OpenInFull,
+                            contentDescription = "Expand System Prompt",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                }
+                OutlinedTextField(
+                    value = systemPrompt,
+                    onValueChange = { systemPrompt = it },
+                    modifier = Modifier.fillMaxWidth().height(120.dp),
+                    maxLines = 5
+                )
+            }
         }
 
         item {
@@ -832,6 +857,61 @@ fun PersonaEditor(
                 }
             }
         )
+    }
+
+    if (showFullscreenPrompt) {
+        var tempPrompt by remember { mutableStateOf(systemPrompt) }
+        AlertDialog(
+            onDismissRequest = { showFullscreenPrompt = false },
+            modifier = Modifier.fillMaxSize(),
+            properties = DialogProperties(usePlatformDefaultWidth = false)
+        ) {
+            Surface(
+                modifier = Modifier.fillMaxSize(),
+                shape = RectangleShape,
+                color = MaterialTheme.colorScheme.surface,
+                tonalElevation = 6.dp
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(16.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("Edit System Prompt", style = MaterialTheme.typography.titleLarge)
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            TextButton(onClick = { showFullscreenPrompt = false }) {
+                                Text("Cancel")
+                            }
+                            Button(
+                                onClick = {
+                                    systemPrompt = tempPrompt
+                                    showFullscreenPrompt = false
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = themeColor.copy(alpha = 0.8f))
+                            ) {
+                                Text("Save")
+                            }
+                        }
+                    }
+
+                    OutlinedTextField(
+                        value = tempPrompt,
+                        onValueChange = { tempPrompt = it },
+                        label = { Text("System Prompt") },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f),
+                        maxLines = Int.MAX_VALUE
+                    )
+                }
+            }
+        }
     }
 }
 
