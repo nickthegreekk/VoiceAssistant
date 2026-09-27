@@ -1266,7 +1266,7 @@ class AssistantService : Service() {
         }
 
         _ollamaBaseUrls.value = settingsManager.getOllamaBases() ?: emptyList()
-        _imageGenBases.value = settingsManager.getImageGenBases()?.takeIf { it.isNotEmpty() } ?: listOf(ServerConfig("Local A1111", "http://192.168.2.26:7860"))
+        _imageGenBases.value = settingsManager.getImageGenBases()?.takeIf { it.isNotEmpty() } ?: listOf(ServerConfig("Local A1111", "http://0.0.0.0:7860"))
         _totalCost.value = settingsManager.getTotalCost()
         _favoriteModels.value = settingsManager.getFavoriteModels() ?: emptyList()
         _lastPriceSyncTimestamp.value = settingsManager.getLastPriceSyncTimestamp()

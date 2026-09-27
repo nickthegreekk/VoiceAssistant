@@ -1999,7 +1999,7 @@ private fun Response.decodeTextHeader(name: String, fallback: String): String {
 
 internal suspend fun AssistantService.performImageGeneration(prompt: String, currentPersona: Persona) {
     if (ContextCompat.checkSelfPermission(this, "android.permission.ACCESS_LOCAL_NETWORK") != PackageManager.PERMISSION_GRANTED) {
-        throw Exception("Local network access permission is required to connect to local A1111 servers (192.168.x.x). Please grant Local Network permission in app settings.")
+        throw Exception("Local network access permission is required to connect to local A1111 servers (0.0.0.0). Please grant Local Network permission in app settings.")
     }
     val startTime = System.currentTimeMillis()
     _state.value = AssistantState.THINKING
@@ -2008,7 +2008,7 @@ internal suspend fun AssistantService.performImageGeneration(prompt: String, cur
         val serverUrl = run {
             val raw = currentPersona.backendUrl
             val matched = _imageGenBases.value.find { it.name == raw || it.url == raw }
-            (matched?.url ?: raw.ifBlank { _imageGenBases.value.firstOrNull()?.url ?: "http://192.168.2.26:7860" }).trim().removeSuffix("/")
+            (matched?.url ?: raw.ifBlank { _imageGenBases.value.firstOrNull()?.url ?: "http://0.0.0.0:7860" }).trim().removeSuffix("/")
         }
 
         val jsonBody = JSONObject().apply {
