@@ -1150,9 +1150,9 @@ class AssistantService : Service() {
         checkForAppUpdate()
     }
 
-    fun forceCheckHealth(target: ServerConfig, isGateway: Boolean) {
+    fun forceCheckHealth(target: ServerConfig, isGateway: Boolean, isImageGen: Boolean = false) {
         serviceScope.launch(Dispatchers.IO) {
-            checkServerHealth(target, isGateway)
+            checkServerHealth(target, isGateway, isImageGen)
         }
     }
 
@@ -1168,20 +1168,23 @@ class AssistantService : Service() {
         }
     }
 
-    private fun buildHealthCheckUrl(target: ServerConfig, isGateway: Boolean): String {
-        return if (isGateway) {
-            target.url.trimEnd('/') + "/"
-        } else {
-            var base = target.url.trim().removeSuffix("/")
-            if (base.endsWith("/v1")) base = base.removeSuffix("/v1")
-            if (base.endsWith("/api")) base = base.removeSuffix("/api")
-            "$base/api/tags"
+    private fun buildHealthCheckUrl(target: ServerConfig, isGateway: Boolean, isImageGen: Boolean = false): String {
+        val base = target.url.trim().removeSuffix("/")
+        return when {
+            isGateway -> "$base/"
+            isImageGen -> "$base/sdapi/v1/sd-models"
+            else -> {
+                var b = base
+                if (b.endsWith("/v1")) b = b.removeSuffix("/v1")
+                if (b.endsWith("/api")) b = b.removeSuffix("/api")
+                "$b/api/tags"
+            }
         }
     }
 
-    private suspend fun checkServerHealth(target: ServerConfig, isGateway: Boolean) {
+    private suspend fun checkServerHealth(target: ServerConfig, isGateway: Boolean, isImageGen: Boolean = false) {
         val authorizationHeader = buildAuthorizationHeader(target)
-        val url = buildHealthCheckUrl(target, isGateway)
+        val url = buildHealthCheckUrl(target, isGateway, isImageGen)
 
         // #3 (health) fix: this runs on Dispatchers.IO — the 30s periodic sweep below and
         // forceCheckHealth both launch there — but _serverStatus may only be
@@ -1221,14 +1224,14 @@ class AssistantService : Service() {
     // raw outcome so the setup UI can surface the specific problem (bad credentials vs
     // wrong URL vs unreachable host). Short 10s timeouts so the Test button fails fast;
     // built on `client` so self-signed gateway certs are accepted exactly as today.
-    internal suspend fun testServerConnection(target: ServerConfig, isGateway: Boolean): ServerConnectionResult {
+    internal suspend fun testServerConnection(target: ServerConfig, isGateway: Boolean, isImageGen: Boolean = false): ServerConnectionResult {
         val probeClient = client.newBuilder()
             .connectTimeout(10, TimeUnit.SECONDS)
             .readTimeout(10, TimeUnit.SECONDS)
             .build()
         return withContext(Dispatchers.IO) {
             try {
-                val requestBuilder = Request.Builder().url(buildHealthCheckUrl(target, isGateway))
+                val requestBuilder = Request.Builder().url(buildHealthCheckUrl(target, isGateway, isImageGen))
                 buildAuthorizationHeader(target)?.let { requestBuilder.header("Authorization", it) }
                 probeClient.newCall(requestBuilder.build()).execute().use { response ->
                     if (response.isSuccessful) {

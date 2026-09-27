@@ -701,6 +701,9 @@ fun MainScreen(service: AssistantService?) {
             if (ContextCompat.checkSelfPermission(context, Manifest.permission.READ_PHONE_STATE) != PackageManager.PERMISSION_GRANTED) {
                 add(Manifest.permission.READ_PHONE_STATE)
             }
+            if (ContextCompat.checkSelfPermission(context, "android.permission.ACCESS_LOCAL_NETWORK") != PackageManager.PERMISSION_GRANTED) {
+                add("android.permission.ACCESS_LOCAL_NETWORK")
+            }
         }
         if (needed.isNotEmpty()) permissionLauncher.launch(needed.toTypedArray())
     }

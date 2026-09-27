@@ -1,8 +1,11 @@
 package com.nikosm.voiceassistant
 
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.util.Base64
 import android.util.Log
+import androidx.core.content.ContextCompat
 import androidx.compose.ui.graphics.Color
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -662,8 +665,9 @@ internal fun AssistantService.sendTextMessageToServer(inputText: String, current
         )
         saveSettings()
 
-        if (currentPersona.isImageGenerator) {
-            performImageGeneration(inputText, currentPersona)
+        if (currentPersona.isImageGenerator || isImageGenerationRequest(inputText)) {
+            val imagePrompt = if (isImageGenerationRequest(inputText)) extractImageGenerationPrompt(inputText) else inputText
+            performImageGeneration(imagePrompt.ifBlank { inputText }, currentPersona)
             return@launch
         }
 
@@ -1994,6 +1998,9 @@ private fun Response.decodeTextHeader(name: String, fallback: String): String {
 }
 
 internal suspend fun AssistantService.performImageGeneration(prompt: String, currentPersona: Persona) {
+    if (ContextCompat.checkSelfPermission(this, "android.permission.ACCESS_LOCAL_NETWORK") != PackageManager.PERMISSION_GRANTED) {
+        throw Exception("Local network access permission is required to connect to local A1111 servers (192.168.x.x). Please grant Local Network permission in app settings.")
+    }
     val startTime = System.currentTimeMillis()
     _state.value = AssistantState.THINKING
     updateNotification("Generating image...")

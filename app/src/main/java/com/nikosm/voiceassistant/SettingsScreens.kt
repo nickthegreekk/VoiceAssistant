@@ -670,11 +670,12 @@ fun ServerSettings(service: AssistantService, gateways: List<ServerConfig>, olla
                 onAdd = { name: String, url: String, user: String?, pass: String?, authType: AuthType, apiKey: String? -> service.addImageGenBase(name, url, user, pass, authType, apiKey) },
                 onRemove = { service.removeImageGenBase(it) },
                 onEdit = { old: ServerConfig, name: String, url: String, user: String?, pass: String?, authType: AuthType, apiKey: String? -> service.updateImageGenBase(old, name, url, user, pass, authType, apiKey) },
-                onRefreshHealth = { service.forceCheckHealth(it, false) },
+                onRefreshHealth = { service.forceCheckHealth(it, false, true) },
                 onRefreshModels = { },
                 onMoveUp = { service.moveImageGenUp(it) },
                 onMoveDown = { service.moveImageGenDown(it) },
                 isGateway = false,
+                isImageGen = true,
                 service = service,
                 snackbarHostState = snackbarHostState
             )
@@ -843,6 +844,7 @@ fun ServerListSection(
     onMoveUp: (ServerConfig) -> Unit,
     onMoveDown: (ServerConfig) -> Unit,
     isGateway: Boolean,
+    isImageGen: Boolean = false,
     service: AssistantService,
     snackbarHostState: SnackbarHostState
 ) {
@@ -901,7 +903,7 @@ fun ServerListSection(
                                 // The dot alone is easy to miss — also surface a specific,
                                 // actionable failure message for this manual re-check.
                                 scope.launch {
-                                    val result = service.testServerConnection(server, isGateway)
+                                    val result = service.testServerConnection(server, isGateway, isImageGen)
                                     if (!result.success) {
                                         snackbarHostState.showSnackbar(
                                             message = "${server.name}: ${serverConnectionFailureMessage(result, server.effectiveAuthType)}",
@@ -1018,7 +1020,7 @@ fun ServerListSection(
                                     testOutcome = null
                                     testInProgress = true
                                     scope.launch {
-                                        val result = service.testServerConnection(candidate, isGateway)
+                                        val result = service.testServerConnection(candidate, isGateway, isImageGen)
                                         testOutcome = result to candidate.effectiveAuthType
                                         testInProgress = false
                                     }

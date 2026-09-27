@@ -111,3 +111,20 @@ internal suspend fun AssistantService.fetchNewsContext(): String {
 internal fun AssistantService.getCurrentDateTimeString(): String {
     return SimpleDateFormat("EEEE, MMMM d, yyyy, HH:mm", Locale.getDefault()).format(Date())
 }
+
+internal fun AssistantService.isImageGenerationRequest(text: String): Boolean {
+    val trimmed = text.trim()
+    val triggers = listOf("create an image of", "generate an image of", "draw me", "make an image of")
+    return triggers.any { trimmed.startsWith(it, ignoreCase = true) }
+}
+
+internal fun AssistantService.extractImageGenerationPrompt(text: String): String {
+    val trimmed = text.trim()
+    val triggers = listOf("create an image of", "generate an image of", "draw me", "make an image of")
+    for (trigger in triggers) {
+        if (trimmed.startsWith(trigger, ignoreCase = true)) {
+            return trimmed.substring(trigger.length).trim()
+        }
+    }
+    return trimmed
+}
