@@ -157,6 +157,7 @@ fun PersonaEditor(
     var allowGatewayFailover by remember(persona) { mutableStateOf(persona.allowGatewayFailover) }
     
     var isTranslator by remember(persona) { mutableStateOf(persona.isTranslator) }
+    var isImageGenerator by remember(persona) { mutableStateOf(persona.isImageGenerator) }
     var targetLanguage by remember(persona) { mutableStateOf(persona.targetLanguage) }
     var voiceMode by remember(persona) { mutableStateOf(persona.voiceMode) }
     var voiceEngine by remember(persona) { mutableStateOf(persona.voiceEngine) }
@@ -232,6 +233,7 @@ fun PersonaEditor(
         ragEnabled = ragEnabled,
         allowGatewayFailover = allowGatewayFailover,
         isTranslator = isTranslator,
+        isImageGenerator = isImageGenerator,
         targetLanguage = targetLanguage,
         voiceMode = voiceMode,
         voiceEngine = voiceEngine,
@@ -281,7 +283,7 @@ fun PersonaEditor(
     }
 
     // Auto-save logic
-    LaunchedEffect(name, model, systemPrompt, themeColor, temp, topP, topK, repeatPenalty, maxTokens, numCtx, enableThinking, webSearchEnabled, ragEnabled, allowGatewayFailover, isTranslator, targetLanguage, voiceMode, voiceEngine, kokoroVoice, backendUrl, iconImageUri, backgroundImageUri) {
+    LaunchedEffect(name, model, systemPrompt, themeColor, temp, topP, topK, repeatPenalty, maxTokens, numCtx, enableThinking, webSearchEnabled, ragEnabled, allowGatewayFailover, isTranslator, isImageGenerator, targetLanguage, voiceMode, voiceEngine, kokoroVoice, backendUrl, iconImageUri, backgroundImageUri) {
         // Skip initial evaluation if needed? No, persona change will trigger it once, which is fine.
         delay(500)
         val trimmedModel = model.trim()
@@ -306,6 +308,7 @@ fun PersonaEditor(
                 trimmedModel.startsWith("[Cline]") -> "CL"
                 customCloudApis.any { it.name == providerName } || trimmedModel.startsWith("[OpenAI-Compatible]") -> "C"
                 trimmedModel.contains("Translator") || isTranslator -> "T"
+                isImageGenerator -> "IMG"
                 else -> "O" // Local Ollama
             },
             temperature = temp,
@@ -319,6 +322,7 @@ fun PersonaEditor(
             ragEnabled = ragEnabled,
             allowGatewayFailover = allowGatewayFailover,
             isTranslator = isTranslator,
+            isImageGenerator = isImageGenerator,
             targetLanguage = targetLanguage,
             voiceMode = voiceMode,
             voiceEngine = voiceEngine,
@@ -361,8 +365,68 @@ fun PersonaEditor(
 
         item {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Checkbox(checked = isTranslator, onCheckedChange = { isTranslator = it })
+                Checkbox(
+                    checked = isTranslator,
+                    onCheckedChange = {
+                        isTranslator = it
+                        if (it) isImageGenerator = false
+                    }
+                )
                 Text("Translator Persona")
+            }
+        }
+
+        item {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Checkbox(
+                    checked = isImageGenerator,
+                    onCheckedChange = {
+                        isImageGenerator = it
+                        if (it) isTranslator = false
+                    }
+                )
+                Text("Image Generator Persona (A1111)")
+            }
+        }
+
+        if (isImageGenerator) {
+            item {
+                var imageGenBases by remember { mutableStateOf<List<ServerConfig>>(emptyList()) }
+                LaunchedEffect(service) {
+                    launch { service.imageGenBases.collect { imageGenBases = it } }
+                }
+
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    var expanded by remember { mutableStateOf(false) }
+                    val selectedName = imageGenBases.find { it.url == backendUrl }?.name ?: if (backendUrl.isNotBlank()) "Custom URL" else "Select Server"
+                    Box(modifier = Modifier.fillMaxWidth()) {
+                        OutlinedTextField(
+                            value = selectedName,
+                            onValueChange = {},
+                            readOnly = true,
+                            label = { Text("A1111 Backend") },
+                            modifier = Modifier.fillMaxWidth(),
+                            trailingIcon = { IconButton(onClick = { expanded = true }) { Icon(Icons.Default.ArrowDropDown, null) } }
+                        )
+                        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                            imageGenBases.forEach { cfg ->
+                                DropdownMenuItem(
+                                    text = { Text(cfg.name) },
+                                    onClick = {
+                                        backendUrl = cfg.url
+                                        expanded = false
+                                    }
+                                )
+                            }
+                        }
+                    }
+                    OutlinedTextField(
+                        value = backendUrl,
+                        onValueChange = { backendUrl = it },
+                        label = { Text("Server URL") },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
             }
         }
 

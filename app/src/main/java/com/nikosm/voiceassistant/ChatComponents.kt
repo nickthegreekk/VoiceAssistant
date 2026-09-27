@@ -2,8 +2,15 @@ package com.nikosm.voiceassistant
 
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
+import android.widget.Toast
+import android.net.Uri
+import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
+import android.util.Log
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
@@ -39,6 +46,7 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.AlertDialog
@@ -91,6 +99,7 @@ fun ChatMessageBubble(
     highlightColor: Color? = null,
     onLongClick: (() -> Unit)? = null,
     onReplayAudio: (() -> Unit)? = null,
+    onRegenerateImage: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val isUser = message.role == "user"
@@ -198,6 +207,83 @@ fun ChatMessageBubble(
             }
         }
 
+        if (message.generatedImagePath != null) {
+            Spacer(modifier = Modifier.height(8.dp))
+            Surface(
+                modifier = Modifier
+                    .width(256.dp)
+                    .height(256.dp),
+                shape = MaterialTheme.shapes.small,
+                color = MaterialTheme.colorScheme.surfaceVariant
+            ) {
+                AsyncImage(
+                    model = File(message.generatedImagePath),
+                    contentDescription = "Generated image",
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
+            val context = LocalContext.current
+            if (!isCompact) {
+                Spacer(modifier = Modifier.height(4.dp))
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (onRegenerateImage != null) {
+                        TextButton(onClick = onRegenerateImage) {
+                            Icon(Icons.Default.Refresh, null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("Regenerate")
+                        }
+                    }
+                    TextButton(onClick = {
+                        try {
+                            val sourceFile = File(message.generatedImagePath)
+                            if (!sourceFile.exists()) {
+                                Toast.makeText(context, "Image file not found", Toast.LENGTH_SHORT).show()
+                                return@TextButton
+                            }
+                            val filename = "Gen_${System.currentTimeMillis()}.png"
+                            val resolver = context.contentResolver
+                            val contentValues = ContentValues().apply {
+                                put(MediaStore.Images.Media.DISPLAY_NAME, filename)
+                                put(MediaStore.Images.Media.MIME_TYPE, "image/png")
+                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                                    put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/VoiceAssistant")
+                                    put(MediaStore.Images.Media.IS_PENDING, 1)
+                                }
+                            }
+
+                            val imageUri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, contentValues)
+                            if (imageUri == null) {
+                                throw Exception("Failed to create MediaStore entry")
+                            }
+
+                            resolver.openOutputStream(imageUri)?.use { outputStream ->
+                                sourceFile.inputStream().use { inputStream ->
+                                    inputStream.copyTo(outputStream)
+                                }
+                            }
+
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                                contentValues.clear()
+                                contentValues.put(MediaStore.Images.Media.IS_PENDING, 0)
+                                resolver.update(imageUri, contentValues, null, null)
+                            }
+
+                            Toast.makeText(context, "Saved to gallery", Toast.LENGTH_SHORT).show()
+                        } catch (e: Exception) {
+                            Log.e("ChatComponents", "Failed to save image to gallery", e)
+                            Toast.makeText(context, "Failed to save: ${e.message}", Toast.LENGTH_SHORT).show()
+                        }
+                    }) {
+                        Text("Save to gallery")
+                    }
+                }
+            }
+        }
+
         if (!isUser && onReplayAudio != null && !isCompact) {
             IconButton(
                 onClick = onReplayAudio,
@@ -236,7 +322,8 @@ fun ChatList(
     voiceDuration: Int,
     onEditMessage: (Int, String) -> Unit,
     onDeleteMessage: (Int) -> Unit,
-    onReplayAudio: (ChatMessage) -> Unit
+    onReplayAudio: (ChatMessage) -> Unit,
+    onRegenerateImage: ((Int) -> Unit)? = null
 ) {
     val context = LocalContext.current
     val clipboardManager = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
@@ -279,6 +366,7 @@ fun ChatList(
                         horizontalAlignment = if (isUser) Alignment.End else Alignment.Start,
                         onLongClick = { menuMessageIndex = index },
                         onReplayAudio = { onReplayAudio(message) },
+                        onRegenerateImage = if (message.generatedImagePath != null && onRegenerateImage != null) { { onRegenerateImage(index) } } else null,
                         modifier = Modifier.fillMaxWidth(0.92f)
                     )
 
@@ -417,7 +505,8 @@ fun TextInputRow(
     state: AssistantState,
     personaColor: Color,
     focusRequester: FocusRequester,
-    attachedFiles: List<android.net.Uri>
+    attachedFiles: List<Uri>,
+    isImageGenerator: Boolean = false
 ) {
     val hasContent = textInput.isNotBlank() || attachedFiles.isNotEmpty()
     val isListening = state == AssistantState.LISTENING
@@ -431,7 +520,7 @@ fun TextInputRow(
             value = textInput,
             onValueChange = onTextInputChange,
             modifier = Modifier.weight(1f).focusRequester(focusRequester),
-            placeholder = { Text("Type something...", style = MaterialTheme.typography.bodyMedium) },
+            placeholder = { Text(if (isImageGenerator) "Describe the image you want..." else "Type something...", style = MaterialTheme.typography.bodyMedium) },
             shape = RoundedCornerShape(24.dp),
             leadingIcon = {
                 IconButton(onClick = onAttachClick, modifier = Modifier.size(32.dp)) {

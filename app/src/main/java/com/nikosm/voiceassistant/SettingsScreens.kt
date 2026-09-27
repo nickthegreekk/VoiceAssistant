@@ -129,6 +129,7 @@ fun SettingsDialog(service: AssistantService?, onDismiss: () -> Unit, personaCol
     var totalCost by remember { mutableDoubleStateOf(0.0) }
     var serverBases by remember { mutableStateOf<List<ServerConfig>>(emptyList()) }
     var ollamaBases by remember { mutableStateOf<List<ServerConfig>>(emptyList()) }
+    var imageGenBases by remember { mutableStateOf<List<ServerConfig>>(emptyList()) }
     var cloudApis by remember { mutableStateOf<List<CloudApiSetting>>(emptyList()) }
     var personas by remember { mutableStateOf<List<Persona>>(emptyList()) }
 
@@ -137,6 +138,7 @@ fun SettingsDialog(service: AssistantService?, onDismiss: () -> Unit, personaCol
             launch { service.totalCost.collect { totalCost = it } }
             launch { service.serverBases.collect { serverBases = it } }
             launch { service.ollamaBaseUrls.collect { ollamaBases = it } }
+            launch { service.imageGenBases.collect { imageGenBases = it } }
             launch { service.cloudApis.collect { cloudApis = it } }
             launch { service.personas.collect { personas = it } }
         }
@@ -183,7 +185,7 @@ fun SettingsDialog(service: AssistantService?, onDismiss: () -> Unit, personaCol
                 Box(modifier = Modifier.weight(1f).padding(16.dp)) {
                     when (selectedTab) {
                         0 -> GeneralSettings(service, totalCost, onDismiss)
-                        1 -> ServerSettings(service, serverBases, ollamaBases)
+                        1 -> ServerSettings(service, serverBases, ollamaBases, imageGenBases)
                         2 -> CloudSettings(service, cloudApis)
                         3 -> PersonaSettings(service, personas, personaColor)
                     }
@@ -613,7 +615,7 @@ fun GeneralSettings(service: AssistantService, totalCost: Double, onDismiss: () 
 }
 
 @Composable
-fun ServerSettings(service: AssistantService, gateways: List<ServerConfig>, ollama: List<ServerConfig>) {
+fun ServerSettings(service: AssistantService, gateways: List<ServerConfig>, ollama: List<ServerConfig>, imageGen: List<ServerConfig>) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var serverStatus by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
@@ -655,6 +657,23 @@ fun ServerSettings(service: AssistantService, gateways: List<ServerConfig>, olla
                 onRefreshModels = { service.fetchModels(it) },
                 onMoveUp = { service.moveServerUp(it, true) },
                 onMoveDown = { service.moveServerDown(it, true) },
+                isGateway = false,
+                service = service,
+                snackbarHostState = snackbarHostState
+            )
+        }
+        item {
+            ServerListSection(
+                title = "Image Gen Servers",
+                servers = imageGen,
+                status = serverStatus,
+                onAdd = { name: String, url: String, user: String?, pass: String?, authType: AuthType, apiKey: String? -> service.addImageGenBase(name, url, user, pass, authType, apiKey) },
+                onRemove = { service.removeImageGenBase(it) },
+                onEdit = { old: ServerConfig, name: String, url: String, user: String?, pass: String?, authType: AuthType, apiKey: String? -> service.updateImageGenBase(old, name, url, user, pass, authType, apiKey) },
+                onRefreshHealth = { service.forceCheckHealth(it, false) },
+                onRefreshModels = { },
+                onMoveUp = { service.moveImageGenUp(it) },
+                onMoveDown = { service.moveImageGenDown(it) },
                 isGateway = false,
                 service = service,
                 snackbarHostState = snackbarHostState

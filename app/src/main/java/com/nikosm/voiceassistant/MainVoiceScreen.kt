@@ -915,7 +915,9 @@ fun MainScreen(service: AssistantService?) {
                         listState = listState,
                         onEditMessage = { idx, txt -> service?.updateMessage(idx, txt) },
                         onDeleteMessage = { idx -> service?.deleteMessage(idx) },
-                        onReplayAudio = { msg -> service?.replayMessageAudio(msg, currentPersona) }
+                        onReplayAudio = { msg -> service?.replayMessageAudio(msg, currentPersona) },
+                        service = service,
+                        isImageGenerator = currentPersona.isImageGenerator
                         )
                     } // end celestial-if/else (HUD body vs classic ControlBar)
                 }
@@ -1094,7 +1096,9 @@ fun ControlBar(
     listState: LazyListState,
     onEditMessage: (Int, String) -> Unit,
     onDeleteMessage: (Int) -> Unit,
-    onReplayAudio: (ChatMessage) -> Unit
+    onReplayAudio: (ChatMessage) -> Unit,
+    service: AssistantService? = null,
+    isImageGenerator: Boolean = false
 ) {
     // Task 2: Wider chat box. Padding reduced from 16.dp to 8.dp in text mode.
     val horizontalPadding = if (textModeOpen) 8.dp else 16.dp
@@ -1114,7 +1118,8 @@ fun ControlBar(
                 voiceDuration = voiceDuration,
                 onEditMessage = onEditMessage,
                 onDeleteMessage = onDeleteMessage,
-                onReplayAudio = onReplayAudio
+                onReplayAudio = onReplayAudio,
+                onRegenerateImage = { index -> service?.regenerateImageMessage(index) }
             )
 
             Spacer(modifier = Modifier.height(16.dp))
@@ -1158,7 +1163,8 @@ fun ControlBar(
                 personaColor = personaColor,
                 focusRequester = focusRequester,
                 attachedFiles = attachedFiles,
-                attachedImage = attachedImage
+                attachedImage = attachedImage,
+                isImageGenerator = isImageGenerator
             )
         } else {
             Column(
@@ -1435,7 +1441,8 @@ fun TextInputRow(
     personaColor: Color,
     focusRequester: FocusRequester,
     attachedFiles: List<Uri>,
-    attachedImage: Uri?
+    attachedImage: Uri?,
+    isImageGenerator: Boolean = false
 ) {
     val hasContent = textInput.isNotBlank() || attachedFiles.isNotEmpty() || attachedImage != null
     val isListening = state == AssistantState.LISTENING
@@ -1450,7 +1457,7 @@ fun TextInputRow(
             value = textInput,
             onValueChange = onTextInputChange,
             modifier = Modifier.weight(1f).focusRequester(focusRequester),
-            placeholder = { Text("Type something...", style = MaterialTheme.typography.bodyMedium) },
+            placeholder = { Text(if (isImageGenerator) "Describe the image you want..." else "Type something...", style = MaterialTheme.typography.bodyMedium) },
             shape = RoundedCornerShape(24.dp),
             leadingIcon = {
                 // Task 3: Merged attachment button.

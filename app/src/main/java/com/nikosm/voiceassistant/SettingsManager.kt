@@ -168,6 +168,26 @@ class SettingsManager(context: Context) {
         } catch (e: Exception) { null }
     }
 
+    fun saveImageGenBases(bases: List<ServerConfig>) {
+        prefs.edit().putString("image_gen_bases_v2", json.encodeToString(bases)).apply()
+    }
+
+    fun getImageGenBases(): List<ServerConfig>? {
+        val data = prefs.getString("image_gen_bases_v2", null)
+        if (data != null) {
+            return runCatching { json.decodeFromString<List<ServerConfig>>(data) }
+                .onFailure { e ->
+                    Log.w(
+                        "SettingsManager",
+                        "Corrupted/unreadable JSON in image_gen_bases_v2 — ignoring entry, returning null",
+                        e
+                    )
+                }
+                .getOrNull()
+        }
+        return null
+    }
+
     fun saveCloudApis(apis: List<CloudApiSetting>) {
         prefs.edit().putString("cloud_apis_v2", json.encodeToString(apis)).apply()
     }
@@ -304,6 +324,9 @@ class SettingsManager(context: Context) {
                     try { File(path).delete() } catch (_: Exception) { /* already gone */ }
                 }
                 msg.imagePath?.let { path ->
+                    try { File(path).delete() } catch (_: Exception) { /* already gone */ }
+                }
+                msg.generatedImagePath?.let { path ->
                     try { File(path).delete() } catch (_: Exception) { /* already gone */ }
                 }
             }
@@ -508,6 +531,9 @@ class SettingsManager(context: Context) {
             msg.imagePath?.let { path ->
                 try { File(path).delete() } catch (_: Exception) { /* already gone */ }
             }
+            msg.generatedImagePath?.let { path ->
+                try { File(path).delete() } catch (_: Exception) { /* already gone */ }
+            }
         }
         prefs.edit().remove("persona_messages_$personaName").apply()
     }
@@ -535,6 +561,7 @@ class SettingsManager(context: Context) {
         val backup = BackupData(
             serverBases = getServerBases() ?: emptyList(),
             ollamaBases = getOllamaBases() ?: emptyList(),
+            imageGenBases = getImageGenBases() ?: emptyList(),
             cloudApis = getCloudApis() ?: emptyList(),
             customCloudApis = getCustomCloudApis() ?: emptyList(),
             personas = personas,
@@ -575,6 +602,7 @@ class SettingsManager(context: Context) {
             }
             saveServerBases(backup.serverBases)
             saveOllamaBases(backup.ollamaBases)
+            saveImageGenBases(backup.imageGenBases)
             saveCloudApis(backup.cloudApis)
             saveCustomCloudApis(backup.customCloudApis)
             savePersonas(restoredPersonas)
@@ -847,6 +875,7 @@ class SettingsManager(context: Context) {
 data class BackupData(
     val serverBases: List<ServerConfig>,
     val ollamaBases: List<ServerConfig>,
+    val imageGenBases: List<ServerConfig> = emptyList(),
     val cloudApis: List<CloudApiSetting>,
     val customCloudApis: List<CloudApiSetting> = emptyList(),
     val personas: List<Persona>,

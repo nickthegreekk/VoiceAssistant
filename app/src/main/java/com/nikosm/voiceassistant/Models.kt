@@ -33,7 +33,8 @@ data class ChatMessage(
     val isError: Boolean = false,
     val audioFilePath: String? = null,
     val responseTimeMs: Long? = null,
-    val imagePath: String? = null
+    val imagePath: String? = null,
+    val generatedImagePath: String? = null
 )
 
 /**
@@ -84,6 +85,7 @@ data class Persona(
     @Serializable(with = ColorSerializer::class)
     val providerColor: Color = Color(0xFF4ADE80), // Defaults to Ollama green
     val isTranslator: Boolean = false,
+    val isImageGenerator: Boolean = false,
     val targetLanguage: String = "English",
     val backendUrl: String = "",
     val allowGatewayFailover: Boolean = false, // S2: opt-in — when false, only backendUrl is ever contacted

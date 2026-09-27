@@ -19,6 +19,8 @@ import okhttp3.Response
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.io.FileOutputStream
+import java.net.URLDecoder
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
@@ -659,6 +661,11 @@ internal fun AssistantService.sendTextMessageToServer(inputText: String, current
             imagePath = imagePath
         )
         saveSettings()
+
+        if (currentPersona.isImageGenerator) {
+            performImageGeneration(inputText, currentPersona)
+            return@launch
+        }
 
         if (currentPersona.model.isBlank()) {
             _messages.value = _messages.value + ChatMessage("assistant", "Please choose a model for this persona in its settings.", isError = true)
@@ -1979,8 +1986,102 @@ fun AssistantService.syncOpenRouterPricing(force: Boolean = false) {
 
 private fun Response.decodeTextHeader(name: String, fallback: String): String {
     val encoded = this.header(name) ?: return fallback
-    return try { String(Base64.decode(encoded, Base64.DEFAULT), Charsets.UTF_8) } catch (e: Exception) { fallback }
+    return try {
+        URLDecoder.decode(encoded, "UTF-8")
+    } catch (e: Exception) {
+        fallback
+    }
 }
+
+internal suspend fun AssistantService.performImageGeneration(prompt: String, currentPersona: Persona) {
+    val startTime = System.currentTimeMillis()
+    _state.value = AssistantState.THINKING
+    updateNotification("Generating image...")
+    try {
+        val serverUrl = run {
+            val raw = currentPersona.backendUrl
+            val matched = _imageGenBases.value.find { it.name == raw || it.url == raw }
+            (matched?.url ?: raw.ifBlank { _imageGenBases.value.firstOrNull()?.url ?: "http://192.168.2.26:7860" }).trim().removeSuffix("/")
+        }
+
+        val jsonBody = JSONObject().apply {
+            put("prompt", prompt)
+            put("negative_prompt", "blurry, distorted, low quality, extra limbs, deformed")
+            put("steps", 20)
+            put("width", 512)
+            put("height", 512)
+        }.toString()
+
+        val requestBody = jsonBody.toRequestBody("application/json; charset=utf-8".toMediaType())
+        val request = Request.Builder()
+            .url("$serverUrl/sdapi/v1/txt2img")
+            .post(requestBody)
+            .build()
+
+        val responseString = withContext(Dispatchers.IO) {
+            client.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    throw Exception("Image generation failed: HTTP ${response.code} ${response.message}")
+                }
+                response.body.string()
+            }
+        }
+
+        val jsonObject = JSONObject(responseString)
+        val imagesArray = jsonObject.getJSONArray("images")
+        val base64Image = imagesArray.getString(0)
+        val pureBase64 = if (base64Image.contains(",")) base64Image.substringAfter(",") else base64Image
+        val imageBytes = Base64.decode(pureBase64, Base64.DEFAULT)
+
+        val cacheFile = File(cacheDir, "gen_${System.currentTimeMillis()}.png")
+        withContext(Dispatchers.IO) {
+            FileOutputStream(cacheFile).use { it.write(imageBytes) }
+        }
+
+        val responseTime = System.currentTimeMillis() - startTime
+        _state.value = AssistantState.IDLE
+        updateNotification("Ready to help")
+
+        _messages.value = _messages.value + ChatMessage(
+            role = "assistant",
+            text = prompt,
+            generatedImagePath = cacheFile.absolutePath,
+            responseTimeMs = responseTime
+        )
+        saveSettings()
+    } catch (e: Exception) {
+        _state.value = AssistantState.IDLE
+        updateNotification("Ready to help")
+        val errorMsg = e.message ?: "Unknown error during image generation"
+        _messages.value = _messages.value + ChatMessage(
+            role = "assistant",
+            text = "Image generation error: $errorMsg",
+            isError = true
+        )
+        saveSettings()
+    }
+}
+
+fun AssistantService.regenerateImageMessage(index: Int) {
+    val messagesList = _messages.value
+    if (index !in messagesList.indices) return
+    val msg = messagesList[index]
+    val prompt = msg.text
+    if (prompt.isBlank()) return
+    msg.generatedImagePath?.let { path ->
+        try { File(path).delete() } catch (_: Exception) { }
+    }
+    serviceScope.launch {
+        val currentList = _messages.value.toMutableList()
+        if (index in currentList.indices) {
+            currentList.removeAt(index)
+            _messages.value = currentList
+            saveSettings()
+        }
+        currentPersona?.let { performImageGeneration(prompt, it) }
+    }
+}
+
 
 // Fix #6 (numCtx overflow): the ONE place the client-side history budget is computed,
 // shared by the two budgeted request builders — performDirectOllamaChat and

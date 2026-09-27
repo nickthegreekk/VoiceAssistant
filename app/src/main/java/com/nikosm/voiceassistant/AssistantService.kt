@@ -472,6 +472,9 @@ class AssistantService : Service() {
     internal val _ollamaBaseUrls = MutableStateFlow<List<ServerConfig>>(emptyList())
     val ollamaBaseUrls = _ollamaBaseUrls.asStateFlow()
 
+    internal val _imageGenBases = MutableStateFlow<List<ServerConfig>>(emptyList())
+    val imageGenBases = _imageGenBases.asStateFlow()
+
     private val _manualModels = MutableStateFlow<List<String>>(emptyList())
     val manualModels = _manualModels.asStateFlow()
 
@@ -1260,6 +1263,7 @@ class AssistantService : Service() {
         }
 
         _ollamaBaseUrls.value = settingsManager.getOllamaBases() ?: emptyList()
+        _imageGenBases.value = settingsManager.getImageGenBases()?.takeIf { it.isNotEmpty() } ?: listOf(ServerConfig("Local A1111", "http://192.168.2.26:7860"))
         _totalCost.value = settingsManager.getTotalCost()
         _favoriteModels.value = settingsManager.getFavoriteModels() ?: emptyList()
         _lastPriceSyncTimestamp.value = settingsManager.getLastPriceSyncTimestamp()
@@ -1309,6 +1313,7 @@ class AssistantService : Service() {
             settingsManager.savePersonaMessages(name, _messages.value)
         }
         settingsManager.saveOllamaBases(_ollamaBaseUrls.value)
+        settingsManager.saveImageGenBases(_imageGenBases.value)
         settingsManager.saveTotalCost(_totalCost.value)
         settingsManager.saveFavoriteModels(_favoriteModels.value)
     }
@@ -1436,6 +1441,68 @@ class AssistantService : Service() {
             _ollamaBaseUrls.value = current
             saveSettings()
             fetchModels(current[idx])
+        }
+    }
+
+    fun addImageGenBase(name: String, url: String, username: String? = null, password: String? = null, authType: AuthType = AuthType.NONE, apiKey: String? = null) {
+        if (_imageGenBases.value.none { it.url == url }) {
+            _imageGenBases.value = _imageGenBases.value + ServerConfig(name, url, username, password, authType, apiKey)
+            saveSettings()
+        } else {
+            val existing = _imageGenBases.value.first { it.url == url }
+            Toast.makeText(
+                applicationContext,
+                "URL already used by Image Gen server '${existing.name}' — add rejected",
+                Toast.LENGTH_LONG
+            ).show()
+        }
+    }
+
+    fun removeImageGenBase(config: ServerConfig) {
+        _imageGenBases.value = _imageGenBases.value - config
+        saveSettings()
+    }
+
+    fun updateImageGenBase(oldConfig: ServerConfig, newName: String, newUrl: String, newUsername: String? = null, newPassword: String? = null, newAuthType: AuthType = AuthType.NONE, newApiKey: String? = null) {
+        val current = _imageGenBases.value.toMutableList()
+        val idx = current.indexOf(oldConfig)
+        if (idx != -1) {
+            val duplicate = current.withIndex().firstOrNull { (i, cfg) -> i != idx && cfg.url == newUrl }
+            if (duplicate != null) {
+                Toast.makeText(
+                    applicationContext,
+                    "URL already used by Image Gen server '${duplicate.value.name}' — edit rejected",
+                    Toast.LENGTH_LONG
+                ).show()
+                return
+            }
+            current[idx] = ServerConfig(newName, newUrl, newUsername, newPassword, newAuthType, newApiKey)
+            _imageGenBases.value = current
+            saveSettings()
+        }
+    }
+
+    fun moveImageGenUp(config: ServerConfig) {
+        val list = _imageGenBases.value.toMutableList()
+        val idx = list.indexOf(config)
+        if (idx > 0) {
+            val temp = list[idx]
+            list[idx] = list[idx - 1]
+            list[idx - 1] = temp
+            _imageGenBases.value = list
+            saveSettings()
+        }
+    }
+
+    fun moveImageGenDown(config: ServerConfig) {
+        val list = _imageGenBases.value.toMutableList()
+        val idx = list.indexOf(config)
+        if (idx != -1 && idx < list.size - 1) {
+            val temp = list[idx]
+            list[idx] = list[idx + 1]
+            list[idx + 1] = temp
+            _imageGenBases.value = list
+            saveSettings()
         }
     }
 
@@ -2193,6 +2260,7 @@ class AssistantService : Service() {
         _messages.value.forEach { msg ->
             msg.audioFilePath?.let { path -> try { File(path).delete() } catch (_: Exception) {} }
             msg.imagePath?.let { path -> try { File(path).delete() } catch (_: Exception) {} }
+            msg.generatedImagePath?.let { path -> try { File(path).delete() } catch (_: Exception) {} }
         }
 
         // L5: the empty-list write is what must be observed synchronously (the tests and the
@@ -2233,6 +2301,9 @@ class AssistantService : Service() {
                 try { File(path).delete() } catch (_: Exception) { }
             }
             removed.imagePath?.let { path ->
+                try { File(path).delete() } catch (_: Exception) { }
+            }
+            removed.generatedImagePath?.let { path ->
                 try { File(path).delete() } catch (_: Exception) { }
             }
             saveSettings()
