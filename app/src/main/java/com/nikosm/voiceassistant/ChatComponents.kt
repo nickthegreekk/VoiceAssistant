@@ -23,8 +23,14 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -38,9 +44,13 @@ import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.animation.animateContentSize
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.ui.unit.sp
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
@@ -583,125 +593,201 @@ fun TextInputRow(
 enum class SuggestionState { IDLE, LOADING, READY, FAILED }
 
 @Composable
-fun SuggestedRepliesRow(
+fun SuggestedRepliesPanel(
     suggestionState: SuggestionState,
     suggestions: List<String>,
     onSuggestionClick: (String) -> Unit,
     onRequestSuggestions: () -> Unit,
     onDismiss: () -> Unit,
-    personaColor: Color
+    personaColor: Color,
+    chatFontSize: Float = 14f
 ) {
-    Surface(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
-        shape = RoundedCornerShape(16.dp),
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f),
-        border = BorderStroke(0.5.dp, personaColor.copy(alpha = 0.2f))
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            when (suggestionState) {
-                SuggestionState.IDLE -> {
+    var isExpanded by remember { mutableStateOf(true) }
+
+    LaunchedEffect(suggestionState) {
+        if (suggestionState == SuggestionState.READY || suggestionState == SuggestionState.LOADING) {
+            isExpanded = true
+        }
+    }
+
+    when (suggestionState) {
+        SuggestionState.IDLE -> {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Surface(
+                    modifier = Modifier.clickable { onRequestSuggestions() },
+                    shape = RoundedCornerShape(16.dp),
+                    color = personaColor.copy(alpha = 0.15f),
+                    border = BorderStroke(1.dp, personaColor.copy(alpha = 0.4f))
+                ) {
                     Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.Center,
-                        verticalAlignment = Alignment.CenterVertically
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Surface(
-                            modifier = Modifier.clickable { onRequestSuggestions() },
-                            shape = RoundedCornerShape(16.dp),
-                            color = personaColor.copy(alpha = 0.15f),
-                            border = BorderStroke(1.dp, personaColor.copy(alpha = 0.4f))
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
-                            ) {
-                                Icon(Icons.Default.AutoAwesome, null, modifier = Modifier.size(16.dp), tint = personaColor)
-                                Text("Suggest replies", style = MaterialTheme.typography.labelMedium, color = personaColor)
-                            }
-                        }
+                        Icon(Icons.Default.AutoAwesome, null, modifier = Modifier.size(16.dp), tint = personaColor)
+                        Text("Suggest replies", style = MaterialTheme.typography.labelMedium, color = personaColor)
                     }
                 }
-                SuggestionState.LOADING -> {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.Center,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Surface(
-                            shape = RoundedCornerShape(16.dp),
-                            color = personaColor.copy(alpha = 0.15f),
-                            border = BorderStroke(1.dp, personaColor.copy(alpha = 0.4f))
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
-                            ) {
-                                CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp, color = personaColor)
-                                Text("Suggesting...", style = MaterialTheme.typography.labelMedium, color = personaColor)
-                            }
-                        }
+            }
+        }
+        SuggestionState.LOADING -> {
+            Surface(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
+                shape = RoundedCornerShape(16.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f),
+                border = BorderStroke(0.5.dp, personaColor.copy(alpha = 0.2f))
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.Center
+                ) {
+                    CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp, color = personaColor)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Suggesting...", style = MaterialTheme.typography.bodyMedium, color = personaColor)
+                }
+            }
+        }
+        SuggestionState.FAILED -> {
+            Surface(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
+                shape = RoundedCornerShape(16.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f),
+                border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.3f))
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "Couldn't get suggestions, tap to retry",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.clickable { onRequestSuggestions() }.weight(1f)
+                    )
+                    IconButton(onClick = onDismiss, modifier = Modifier.size(44.dp)) {
+                        Icon(Icons.Default.Close, "Dismiss", modifier = Modifier.size(20.dp))
                     }
                 }
-                SuggestionState.FAILED -> {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            "Couldn't get suggestions, tap to retry",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.error,
-                            modifier = Modifier.clickable { onRequestSuggestions() }.weight(1f)
-                        )
-                        IconButton(onClick = onDismiss, modifier = Modifier.size(24.dp)) {
-                            Icon(Icons.Default.Close, null, modifier = Modifier.size(16.dp))
-                        }
-                    }
-                }
-                SuggestionState.READY -> {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
+            }
+        }
+        SuggestionState.READY -> {
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 8.dp, vertical = 4.dp)
+                    .animateContentSize(),
+                shape = RoundedCornerShape(16.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
+                border = BorderStroke(0.5.dp, personaColor.copy(alpha = 0.3f)),
+                tonalElevation = 2.dp
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 8.dp)
+                ) {
+                    if (!isExpanded) {
                         Row(
-                            modifier = Modifier.weight(1f).horizontalScroll(rememberScrollState()),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = 44.dp)
+                                .clickable { isExpanded = true },
+                            horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            suggestions.forEach { suggestion ->
-                                Surface(
-                                    modifier = Modifier.clickable { onSuggestionClick(suggestion) },
-                                    shape = RoundedCornerShape(12.dp),
-                                    color = personaColor.copy(alpha = 0.15f),
-                                    border = BorderStroke(1.dp, personaColor.copy(alpha = 0.4f))
+                            Text(
+                                "${suggestions.size} suggested replies ▾",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = personaColor,
+                                modifier = Modifier.padding(start = 4.dp)
+                            )
+                            IconButton(onClick = onDismiss, modifier = Modifier.size(44.dp)) {
+                                Icon(Icons.Default.Close, "Dismiss", modifier = Modifier.size(20.dp))
+                            }
+                        }
+                    } else {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = 44.dp)
+                                .clickable { isExpanded = false },
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Icon(Icons.Default.AutoAwesome, null, modifier = Modifier.size(16.dp), tint = personaColor)
+                                Text(
+                                    "Suggested replies ▴",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = personaColor
+                                )
+                            }
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                IconButton(
+                                    onClick = onRequestSuggestions,
+                                    modifier = Modifier.size(44.dp)
                                 ) {
-                                    Text(
-                                        text = suggestion,
-                                        style = MaterialTheme.typography.bodySmall,
-                                        maxLines = 3,
-                                        overflow = TextOverflow.Ellipsis,
-                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
-                                    )
+                                    Icon(Icons.Default.Refresh, "Refresh", modifier = Modifier.size(20.dp), tint = personaColor)
+                                }
+                                IconButton(
+                                    onClick = onDismiss,
+                                    modifier = Modifier.size(44.dp)
+                                ) {
+                                    Icon(Icons.Default.Close, "Dismiss", modifier = Modifier.size(20.dp))
                                 }
                             }
                         }
-                        Row(
-                            horizontalArrangement = Arrangement.spacedBy(4.dp),
-                            verticalAlignment = Alignment.CenterVertically
+
+                        Spacer(modifier = Modifier.height(4.dp))
+
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = 320.dp)
+                                .verticalScroll(rememberScrollState()),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
                         ) {
-                            IconButton(onClick = onRequestSuggestions, modifier = Modifier.size(28.dp)) {
-                                Icon(Icons.Default.Refresh, "Refresh", modifier = Modifier.size(16.dp), tint = personaColor)
-                            }
-                            IconButton(onClick = onDismiss, modifier = Modifier.size(28.dp)) {
-                                Icon(Icons.Default.Close, "Dismiss", modifier = Modifier.size(16.dp))
+                            suggestions.forEachIndexed { index, suggestion ->
+                                if (index > 0) {
+                                    HorizontalDivider(
+                                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f),
+                                        thickness = 0.5.dp
+                                    )
+                                }
+                                Surface(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable { onSuggestionClick(suggestion) },
+                                    color = Color.Transparent
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(vertical = 12.dp, horizontal = 8.dp)
+                                            .heightIn(min = 24.dp),
+                                        contentAlignment = Alignment.CenterStart
+                                    ) {
+                                        Text(
+                                            text = suggestion,
+                                            style = MaterialTheme.typography.bodyMedium.copy(fontSize = chatFontSize.sp),
+                                            maxLines = 5,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                }
                             }
                         }
                     }

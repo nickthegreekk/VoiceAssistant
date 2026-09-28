@@ -1177,7 +1177,7 @@ fun ControlBar(
                 currentPersona.model.isNotBlank()
 
             if (shouldShowSuggestions) {
-                SuggestedRepliesRow(
+                SuggestedRepliesPanel(
                     suggestionState = suggestionState,
                     suggestions = suggestionList,
                     onSuggestionClick = { chosen ->
@@ -1207,7 +1207,8 @@ fun ControlBar(
                         suggestionState = SuggestionState.IDLE
                         suggestionList = emptyList()
                     },
-                    personaColor = personaColor
+                    personaColor = personaColor,
+                    chatFontSize = chatFontSize
                 )
                 Spacer(modifier = Modifier.height(8.dp))
             }
