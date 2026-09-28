@@ -1263,7 +1263,20 @@ fun ControlBar(
                         // Never fail silently: "Couldn't get suggestions" with no trace left us
                         // guessing between an exception, empty model output and a filter
                         // rejection (see the suggestedReplies/… logs in AssistantService).
-                        Log.e("AssistantService", "suggestedReplies: fetch threw — UI shows FAILED/retry", e)
+                        if (BuildConfig.DEBUG) {
+                            Log.e("AssistantService", "suggestedReplies: fetch threw — UI shows FAILED/retry", e)
+                        } else {
+                            // S4: the exception messages thrown by fetchSuggestedReplies
+                            // are metadata (HTTP codes, model, server names), but an
+                            // org.json syntax error can embed a snippet of the response
+                            // body — release keeps the message only when it is ours.
+                            val detail = if (e is org.json.JSONException) {
+                                e.javaClass.simpleName
+                            } else {
+                                e.toString()
+                            }
+                            Log.e("AssistantService", "suggestedReplies: fetch threw — UI shows FAILED/retry: $detail")
+                        }
                         suggestionState = SuggestionState.FAILED
                     }
                 }

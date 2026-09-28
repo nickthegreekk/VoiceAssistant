@@ -208,8 +208,11 @@ class Fix4StreamingDotsInstrumentedTest {
                         textInput = "",
                         onTextInputChange = { },
                         attachedFiles = emptyList(),
+                        attachedImage = null,
                         onAttachClick = { },
+                        onImageAttachClick = { },
                         onRemoveAttachment = { },
+                        onRemoveImage = { },
                         onSendClick = { },
                         onMicClick = { },
                         onStopClick = { },
@@ -239,7 +242,8 @@ class Fix4StreamingDotsInstrumentedTest {
                         listState = rememberLazyListState(),
                         onEditMessage = { _, _ -> },
                         onDeleteMessage = { },
-                        onReplayAudio = { }
+                        onReplayAudio = { },
+                        currentPersona = persona
                     )
                 }
             }

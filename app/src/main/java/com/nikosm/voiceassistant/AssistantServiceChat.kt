@@ -2278,12 +2278,22 @@ Do you want a summary?
                     }
                     suggestionClient.newCall(requestBuilder.build()).execute().use { response ->
                         if (!response.isSuccessful) {
-                            val errorBody = runCatching { response.body.string() }.getOrNull().orEmpty()
-                            Log.e(
-                                SUGGESTED_REPLIES_TAG,
-                                "suggestedReplies: gateway /text-chat FAILED — HTTP ${response.code} " +
-                                    "model=$actualModel url=$base/text-chat body: ${errorBody.take(1000)}"
-                            )
+                            // DEBUG-gated (S4): the gateway's error body can echo user
+                            // text back. Metadata (status/model/url) stays ungated.
+                            if (BuildConfig.DEBUG) {
+                                val errorBody = runCatching { response.body.string() }.getOrNull().orEmpty()
+                                Log.e(
+                                    SUGGESTED_REPLIES_TAG,
+                                    "suggestedReplies: gateway /text-chat FAILED — HTTP ${response.code} " +
+                                        "model=$actualModel url=$base/text-chat body: ${errorBody.take(500)}"
+                                )
+                            } else {
+                                Log.e(
+                                    SUGGESTED_REPLIES_TAG,
+                                    "suggestedReplies: gateway /text-chat FAILED — HTTP ${response.code} " +
+                                        "model=$actualModel url=$base/text-chat"
+                                )
+                            }
                             throw Exception("Gateway error: ${response.code}")
                         }
                         val body = response.body.string()
@@ -2316,15 +2326,27 @@ Do you want a summary?
                     Log.d(SUGGESTED_REPLIES_TAG, "suggestedReplies: POST $url (model=$actualModel, prompt=${promptText.length} chars)")
                     suggestionClient.newCall(request).execute().use { response ->
                         if (!response.isSuccessful) {
-                            // The server's own words are the only clue for a backend crash
-                            // (e.g. llama.cpp aborting on a long prompt), so log the body
-                            // before surfacing the bare status code as the exception.
-                            val errorBody = runCatching { response.body.string() }.getOrNull().orEmpty()
-                            Log.e(
-                                SUGGESTED_REPLIES_TAG,
-                                "suggestedReplies: Ollama /api/chat FAILED — HTTP ${response.code} model=$actualModel " +
-                                    "promptChars=${promptText.length} url=$url body: ${errorBody.take(1000)}"
-                            )
+                            // DEBUG-gated (S4): the server's error body can echo
+                            // conversation text back (it was the clue for the
+                            // llama.cpp long-prompt crash). Metadata
+                            // (status/model/url/counts) stays ungated.
+                            if (BuildConfig.DEBUG) {
+                                // The server's own words are the only clue for a backend crash
+                                // (e.g. llama.cpp aborting on a long prompt), so log the body
+                                // before surfacing the bare status code as the exception.
+                                val errorBody = runCatching { response.body.string() }.getOrNull().orEmpty()
+                                Log.e(
+                                    SUGGESTED_REPLIES_TAG,
+                                    "suggestedReplies: Ollama /api/chat FAILED — HTTP ${response.code} model=$actualModel " +
+                                        "promptChars=${promptText.length} url=$url body: ${errorBody.take(500)}"
+                                )
+                            } else {
+                                Log.e(
+                                    SUGGESTED_REPLIES_TAG,
+                                    "suggestedReplies: Ollama /api/chat FAILED — HTTP ${response.code} model=$actualModel " +
+                                        "promptChars=${promptText.length} url=$url"
+                                )
+                            }
                             throw Exception("Ollama error: ${response.code}")
                         }
                         val bodyStr = response.body.string()
@@ -2341,7 +2363,10 @@ Do you want a summary?
         }
 
         val prompt1 = buildPrompt(false)
-        Log.d(SUGGESTED_REPLIES_TAG, "suggestedReplies/attempt1: prompt (${prompt1.length} chars):\n$prompt1")
+        // DEBUG-gated (S4): the prompt embeds conversation text.
+        if (BuildConfig.DEBUG) {
+            Log.d(SUGGESTED_REPLIES_TAG, "suggestedReplies/attempt1: prompt (${prompt1.length} chars):\n$prompt1")
+        }
         val raw1 = executeCall(prompt1)
         val attempt1 = parseAndFilterSuggestedRepliesDetailed(raw1)
         logSuggestedRepliesParse("suggestedReplies/attempt1", raw1, attempt1)
@@ -2356,7 +2381,10 @@ Do you want a summary?
                 "stricter retry FIRED (raw length ${raw1.length}, parsed ${attempt1.parsed.size}, dropped ${attempt1.dropped.size})"
         )
         val prompt2 = buildPrompt(true)
-        Log.d(SUGGESTED_REPLIES_TAG, "suggestedReplies/attempt2: prompt (${prompt2.length} chars):\n$prompt2")
+        // DEBUG-gated (S4): the prompt embeds conversation text.
+        if (BuildConfig.DEBUG) {
+            Log.d(SUGGESTED_REPLIES_TAG, "suggestedReplies/attempt2: prompt (${prompt2.length} chars):\n$prompt2")
+        }
         val raw2 = executeCall(prompt2)
         val attempt2 = parseAndFilterSuggestedRepliesDetailed(raw2)
         logSuggestedRepliesParse("suggestedReplies/attempt2", raw2, attempt2)

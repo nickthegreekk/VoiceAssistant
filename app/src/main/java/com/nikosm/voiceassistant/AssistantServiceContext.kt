@@ -295,8 +295,13 @@ internal fun parseAndFilterSuggestedReplies(rawOutput: String): List<String> =
  * dropped and the exact reason, lines cut by the 3-suggestion cap, and what survived.
  * This is the log that tells an exception apart from empty model output apart from an
  * over-rejecting filter.
+ *
+ * S4: every line here prints conversation-derived text (raw model output, parsed
+ * suggestions), so the whole body is DEBUG-gated — the caller keeps no ungated
+ * copy. Metadata (counts, retry fired/not) is logged by the caller and stays ungated.
  */
 internal fun logSuggestedRepliesParse(stage: String, raw: String, result: SuggestionParseResult) {
+    if (!BuildConfig.DEBUG) return
     Log.d(SUGGESTED_REPLIES_TAG, "[$stage] raw model output (${raw.length} chars):\n$raw")
     Log.d(SUGGESTED_REPLIES_TAG, "[$stage] parser produced ${result.parsed.size} line(s): ${result.parsed.map { it.take(90) }}")
     if (result.dropped.isEmpty()) {
