@@ -2219,19 +2219,51 @@ Do you want a summary?
                     }
                 }
             } else {
-                val rawModel = persona.model
-                val (displayServer, actualModel) = if (rawModel.startsWith("[") && rawModel.contains("] ")) {
-                    rawModel.substring(1, rawModel.indexOf("]")) to rawModel.substringAfter("] ")
-                } else {
-                    null to rawModel
+                // Backend routing mirrors the normal chat path: `[Name] model` with
+                // Name in the Ollama server list goes DIRECT to that entry's
+                // /api/chat with the entry's own credentials (same lookup as
+                // sendTextMessageToServer:713-714, same auth as
+                // performDirectOllamaChat:1409-1419). Otherwise the persona's
+                // configured gateway resolves through the shared M1 resolver
+                // (normalization plus name match) and its credentials ride along.
+                // Neither path ever sends a credential-less request: null means
+                // refuse visibly. The old code gated the gateway branch on
+                // `ollamaBase.contains(":8880") || voiceMode == GATEWAY`, so a
+                // voice persona (`Assistant (Voice)`, GATEWAY voice for TTS) whose
+                // tag DID match an Ollama entry still fell into the gateway
+                // branch — and that branch then picked `_serverBases.firstOrNull()`
+                // with NO auth header, 401'ing 23-72ms after the prompt was built.
+                val route = resolveSuggestedRepliesRoute(
+                    persona.model,
+                    persona.backendUrl,
+                    _ollamaBaseUrls.value,
+                    _serverBases.value
+                )
+                val actualModel = persona.model.trim().let {
+                    if (it.startsWith("[") && it.contains("] ")) it.substringAfter("] ") else it
+                }
+                if (BuildConfig.DEBUG) {
+                    val targetHost = when (route) {
+                        is SuggestedRepliesRoute.DirectOllama -> route.config.url
+                        is SuggestedRepliesRoute.Gateway -> route.config.url
+                        null -> "<unresolved>"
+                    }.substringAfter("://").substringBefore(":").substringBefore("/")
+                    val kind = when (route) {
+                        is SuggestedRepliesRoute.DirectOllama -> "ollama"
+                        is SuggestedRepliesRoute.Gateway -> "gateway"
+                        null -> "none"
+                    }
+                    // DEBUG only: sits next to conversation text in the prompt logs.
+                    Log.d(
+                        SUGGESTED_REPLIES_TAG,
+                        "suggestedReplies/backend: kind=$kind host=$targetHost model=$actualModel"
+                    )
                 }
 
-                val ollamaBase = displayServer?.let { name -> _ollamaBaseUrls.value.find { it.name == name }?.url }
-                    ?: persona.backendUrl.ifBlank { _ollamaBaseUrls.value.firstOrNull()?.url ?: "" }
-
-                if (ollamaBase.contains(":8880") || persona.voiceMode == VoiceMode.GATEWAY) {
-                    val base = resolveGatewayConfig(_serverBases.value, persona.backendUrl, displayServer)?.url
-                        ?: _serverBases.value.firstOrNull()?.url ?: throw Exception("No gateway configured")
+                when (route) {
+                    is SuggestedRepliesRoute.Gateway -> {
+                    val gw = route.config
+                    val base = gw.url.trimEnd('/')
                     val requestBody = MultipartBody.Builder().setType(MultipartBody.FORM).apply {
                         addFormDataPart("text", "$systemInstruction\n\n$promptText")
                         addFormDataPart("model", actualModel)
@@ -2239,14 +2271,29 @@ Do you want a summary?
                         addFormDataPart("max_tokens", "300")
                     }.build()
                     val requestBuilder = Request.Builder().url("$base/text-chat").post(requestBody)
+                    // The resolved entry's credentials — a gateway that requires
+                    // auth 401s without them. Never send the request bare.
+                    suggestedRepliesAuthHeader(gw)?.let {
+                        requestBuilder.header("Authorization", it)
+                    }
                     suggestionClient.newCall(requestBuilder.build()).execute().use { response ->
-                        if (!response.isSuccessful) throw Exception("Gateway error: ${response.code}")
+                        if (!response.isSuccessful) {
+                            val errorBody = runCatching { response.body.string() }.getOrNull().orEmpty()
+                            Log.e(
+                                SUGGESTED_REPLIES_TAG,
+                                "suggestedReplies: gateway /text-chat FAILED — HTTP ${response.code} " +
+                                    "model=$actualModel url=$base/text-chat body: ${errorBody.take(1000)}"
+                            )
+                            throw Exception("Gateway error: ${response.code}")
+                        }
                         val body = response.body.string()
                         val json = JSONObject(body)
                         json.optString("response").ifBlank { json.optString("text") }
                     }
-                } else {
-                    val resolvedBackend = ollamaBase.trim().removeSuffix("/").removeSuffix("/api/chat")
+                }
+                    is SuggestedRepliesRoute.DirectOllama -> {
+                    val ollamaCfg = route.config
+                    val resolvedBackend = ollamaCfg.url.trim().removeSuffix("/").removeSuffix("/api/chat")
                     val url = "$resolvedBackend/api/chat"
                     val json = JSONObject().apply {
                         put("model", actualModel)
@@ -2258,7 +2305,14 @@ Do you want a summary?
                         })
                     }
                     val requestBody = json.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
-                    val request = Request.Builder().url(url).post(requestBody).build()
+                    val requestBuilder = Request.Builder().url(url).post(requestBody)
+                    // The entry's own credentials — same auth as
+                    // performDirectOllamaChat:1409-1419. A server that requires
+                    // basic auth 401s without them. Never send the request bare.
+                    suggestedRepliesAuthHeader(ollamaCfg)?.let {
+                        requestBuilder.header("Authorization", it)
+                    }
+                    val request = requestBuilder.build()
                     Log.d(SUGGESTED_REPLIES_TAG, "suggestedReplies: POST $url (model=$actualModel, prompt=${promptText.length} chars)")
                     suggestionClient.newCall(request).execute().use { response ->
                         if (!response.isSuccessful) {
@@ -2277,6 +2331,11 @@ Do you want a summary?
                         val jsonObj = JSONObject(bodyStr)
                         jsonObj.optJSONObject("message")?.optString("content") ?: jsonObj.optString("response")
                     }
+                }
+                    null -> throw Exception(
+                        "No backend configured for persona '${persona.name}'. " +
+                            "Set its server in persona settings (a `[Name] model` tag needs a matching Ollama server entry)."
+                    )
                 }
             }
         }

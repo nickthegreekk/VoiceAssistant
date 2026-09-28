@@ -171,6 +171,73 @@ internal val assistantVoiceDenylist = listOf(
     "are you interested"
 )
 
+// ---------------------------------------------------------------------------
+// Suggested-replies backend routing (AssistantServiceChat.kt:fetchSuggestedReplies).
+//
+// The normal chat path (sendTextMessageToServer / sendAudioToServer) resolves a
+// `[Name] model` persona to a DIRECT Ollama call whenever `Name` matches an
+// entry of the Ollama server list (AssistantServiceChat.kt:713-727): it posts to
+// that entry's /api/chat and authenticates with the entry's own credentials
+// (performDirectOllamaChat, :1409-1419, via effectiveAuthType).
+//
+// This is the one place suggested replies do the same lookup, so the routing
+// can't drift again. Pure in / pure out (no Android surface): pinned by the
+// SuggestedRepliesRoutingTest JVM tests.
+// ---------------------------------------------------------------------------
+
+/** Which backend a suggested-replies request must use, with its resolved config. */
+internal sealed interface SuggestedRepliesRoute {
+    /** Direct Ollama: POST `<config.url>/api/chat` with the entry's own auth. */
+    data class DirectOllama(val config: ServerConfig) : SuggestedRepliesRoute
+    /** Gateway: POST `<config.url>/text-chat` with the resolved entry's auth. */
+    data class Gateway(val config: ServerConfig) : SuggestedRepliesRoute
+}
+
+/**
+ * Mirrors the normal chat path: a `[Name] model` tag that matches an Ollama
+ * server entry by name routes DIRECT to that entry (same lookup as
+ * sendTextMessageToServer:713-714); otherwise the persona's configured gateway
+ * — resolved through the shared [resolveGatewayConfig] (normalization plus
+ * name match), never invented — is used.
+ *
+ * A null result means there is nothing to authenticate with: the caller must
+ * fail visibly instead of sending a credential-less request.
+ */
+internal fun resolveSuggestedRepliesRoute(
+    model: String,
+    backendUrl: String,
+    ollamaServers: List<ServerConfig>,
+    gateways: List<ServerConfig>
+): SuggestedRepliesRoute? {
+    val raw = model.trim()
+    val displayServer = if (raw.startsWith("[") && raw.contains("] ")) {
+        raw.substring(1, raw.indexOf("]"))
+    } else {
+        null
+    }
+    // Same lookup the normal chat path uses: `[Name] model` -> Ollama entry by name.
+    displayServer?.let { name ->
+        ollamaServers.find { it.name == name }?.let { return SuggestedRepliesRoute.DirectOllama(it) }
+    }
+    // Same contract as the gateway flows (M1): null -> refuse loudly, never an
+    // unauthenticated request.
+    return resolveGatewayConfig(gateways, backendUrl, displayServer)
+        ?.let { SuggestedRepliesRoute.Gateway(it) }
+}
+
+/** Auth header for a resolved server entry (BASIC or API key), or null for NONE. */
+internal fun suggestedRepliesAuthHeader(config: ServerConfig): String? {
+    return when (config.effectiveAuthType) {
+        AuthType.NONE -> null
+        AuthType.BASIC -> if (!config.username.isNullOrBlank()) {
+            okhttp3.Credentials.basic(config.username, config.password ?: "")
+        } else null
+        AuthType.API_KEY -> if (!config.apiKey.isNullOrBlank()) {
+            "Bearer ${config.apiKey}"
+        } else null
+    }
+}
+
 // The single source of truth for the assistant-voice filter: returns WHY a line
 // reads as the assistant speaking, or null when the line is usable. isAssistantVoiced
 // (used by parseAndFilterSuggestedReplies and its tests) is expressed in terms of this
