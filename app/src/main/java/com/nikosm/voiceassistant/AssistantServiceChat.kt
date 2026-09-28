@@ -2100,169 +2100,176 @@ suspend fun AssistantService.fetchSuggestedReplies(persona: Persona): List<Strin
     val recentMsgs = _messages.value.filter { !it.isError }.takeLast(6)
     if (recentMsgs.isEmpty()) return emptyList()
 
-    val transcript = buildString {
-        recentMsgs.forEach { m ->
-            val role = if (m.role == "user") "User" else "Assistant"
-            val text = m.text.take(500)
-            append("$role: $text / ")
+    val systemInstruction = """
+You write suggested chat messages on behalf of the USER, who is talking to an AI assistant. Given the conversation, write messages the USER could send to the assistant next.
+Rules:
+- Write in the user's voice, addressed to the assistant. Never write as the assistant. Never address or question the user.
+- Never write offers or questions like 'Would you like…', 'Do you want…', 'Shall I…', 'Let me know…', 'I can…'. Those are things the assistant says.
+- If the assistant's last message asks the user a question or offers something, at least one suggestion must answer it from the user's side (e.g. 'Yes, show me an example').
+- Vary the intent: accept or answer, ask about a specific detail, go deeper, simplify, or apply it.
+- Same language as the conversation. Under 25 words each. One per line. No numbering, quotes or commentary.
+
+Example:
+Assistant's last message: "...Would you like a code example?"
+Good output:
+Yes, show me a short code example
+How does this differ from the older approach?
+Explain the second point more simply
+
+Wrong (assistant voice), never do this:
+Would you like me to explain further?
+Do you want a summary?
+    """.trimIndent()
+
+    fun buildPrompt(retry: Boolean): String {
+        return buildString {
+            appendLine("<conversation>")
+            recentMsgs.forEachIndexed { index, m ->
+                val role = if (m.role == "user") "User" else "Assistant"
+                val isLast = index == recentMsgs.size - 1
+                val text = if (isLast && role == "Assistant") {
+                    val raw = m.text
+                    if (raw.length > 800) "…" + raw.takeLast(800) else raw
+                } else {
+                    val raw = m.text
+                    if (raw.length > 300) raw.take(300) + "…" else raw
+                }
+                appendLine("$role: $text")
+            }
+            appendLine("</conversation>")
+            appendLine()
+            if (retry) {
+                appendLine("Your previous output was written as the assistant. Write only what the USER would say.")
+            }
+            appendLine("Write 3 messages the USER would send next. Output only the 3 messages, one per line.")
         }
     }
 
-    val systemInstruction = "write exactly 3 detailed, nuanced follow-up messages or requests the USER might plausibly send next (explore different angles, request deep technical examples, propose a follow-up scenario or logical next step), in first person, in the same language as the conversation, around 25-40 words each, one per line, no numbering, no quotes, no commentary."
-
     return withContext(Dispatchers.IO) {
-        val rawResponse = if (isCloudModel(persona.model)) {
-            val providerName = if (persona.model.startsWith("[") && persona.model.contains("] ")) {
-                persona.model.substring(1, persona.model.indexOf("]"))
-            } else ""
-            val apiSetting = (_cloudApis.value + _customCloudApis.value).find { it.name == providerName }
-                ?: throw Exception("No config for provider")
+        suspend fun executeCall(promptText: String): String {
+            return if (isCloudModel(persona.model)) {
+                val providerName = if (persona.model.startsWith("[") && persona.model.contains("] ")) {
+                    persona.model.substring(1, persona.model.indexOf("]"))
+                } else ""
+                val apiSetting = (_cloudApis.value + _customCloudApis.value).find { it.name == providerName }
+                    ?: throw Exception("No config for provider")
 
-            val actualModel = persona.model.substringAfter("] ")
-            val baseUrl = apiSetting.baseUrl.trim().removeSuffix("/")
-            val mediaType = "application/json; charset=utf-8".toMediaType()
-            val json = JSONObject()
+                val actualModel = persona.model.substringAfter("] ")
+                val baseUrl = apiSetting.baseUrl.trim().removeSuffix("/")
+                val mediaType = "application/json; charset=utf-8".toMediaType()
+                val json = JSONObject()
 
-            when (apiSetting.icon) {
-                "A" -> {
-                    json.put("model", actualModel).put("max_tokens", 250).put("system", systemInstruction)
-                    json.put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", transcript)))
-                    val req = Request.Builder().url("$baseUrl/v1/messages").header("x-api-key", apiSetting.apiKey).header("anthropic-version", "2023-06-01").header("content-type", "application/json").post(json.toString().toRequestBody(mediaType)).build()
-                    suggestionClient.newCall(req).execute().use { resp ->
-                        if (!resp.isSuccessful) throw Exception("Anthropic error: ${resp.code}")
-                        val bodyStr = resp.body.string()
-                        val resJson = JSONObject(bodyStr)
-                        val content = resJson.getJSONArray("content")
-                        val sb = StringBuilder()
-                        for (i in 0 until content.length()) {
-                            val block = content.getJSONObject(i)
-                            if (block.optString("type") == "text") sb.append(block.optString("text"))
-                        }
-                        if (resJson.has("usage")) {
-                            val usage = resJson.getJSONObject("usage")
-                            val p = usage.optInt("input_tokens", 0)
-                            val c = usage.optInt("output_tokens", 0)
-                            val cost = calculateCost(persona, p, c)
-                            withContext(Dispatchers.Main) {
-                                val cur = _sessionUsage.value
-                                _sessionUsage.value = UsageInfo(cur.promptTokens + p, cur.completionTokens + c, cur.totalTokens + p + c, cur.cost + cost)
-                                _totalCost.value += cost
-                                saveSettings()
+                when (apiSetting.icon) {
+                    "A" -> {
+                        json.put("model", actualModel).put("max_tokens", 300).put("system", systemInstruction)
+                        json.put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", promptText)))
+                        val req = Request.Builder().url("$baseUrl/v1/messages").header("x-api-key", apiSetting.apiKey).header("anthropic-version", "2023-06-01").header("content-type", "application/json").post(json.toString().toRequestBody(mediaType)).build()
+                        suggestionClient.newCall(req).execute().use { resp ->
+                            if (!resp.isSuccessful) throw Exception("Anthropic error: ${resp.code}")
+                            val bodyStr = resp.body.string()
+                            val resJson = JSONObject(bodyStr)
+                            val content = resJson.getJSONArray("content")
+                            val sb = StringBuilder()
+                            for (i in 0 until content.length()) {
+                                val block = content.getJSONObject(i)
+                                if (block.optString("type") == "text") sb.append(block.optString("text"))
                             }
+                            sb.toString()
                         }
-                        sb.toString()
                     }
-                }
-                "G" -> {
-                    val contents = JSONArray().put(JSONObject().put("role", "user").put("parts", JSONArray().put(JSONObject().put("text", transcript))))
-                    json.put("contents", contents)
-                    json.put("generationConfig", JSONObject().put("maxOutputTokens", 250))
-                    json.put("system_instruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", systemInstruction))))
-                    val req = Request.Builder().url("$baseUrl/v1beta/models/$actualModel:generateContent").header("x-goog-api-key", apiSetting.apiKey).post(json.toString().toRequestBody(mediaType)).build()
-                    suggestionClient.newCall(req).execute().use { resp ->
-                        if (!resp.isSuccessful) throw Exception("Gemini error: ${resp.code}")
-                        val bodyStr = resp.body.string()
-                        val resJson = JSONObject(bodyStr)
-                        val candidate = resJson.getJSONArray("candidates").getJSONObject(0)
-                        val parts = candidate.getJSONObject("content").getJSONArray("parts")
-                        val sb = StringBuilder()
-                        for (i in 0 until parts.length()) {
-                            sb.append(parts.getJSONObject(i).optString("text"))
-                        }
-                        if (resJson.has("usageMetadata")) {
-                            val usage = resJson.getJSONObject("usageMetadata")
-                            val p = usage.optInt("promptTokenCount", 0)
-                            val c = usage.optInt("candidatesTokenCount", 0)
-                            val cost = calculateCost(persona, p, c)
-                            withContext(Dispatchers.Main) {
-                                val cur = _sessionUsage.value
-                                _sessionUsage.value = UsageInfo(cur.promptTokens + p, cur.completionTokens + c, cur.totalTokens + p + c, cur.cost + cost)
-                                _totalCost.value += cost
-                                saveSettings()
+                    "G" -> {
+                        val contents = JSONArray().put(JSONObject().put("role", "user").put("parts", JSONArray().put(JSONObject().put("text", promptText))))
+                        json.put("contents", contents)
+                        json.put("generationConfig", JSONObject().put("maxOutputTokens", 300))
+                        json.put("system_instruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", systemInstruction))))
+                        val req = Request.Builder().url("$baseUrl/v1beta/models/$actualModel:generateContent").header("x-goog-api-key", apiSetting.apiKey).post(json.toString().toRequestBody(mediaType)).build()
+                        suggestionClient.newCall(req).execute().use { resp ->
+                            if (!resp.isSuccessful) throw Exception("Gemini error: ${resp.code}")
+                            val bodyStr = resp.body.string()
+                            val resJson = JSONObject(bodyStr)
+                            val candidate = resJson.getJSONArray("candidates").getJSONObject(0)
+                            val parts = candidate.getJSONObject("content").getJSONArray("parts")
+                            val sb = StringBuilder()
+                            for (i in 0 until parts.length()) {
+                                sb.append(parts.getJSONObject(i).optString("text"))
                             }
+                            sb.toString()
                         }
-                        sb.toString()
                     }
-                }
-                else -> {
-                    json.put("model", actualModel).put("max_tokens", 250)
-                    val msgs = JSONArray()
-                        .put(JSONObject().put("role", "system").put("content", systemInstruction))
-                        .put(JSONObject().put("role", "user").put("content", transcript))
-                    json.put("messages", msgs)
-                    val url = if (baseUrl.endsWith("/chat/completions")) baseUrl else "$baseUrl/chat/completions"
-                    val req = Request.Builder().url(url).header("Authorization", "Bearer ${apiSetting.apiKey}").post(json.toString().toRequestBody(mediaType)).build()
-                    suggestionClient.newCall(req).execute().use { resp ->
-                        if (!resp.isSuccessful) throw Exception("OpenAI error: ${resp.code}")
-                        val bodyStr = resp.body.string()
-                        val resJson = JSONObject(bodyStr)
-                        val content = resJson.getJSONArray("choices").getJSONObject(0).getJSONObject("message").optString("content")
-                        if (resJson.has("usage")) {
-                            val usage = resJson.getJSONObject("usage")
-                            val p = usage.optInt("prompt_tokens", 0)
-                            val c = usage.optInt("completion_tokens", 0)
-                            val cost = calculateCost(persona, p, c)
-                            withContext(Dispatchers.Main) {
-                                val cur = _sessionUsage.value
-                                _sessionUsage.value = UsageInfo(cur.promptTokens + p, cur.completionTokens + c, cur.totalTokens + p + c, cur.cost + cost)
-                                _totalCost.value += cost
-                                saveSettings()
-                            }
+                    else -> {
+                        json.put("model", actualModel).put("max_tokens", 300)
+                        val msgs = JSONArray()
+                            .put(JSONObject().put("role", "system").put("content", systemInstruction))
+                            .put(JSONObject().put("role", "user").put("content", promptText))
+                        json.put("messages", msgs)
+                        val url = if (baseUrl.endsWith("/chat/completions")) baseUrl else "$baseUrl/chat/completions"
+                        val req = Request.Builder().url(url).header("Authorization", "Bearer ${apiSetting.apiKey}").post(json.toString().toRequestBody(mediaType)).build()
+                        suggestionClient.newCall(req).execute().use { resp ->
+                            if (!resp.isSuccessful) throw Exception("OpenAI error: ${resp.code}")
+                            val bodyStr = resp.body.string()
+                            val resJson = JSONObject(bodyStr)
+                            resJson.getJSONArray("choices").getJSONObject(0).getJSONObject("message").optString("content")
                         }
-                        content
                     }
-                }
-            }
-        } else {
-            val rawModel = persona.model
-            val (displayServer, actualModel) = if (rawModel.startsWith("[") && rawModel.contains("] ")) {
-                rawModel.substring(1, rawModel.indexOf("]")) to rawModel.substringAfter("] ")
-            } else {
-                null to rawModel
-            }
-
-            val ollamaBase = displayServer?.let { name -> _ollamaBaseUrls.value.find { it.name == name }?.url }
-                ?: persona.backendUrl.ifBlank { _ollamaBaseUrls.value.firstOrNull()?.url ?: "" }
-
-            if (ollamaBase.contains(":8880") || persona.voiceMode == VoiceMode.GATEWAY) {
-                val base = resolveGatewayConfig(_serverBases.value, persona.backendUrl, displayServer)?.url
-                    ?: _serverBases.value.firstOrNull()?.url ?: throw Exception("No gateway configured")
-                val requestBody = MultipartBody.Builder().setType(MultipartBody.FORM).apply {
-                    addFormDataPart("text", "$systemInstruction\n\n$transcript")
-                    addFormDataPart("model", actualModel)
-                    addFormDataPart("backend_url", persona.backendUrl)
-                    addFormDataPart("max_tokens", "250")
-                }.build()
-                val requestBuilder = Request.Builder().url("$base/text-chat").post(requestBody)
-                suggestionClient.newCall(requestBuilder.build()).execute().use { response ->
-                    if (!response.isSuccessful) throw Exception("Gateway error: ${response.code}")
-                    val body = response.body.string()
-                    val json = JSONObject(body)
-                    json.optString("response").ifBlank { json.optString("text") }
                 }
             } else {
-                val resolvedBackend = ollamaBase.trim().removeSuffix("/").removeSuffix("/api/chat")
-                val url = "$resolvedBackend/api/chat"
-                val json = JSONObject().apply {
-                    put("model", actualModel)
-                    put("stream", false)
-                    put("options", JSONObject().put("num_predict", 250).put("temperature", 0.7).put("think", false))
-                    put("messages", JSONArray().apply {
-                        put(JSONObject().put("role", "system").put("content", systemInstruction))
-                        put(JSONObject().put("role", "user").put("content", transcript))
-                    })
+                val rawModel = persona.model
+                val (displayServer, actualModel) = if (rawModel.startsWith("[") && rawModel.contains("] ")) {
+                    rawModel.substring(1, rawModel.indexOf("]")) to rawModel.substringAfter("] ")
+                } else {
+                    null to rawModel
                 }
-                val requestBody = json.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
-                val request = Request.Builder().url(url).post(requestBody).build()
-                suggestionClient.newCall(request).execute().use { response ->
-                    if (!response.isSuccessful) throw Exception("Ollama error: ${response.code}")
-                    val bodyStr = response.body.string()
-                    val jsonObj = JSONObject(bodyStr)
-                    jsonObj.optJSONObject("message")?.optString("content") ?: jsonObj.optString("response")
+
+                val ollamaBase = displayServer?.let { name -> _ollamaBaseUrls.value.find { it.name == name }?.url }
+                    ?: persona.backendUrl.ifBlank { _ollamaBaseUrls.value.firstOrNull()?.url ?: "" }
+
+                if (ollamaBase.contains(":8880") || persona.voiceMode == VoiceMode.GATEWAY) {
+                    val base = resolveGatewayConfig(_serverBases.value, persona.backendUrl, displayServer)?.url
+                        ?: _serverBases.value.firstOrNull()?.url ?: throw Exception("No gateway configured")
+                    val requestBody = MultipartBody.Builder().setType(MultipartBody.FORM).apply {
+                        addFormDataPart("text", "$systemInstruction\n\n$promptText")
+                        addFormDataPart("model", actualModel)
+                        addFormDataPart("backend_url", persona.backendUrl)
+                        addFormDataPart("max_tokens", "300")
+                    }.build()
+                    val requestBuilder = Request.Builder().url("$base/text-chat").post(requestBody)
+                    suggestionClient.newCall(requestBuilder.build()).execute().use { response ->
+                        if (!response.isSuccessful) throw Exception("Gateway error: ${response.code}")
+                        val body = response.body.string()
+                        val json = JSONObject(body)
+                        json.optString("response").ifBlank { json.optString("text") }
+                    }
+                } else {
+                    val resolvedBackend = ollamaBase.trim().removeSuffix("/").removeSuffix("/api/chat")
+                    val url = "$resolvedBackend/api/chat"
+                    val json = JSONObject().apply {
+                        put("model", actualModel)
+                        put("stream", false)
+                        put("options", JSONObject().put("num_predict", 300).put("temperature", 0.7).put("think", false))
+                        put("messages", JSONArray().apply {
+                            put(JSONObject().put("role", "system").put("content", systemInstruction))
+                            put(JSONObject().put("role", "user").put("content", promptText))
+                        })
+                    }
+                    val requestBody = json.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
+                    val request = Request.Builder().url(url).post(requestBody).build()
+                    suggestionClient.newCall(request).execute().use { response ->
+                        if (!response.isSuccessful) throw Exception("Ollama error: ${response.code}")
+                        val bodyStr = response.body.string()
+                        val jsonObj = JSONObject(bodyStr)
+                        jsonObj.optJSONObject("message")?.optString("content") ?: jsonObj.optString("response")
+                    }
                 }
             }
         }
-        parseSuggestedReplies(rawResponse)
+
+        val raw1 = executeCall(buildPrompt(false))
+        val filtered1 = parseAndFilterSuggestedReplies(raw1)
+        if (filtered1.size >= 2) return@withContext filtered1.take(3)
+
+        val raw2 = executeCall(buildPrompt(true))
+        val filtered2 = parseAndFilterSuggestedReplies(raw2)
+        filtered2.take(3)
     }
 }
 

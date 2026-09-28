@@ -129,7 +129,7 @@ internal fun AssistantService.extractImageGenerationPrompt(text: String): String
     return trimmed
 }
 
-internal fun parseSuggestedReplies(rawOutput: String): List<String> {
+internal fun parseRawSuggestedReplies(rawOutput: String): List<String> {
     if (rawOutput.isBlank()) return emptyList()
     val lines = rawOutput.lines()
     val results = mutableListOf<String>()
@@ -145,12 +145,38 @@ internal fun parseSuggestedReplies(rawOutput: String): List<String> {
         cleaned = cleaned.replace(Regex("^[-•*]\\s*"), "").trim()
         if (cleaned.isNotBlank() && !results.contains(cleaned)) {
             results.add(cleaned)
-            if (results.size >= 3) break
         }
     }
     if (results.isEmpty() && rawOutput.contains("[")) {
         val jsonClean = rawOutput.substringAfter("[").substringBeforeLast("]")
-        return parseSuggestedReplies(jsonClean)
+        return parseRawSuggestedReplies(jsonClean)
     }
-    return results.take(3)
+    return results
+}
+
+internal fun parseSuggestedReplies(rawOutput: String): List<String> {
+    return parseRawSuggestedReplies(rawOutput).take(3)
+}
+
+internal val assistantVoiceDenylist = listOf(
+    "would you like", "do you want", "shall i", "should i", "let me know",
+    "i can", "i could", "i'll", "i will", "i'd be happy", "happy to",
+    "feel free", "can i help", "is there anything", "what would you like",
+    "are you interested"
+)
+
+internal fun isAssistantVoiced(line: String): Boolean {
+    val trimmed = line.trim().lowercase()
+    if (assistantVoiceDenylist.any { trimmed.startsWith(it) }) return true
+    if (trimmed.endsWith("?") && (trimmed.contains("you ") || trimmed.contains(" your ") || trimmed.startsWith("would ") || trimmed.startsWith("do ") || trimmed.startsWith("can ") || trimmed.startsWith("is ") || trimmed.startsWith("are "))) {
+        if (trimmed.contains("like me") || trimmed.contains("want me") || trimmed.contains("shall i") || trimmed.contains("should i")) {
+            return true
+        }
+    }
+    return false
+}
+
+internal fun parseAndFilterSuggestedReplies(rawOutput: String): List<String> {
+    val parsed = parseRawSuggestedReplies(rawOutput)
+    return parsed.filter { !isAssistantVoiced(it) }.take(3)
 }

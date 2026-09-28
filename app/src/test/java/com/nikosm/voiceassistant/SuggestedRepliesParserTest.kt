@@ -46,4 +46,18 @@ class SuggestedRepliesParserTest {
         val result = parseSuggestedReplies(input)
         assertEquals(emptyList<String>(), result)
     }
+
+    @Test
+    fun filterAssistantVoicedLines() {
+        val input = "Would you like me to explain further?\nYes, show me a code example\nLet me know if you need help\nHow does this work?"
+        val result = parseAndFilterSuggestedReplies(input)
+        assertEquals(listOf("Yes, show me a code example", "How does this work?"), result)
+    }
+
+    @Test
+    fun keepValidUserVoiceLines() {
+        val input = "Can you show me a short example?\nWhat is the difference?\nThanks for explaining."
+        val result = parseAndFilterSuggestedReplies(input)
+        assertEquals(listOf("Can you show me a short example?", "What is the difference?", "Thanks for explaining."), result)
+    }
 }
