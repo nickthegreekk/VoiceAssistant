@@ -686,7 +686,7 @@ fun SuggestedRepliesRow(
                                     Text(
                                         text = suggestion,
                                         style = MaterialTheme.typography.bodySmall,
-                                        maxLines = 2,
+                                        maxLines = 3,
                                         overflow = TextOverflow.Ellipsis,
                                         modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
                                     )

@@ -15,6 +15,7 @@ import okhttp3.Call
 import okhttp3.Credentials
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
+import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.asRequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -2089,6 +2090,12 @@ fun AssistantService.regenerateImageMessage(index: Int) {
     }
 }
 
+private val suggestionClient = OkHttpClient.Builder()
+    .connectTimeout(45, TimeUnit.SECONDS)
+    .readTimeout(45, TimeUnit.SECONDS)
+    .writeTimeout(45, TimeUnit.SECONDS)
+    .build()
+
 suspend fun AssistantService.fetchSuggestedReplies(persona: Persona): List<String> {
     val recentMsgs = _messages.value.filter { !it.isError }.takeLast(6)
     if (recentMsgs.isEmpty()) return emptyList()
@@ -2101,7 +2108,7 @@ suspend fun AssistantService.fetchSuggestedReplies(persona: Persona): List<Strin
         }
     }
 
-    val systemInstruction = "write exactly 3 short messages the USER might plausibly send next (different intents, e.g. a follow-up question, a request for more detail or an example, a related next step), in first person, in the same language as the conversation, under ~15 words each, one per line, no numbering, no quotes, no commentary."
+    val systemInstruction = "write exactly 3 detailed, nuanced follow-up messages or requests the USER might plausibly send next (explore different angles, request deep technical examples, propose a follow-up scenario or logical next step), in first person, in the same language as the conversation, around 25-40 words each, one per line, no numbering, no quotes, no commentary."
 
     return withContext(Dispatchers.IO) {
         val rawResponse = if (isCloudModel(persona.model)) {
@@ -2118,10 +2125,10 @@ suspend fun AssistantService.fetchSuggestedReplies(persona: Persona): List<Strin
 
             when (apiSetting.icon) {
                 "A" -> {
-                    json.put("model", actualModel).put("max_tokens", 120).put("system", systemInstruction)
+                    json.put("model", actualModel).put("max_tokens", 250).put("system", systemInstruction)
                     json.put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", transcript)))
                     val req = Request.Builder().url("$baseUrl/v1/messages").header("x-api-key", apiSetting.apiKey).header("anthropic-version", "2023-06-01").header("content-type", "application/json").post(json.toString().toRequestBody(mediaType)).build()
-                    getDynamicClient(persona).newCall(req).execute().use { resp ->
+                    suggestionClient.newCall(req).execute().use { resp ->
                         if (!resp.isSuccessful) throw Exception("Anthropic error: ${resp.code}")
                         val bodyStr = resp.body.string()
                         val resJson = JSONObject(bodyStr)
@@ -2149,10 +2156,10 @@ suspend fun AssistantService.fetchSuggestedReplies(persona: Persona): List<Strin
                 "G" -> {
                     val contents = JSONArray().put(JSONObject().put("role", "user").put("parts", JSONArray().put(JSONObject().put("text", transcript))))
                     json.put("contents", contents)
-                    json.put("generationConfig", JSONObject().put("maxOutputTokens", 120))
+                    json.put("generationConfig", JSONObject().put("maxOutputTokens", 250))
                     json.put("system_instruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", systemInstruction))))
                     val req = Request.Builder().url("$baseUrl/v1beta/models/$actualModel:generateContent").header("x-goog-api-key", apiSetting.apiKey).post(json.toString().toRequestBody(mediaType)).build()
-                    getDynamicClient(persona).newCall(req).execute().use { resp ->
+                    suggestionClient.newCall(req).execute().use { resp ->
                         if (!resp.isSuccessful) throw Exception("Gemini error: ${resp.code}")
                         val bodyStr = resp.body.string()
                         val resJson = JSONObject(bodyStr)
@@ -2178,14 +2185,14 @@ suspend fun AssistantService.fetchSuggestedReplies(persona: Persona): List<Strin
                     }
                 }
                 else -> {
-                    json.put("model", actualModel).put("max_tokens", 120)
+                    json.put("model", actualModel).put("max_tokens", 250)
                     val msgs = JSONArray()
                         .put(JSONObject().put("role", "system").put("content", systemInstruction))
                         .put(JSONObject().put("role", "user").put("content", transcript))
                     json.put("messages", msgs)
                     val url = if (baseUrl.endsWith("/chat/completions")) baseUrl else "$baseUrl/chat/completions"
                     val req = Request.Builder().url(url).header("Authorization", "Bearer ${apiSetting.apiKey}").post(json.toString().toRequestBody(mediaType)).build()
-                    getDynamicClient(persona).newCall(req).execute().use { resp ->
+                    suggestionClient.newCall(req).execute().use { resp ->
                         if (!resp.isSuccessful) throw Exception("OpenAI error: ${resp.code}")
                         val bodyStr = resp.body.string()
                         val resJson = JSONObject(bodyStr)
@@ -2224,10 +2231,10 @@ suspend fun AssistantService.fetchSuggestedReplies(persona: Persona): List<Strin
                     addFormDataPart("text", "$systemInstruction\n\n$transcript")
                     addFormDataPart("model", actualModel)
                     addFormDataPart("backend_url", persona.backendUrl)
-                    addFormDataPart("max_tokens", "120")
+                    addFormDataPart("max_tokens", "250")
                 }.build()
                 val requestBuilder = Request.Builder().url("$base/text-chat").post(requestBody)
-                client.newCall(requestBuilder.build()).execute().use { response ->
+                suggestionClient.newCall(requestBuilder.build()).execute().use { response ->
                     if (!response.isSuccessful) throw Exception("Gateway error: ${response.code}")
                     val body = response.body.string()
                     val json = JSONObject(body)
@@ -2239,7 +2246,7 @@ suspend fun AssistantService.fetchSuggestedReplies(persona: Persona): List<Strin
                 val json = JSONObject().apply {
                     put("model", actualModel)
                     put("stream", false)
-                    put("options", JSONObject().put("num_predict", 120).put("temperature", 0.7).put("think", false))
+                    put("options", JSONObject().put("num_predict", 250).put("temperature", 0.7).put("think", false))
                     put("messages", JSONArray().apply {
                         put(JSONObject().put("role", "system").put("content", systemInstruction))
                         put(JSONObject().put("role", "user").put("content", transcript))
@@ -2247,7 +2254,7 @@ suspend fun AssistantService.fetchSuggestedReplies(persona: Persona): List<Strin
                 }
                 val requestBody = json.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
                 val request = Request.Builder().url(url).post(requestBody).build()
-                client.newCall(request).execute().use { response ->
+                suggestionClient.newCall(request).execute().use { response ->
                     if (!response.isSuccessful) throw Exception("Ollama error: ${response.code}")
                     val bodyStr = response.body.string()
                     val jsonObj = JSONObject(bodyStr)
