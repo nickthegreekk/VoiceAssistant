@@ -5,11 +5,13 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.content.res.Configuration
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.speech.RecognizerIntent
+import android.util.Log
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -53,6 +55,7 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.*
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
@@ -789,6 +792,19 @@ fun MainScreen(service: AssistantService?) {
                 // list + input), and the classic body is byte-identical when the
                 // toggle is off — full runtime reversibility.
                 val celestialActive = celestialUi && !textModeOpen
+                // Is the keyboard up? The Column below applies imePadding(), which
+                // CONSUMES the ime insets for everything inside it — reading
+                // WindowInsets.ime down in ControlBar always reported 0, so the
+                // suggested-replies panel never knew the keyboard was open and kept
+                // eating the whole chat area. Read the inset out here, above the
+                // consuming node, and pass the answer down. derivedStateOf keeps this
+                // to one recomposition per keyboard show/hide instead of one per
+                // animation frame.
+                val imeDensity = LocalDensity.current
+                // (WindowInsets.ime is a composable getter, so it is resolved here and
+                // only the inset value is read inside the derived state.)
+                val imeInsets = WindowInsets.ime
+                val imeVisible by remember(imeInsets) { derivedStateOf { imeInsets.getBottom(imeDensity) > 0 } }
                 Column(
                     modifier = Modifier
                         .fillMaxSize()
@@ -855,6 +871,7 @@ fun MainScreen(service: AssistantService?) {
                     } else {
                         ControlBar(
                         textModeOpen = textModeOpen,
+                        imeVisible = imeVisible,
                         textInput = textInput,
                         onTextInputChange = { textInput = it },
                         attachedFiles = attachedFiles,
@@ -996,6 +1013,8 @@ fun Header(
     silenced: Boolean = false,
     onSilenceToggle: () -> Unit = {}
 ) {
+    var menuExpanded by remember { mutableStateOf(false) }
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -1015,7 +1034,7 @@ fun Header(
             
             Row(
                 modifier = Modifier
-                    .weight(1f) // Let this side take available space
+                    .weight(1f)
                     .clip(MaterialTheme.shapes.small)
                     .clickable { onPersonaClick() }
                     .padding(8.dp), 
@@ -1050,15 +1069,66 @@ fun Header(
                     Text(text = if (currentPersona.isCloud) "session: $${String.format(java.util.Locale.US, "%.5f", sessionUsage.cost)}" else "free / local", color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.4f), style = MaterialTheme.typography.labelSmall)
                 }
             }
-        }
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.End
-        ) {
-            IconButton(onClick = onSilenceToggle) { Icon(if (silenced) Icons.Default.SpeakerNotesOff else Icons.Default.SpeakerNotes, null, tint = if (silenced) Color.Green else MaterialTheme.colorScheme.onBackground.copy(alpha = 0.5f)) }
-            IconButton(onClick = onEarpieceToggle) { Icon(if (isEarpieceMode) Icons.Filled.PhoneInTalk else Icons.Filled.Phone, null, tint = if (isEarpieceMode) Color.Green else MaterialTheme.colorScheme.onBackground.copy(alpha = 0.5f)) }
-            IconButton(onClick = onTranslatorClick) { Icon(Icons.Filled.Translate, null, tint = if (currentPersona.isTranslator) Color.Cyan else MaterialTheme.colorScheme.onBackground.copy(alpha = 0.5f)) }
-            IconButton(onClick = onSettingsClick) { Icon(Icons.Filled.Settings, null, tint = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.5f)) }
+
+            Box {
+                IconButton(
+                    onClick = { menuExpanded = true },
+                    modifier = Modifier.size(48.dp)
+                ) {
+                    Box(contentAlignment = Alignment.TopEnd) {
+                        Icon(Icons.Default.Menu, contentDescription = "Menu", tint = MaterialTheme.colorScheme.onBackground)
+                        if (silenced || isEarpieceMode) {
+                            Box(
+                                modifier = Modifier
+                                    .size(8.dp)
+                                    .background(Color.Green, CircleShape)
+                            )
+                        }
+                    }
+                }
+
+                DropdownMenu(
+                    expanded = menuExpanded,
+                    onDismissRequest = { menuExpanded = false }
+                ) {
+                    DropdownMenuItem(
+                        text = { Text("Settings") },
+                        leadingIcon = { Icon(Icons.Default.Settings, null, modifier = Modifier.size(24.dp)) },
+                        onClick = {
+                            menuExpanded = false
+                            onSettingsClick()
+                        },
+                        modifier = Modifier.heightIn(min = 48.dp)
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Translator", color = if (currentPersona.isTranslator) Color.Cyan else MaterialTheme.colorScheme.onSurface) },
+                        leadingIcon = { Icon(Icons.Default.Translate, null, tint = if (currentPersona.isTranslator) Color.Cyan else MaterialTheme.colorScheme.onSurface, modifier = Modifier.size(24.dp)) },
+                        onClick = {
+                            menuExpanded = false
+                            onTranslatorClick()
+                        },
+                        modifier = Modifier.heightIn(min = 48.dp)
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Phone mode", color = if (isEarpieceMode) Color.Green else MaterialTheme.colorScheme.onSurface) },
+                        leadingIcon = { Icon(if (isEarpieceMode) Icons.Default.PhoneInTalk else Icons.Default.Phone, null, tint = if (isEarpieceMode) Color.Green else MaterialTheme.colorScheme.onSurface, modifier = Modifier.size(24.dp)) },
+                        onClick = {
+                            menuExpanded = false
+                            onEarpieceToggle()
+                        },
+                        modifier = Modifier.heightIn(min = 48.dp)
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Silent mode", color = if (silenced) Color.Green else MaterialTheme.colorScheme.onSurface) },
+                        leadingIcon = { Icon(if (silenced) Icons.Default.SpeakerNotesOff else Icons.Default.SpeakerNotes, null, tint = if (silenced) Color.Green else MaterialTheme.colorScheme.onSurface, modifier = Modifier.size(24.dp)) },
+                        onClick = {
+                            menuExpanded = false
+                            onSilenceToggle()
+                        },
+                        modifier = Modifier.heightIn(min = 48.dp)
+                    )
+                }
+            }
         }
     }
 }
@@ -1067,6 +1137,9 @@ fun Header(
 @Composable
 fun ControlBar(
     textModeOpen: Boolean,
+    // Read by MainVoiceScreen above its imePadding() node: inside this composable
+    // the ime insets are already consumed, so WindowInsets.ime reads 0 here.
+    imeVisible: Boolean = false,
     textInput: String,
     onTextInputChange: (String) -> Unit,
     attachedFiles: List<Uri>,
@@ -1116,10 +1189,92 @@ fun ControlBar(
         suggestionState = SuggestionState.IDLE
         suggestionList = emptyList()
     }
-    // Task 2: Wider chat box. Padding reduced from 16.dp to 8.dp in text mode.
-    val horizontalPadding = if (textModeOpen) 8.dp else 16.dp
+    // --- Suggested-replies panel: when is it open? --------------------------
+    // The ready panel sits directly above the input row and takes its height
+    // from the chat list. That makes the list's own scroll state unusable as
+    // the "should the panel be open?" signal: opening the panel shrinks the
+    // list, which makes canScrollForward true, which used to close the panel
+    // again in the same breath — so the suggestions could only ever be seen as
+    // the "N suggested replies" pill. Track the user's intent instead: remember
+    // where the last scroll gesture left the list (programmatic scrolls count
+    // too, so auto-scrolling to a new message still reads as "at the bottom"),
+    // and let an explicit tap on the pill / header override the automatic rules.
+    var userScrolledUp by remember { mutableStateOf(false) }
+    LaunchedEffect(listState.isScrollInProgress) {
+        if (!listState.isScrollInProgress) userScrolledUp = listState.canScrollForward
+    }
+    var userExpandedOverride by remember { mutableStateOf<Boolean?>(null) }
+    LaunchedEffect(suggestionState) {
+        if (suggestionState == SuggestionState.READY || suggestionState == SuggestionState.LOADING) {
+            userExpandedOverride = null
+        }
+    }
+    val panelIsLandscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
+    // Passed in from above the imePadding() node (see ControlBar's parameter note).
+    val panelImeVisible = imeVisible
+    val panelExpanded = suggestionState == SuggestionState.READY &&
+        (userExpandedOverride ?: (!panelIsLandscape && !panelImeVisible && !userScrolledUp))
+
+    // Keep the newest message on screen while the panel / keyboard resize the
+    // list: the auto-scroll in MainVoiceScreen only runs when new content
+    // arrives, so a shrinking viewport would otherwise leave the last message
+    // clipped mid-sentence. Skipped while the user is reading the history.
+    LaunchedEffect(panelExpanded, panelImeVisible) {
+        if (userScrolledUp) return@LaunchedEffect
+        val lastIndex = listState.layoutInfo.totalItemsCount - 1
+        if (lastIndex >= 0) {
+            listState.scrollToItem(lastIndex)
+            listState.layoutInfo.visibleItemsInfo.find { it.index == lastIndex }?.let { lastItem ->
+                val viewportBottom = listState.layoutInfo.viewportEndOffset - listState.layoutInfo.afterContentPadding
+                val itemBottom = lastItem.offset + lastItem.size
+                if (itemBottom > viewportBottom) {
+                    listState.scrollBy((itemBottom - viewportBottom).toFloat())
+                }
+            }
+        }
+    }
+
+    val ChatHorizontalMargin = 10.dp
+    val horizontalPadding = if (textModeOpen) ChatHorizontalMargin else 16.dp
     Column(modifier = Modifier.fillMaxWidth().padding(horizontal = horizontalPadding, vertical = 16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
         if (textModeOpen) {
+            val shouldShowSuggestions = textModeOpen &&
+                state == AssistantState.IDLE &&
+                messages.isNotEmpty() &&
+                messages.last().role == "assistant" &&
+                !messages.last().isError &&
+                !currentPersona.isTranslator &&
+                !currentPersona.isImageGenerator &&
+                currentPersona.model.isNotBlank()
+
+            val onRequestSuggestionsAction = {
+                suggestionJob?.cancel()
+                suggestionState = SuggestionState.LOADING
+                suggestionJob = scope.launch {
+                    try {
+                        val replies = service?.fetchSuggestedReplies(currentPersona) ?: emptyList()
+                        if (replies.isNotEmpty()) {
+                            suggestionList = replies
+                            suggestionState = SuggestionState.READY
+                        } else {
+                            suggestionState = SuggestionState.FAILED
+                        }
+                    } catch (e: Exception) {
+                        // Never fail silently: "Couldn't get suggestions" with no trace left us
+                        // guessing between an exception, empty model output and a filter
+                        // rejection (see the suggestedReplies/… logs in AssistantService).
+                        Log.e("AssistantService", "suggestedReplies: fetch threw — UI shows FAILED/retry", e)
+                        suggestionState = SuggestionState.FAILED
+                    }
+                }
+            }
+
+            val onDismissAction = {
+                suggestionJob?.cancel()
+                suggestionState = SuggestionState.IDLE
+                suggestionList = emptyList()
+            }
+
             ChatList(
                 modifier = Modifier.weight(1f),
                 messages = messages,
@@ -1135,14 +1290,17 @@ fun ControlBar(
                 onEditMessage = onEditMessage,
                 onDeleteMessage = onDeleteMessage,
                 onReplayAudio = onReplayAudio,
-                onRegenerateImage = { index -> service?.regenerateImageMessage(index) }
+                onRegenerateImage = { index -> service?.regenerateImageMessage(index) },
+                shouldShowSuggestions = shouldShowSuggestions,
+                suggestionState = suggestionState,
+                onRequestSuggestions = onRequestSuggestionsAction,
+                onDismiss = onDismissAction
             )
 
             Spacer(modifier = Modifier.height(16.dp))
 
             if (attachedFiles.isNotEmpty() || attachedImage != null) {
-                // Task 2: Horizontal padding for preview chips also reduced.
-                Row(modifier = Modifier.padding(bottom = 8.dp, start = 8.dp, end = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(modifier = Modifier.padding(bottom = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     attachedFiles.forEach { uri ->
                         Box(modifier = Modifier.size(50.dp).clip(MaterialTheme.shapes.small).background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.1f))) {
                             Icon(Icons.Default.AttachFile, null, modifier = Modifier.align(Alignment.Center))
@@ -1166,17 +1324,8 @@ fun ControlBar(
                     }
                 }
             }
-            
-            val shouldShowSuggestions = textModeOpen &&
-                state == AssistantState.IDLE &&
-                messages.isNotEmpty() &&
-                messages.last().role == "assistant" &&
-                !messages.last().isError &&
-                !currentPersona.isTranslator &&
-                !currentPersona.isImageGenerator &&
-                currentPersona.model.isNotBlank()
 
-            if (shouldShowSuggestions) {
+            if (shouldShowSuggestions && suggestionState == SuggestionState.READY) {
                 SuggestedRepliesPanel(
                     suggestionState = suggestionState,
                     suggestions = suggestionList,
@@ -1185,30 +1334,12 @@ fun ControlBar(
                         suggestionList = emptyList()
                         service?.sendTextMessageToServer(chosen, currentPersona, emptyList())
                     },
-                    onRequestSuggestions = {
-                        suggestionJob?.cancel()
-                        suggestionState = SuggestionState.LOADING
-                        suggestionJob = scope.launch {
-                            try {
-                                val replies = service?.fetchSuggestedReplies(currentPersona) ?: emptyList()
-                                if (replies.isNotEmpty()) {
-                                    suggestionList = replies
-                                    suggestionState = SuggestionState.READY
-                                } else {
-                                    suggestionState = SuggestionState.FAILED
-                                }
-                            } catch (e: Exception) {
-                                suggestionState = SuggestionState.FAILED
-                            }
-                        }
-                    },
-                    onDismiss = {
-                        suggestionJob?.cancel()
-                        suggestionState = SuggestionState.IDLE
-                        suggestionList = emptyList()
-                    },
+                    onRequestSuggestions = onRequestSuggestionsAction,
+                    onDismiss = onDismissAction,
                     personaColor = personaColor,
-                    chatFontSize = chatFontSize
+                    chatFontSize = chatFontSize,
+                    isExpanded = panelExpanded,
+                    onToggleExpanded = { expanded -> userExpandedOverride = expanded }
                 )
                 Spacer(modifier = Modifier.height(8.dp))
             }

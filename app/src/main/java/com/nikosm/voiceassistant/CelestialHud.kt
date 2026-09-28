@@ -28,6 +28,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -122,7 +123,7 @@ fun CelestialHudBody(
             }
 
             Box(
-                modifier = Modifier.fillMaxWidth().weight(1.15f),
+                modifier = Modifier.fillMaxWidth().wrapContentHeight(),
                 contentAlignment = Alignment.Center
             ) {
                 // Tap the planet = tap-to-talk (start recording when IDLE,

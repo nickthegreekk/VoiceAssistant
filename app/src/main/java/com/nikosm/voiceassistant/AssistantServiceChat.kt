@@ -2146,6 +2146,12 @@ Do you want a summary?
     }
 
     return withContext(Dispatchers.IO) {
+        Log.d(
+            SUGGESTED_REPLIES_TAG,
+            "suggestedReplies/start: persona=\"${persona.name}\" model=\"${persona.model}\" " +
+                "cloud=${isCloudModel(persona.model)} contextMessages=${recentMsgs.size} " +
+                "lastRole=${recentMsgs.lastOrNull()?.role}"
+        )
         suspend fun executeCall(promptText: String): String {
             return if (isCloudModel(persona.model)) {
                 val providerName = if (persona.model.startsWith("[") && persona.model.contains("] ")) {
@@ -2253,8 +2259,20 @@ Do you want a summary?
                     }
                     val requestBody = json.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
                     val request = Request.Builder().url(url).post(requestBody).build()
+                    Log.d(SUGGESTED_REPLIES_TAG, "suggestedReplies: POST $url (model=$actualModel, prompt=${promptText.length} chars)")
                     suggestionClient.newCall(request).execute().use { response ->
-                        if (!response.isSuccessful) throw Exception("Ollama error: ${response.code}")
+                        if (!response.isSuccessful) {
+                            // The server's own words are the only clue for a backend crash
+                            // (e.g. llama.cpp aborting on a long prompt), so log the body
+                            // before surfacing the bare status code as the exception.
+                            val errorBody = runCatching { response.body.string() }.getOrNull().orEmpty()
+                            Log.e(
+                                SUGGESTED_REPLIES_TAG,
+                                "suggestedReplies: Ollama /api/chat FAILED — HTTP ${response.code} model=$actualModel " +
+                                    "promptChars=${promptText.length} url=$url body: ${errorBody.take(1000)}"
+                            )
+                            throw Exception("Ollama error: ${response.code}")
+                        }
                         val bodyStr = response.body.string()
                         val jsonObj = JSONObject(bodyStr)
                         jsonObj.optJSONObject("message")?.optString("content") ?: jsonObj.optString("response")
@@ -2263,13 +2281,34 @@ Do you want a summary?
             }
         }
 
-        val raw1 = executeCall(buildPrompt(false))
-        val filtered1 = parseAndFilterSuggestedReplies(raw1)
-        if (filtered1.size >= 2) return@withContext filtered1.take(3)
+        val prompt1 = buildPrompt(false)
+        Log.d(SUGGESTED_REPLIES_TAG, "suggestedReplies/attempt1: prompt (${prompt1.length} chars):\n$prompt1")
+        val raw1 = executeCall(prompt1)
+        val attempt1 = parseAndFilterSuggestedRepliesDetailed(raw1)
+        logSuggestedRepliesParse("suggestedReplies/attempt1", raw1, attempt1)
+        if (attempt1.kept.size >= 2) {
+            Log.d(SUGGESTED_REPLIES_TAG, "suggestedReplies/attempt1: ${attempt1.kept.size} usable line(s) — stricter retry NOT fired")
+            return@withContext attempt1.kept.take(3)
+        }
 
-        val raw2 = executeCall(buildPrompt(true))
-        val filtered2 = parseAndFilterSuggestedReplies(raw2)
-        filtered2.take(3)
+        Log.w(
+            SUGGESTED_REPLIES_TAG,
+            "suggestedReplies/attempt1: only ${attempt1.kept.size} usable line(s) (need >=2) — " +
+                "stricter retry FIRED (raw length ${raw1.length}, parsed ${attempt1.parsed.size}, dropped ${attempt1.dropped.size})"
+        )
+        val prompt2 = buildPrompt(true)
+        Log.d(SUGGESTED_REPLIES_TAG, "suggestedReplies/attempt2: prompt (${prompt2.length} chars):\n$prompt2")
+        val raw2 = executeCall(prompt2)
+        val attempt2 = parseAndFilterSuggestedRepliesDetailed(raw2)
+        logSuggestedRepliesParse("suggestedReplies/attempt2", raw2, attempt2)
+        if (attempt2.kept.isEmpty()) {
+            Log.w(
+                SUGGESTED_REPLIES_TAG,
+                "suggestedReplies/attempt2: 0 usable line(s) — returning empty, UI will show FAILED " +
+                    "(raw length ${raw2.length}, parsed ${attempt2.parsed.size}, dropped ${attempt2.dropped.size})"
+            )
+        }
+        attempt2.kept.take(3)
     }
 }
 

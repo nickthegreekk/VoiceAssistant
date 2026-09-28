@@ -35,6 +35,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.material3.Surface
+import androidx.compose.ui.unit.Dp
 import coil3.compose.AsyncImage
 import java.io.File
 
@@ -63,7 +64,8 @@ fun ResponseTimeBadge(
 fun ProviderLogo(
     icon: String,
     modifier: Modifier = Modifier,
-    size: androidx.compose.ui.unit.Dp = 28.dp,
+    size: Dp = 36.dp,
+    // persona icon was 28 changed to 36 dp
     isCloud: Boolean = false,
     // Optional absolute path to an app-owned artwork file (Persona.iconImageUri).
     // When present it REPLACES the built-in provider glyph. When it is null — or the

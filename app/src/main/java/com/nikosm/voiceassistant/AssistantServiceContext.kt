@@ -1,5 +1,6 @@
 package com.nikosm.voiceassistant
 
+import android.util.Log
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -9,6 +10,11 @@ import java.net.URLEncoder
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+
+// Log tag for the suggested-replies diagnostics below (matches the house tag); every
+// message is prefixed with "suggestedReplies/…" so the whole path can be filtered with
+//   adb logcat | grep suggestedReplies
+internal const val SUGGESTED_REPLIES_TAG = "AssistantService"
 
 internal suspend fun AssistantService.fetchWebSearchContext(query: String): String {
     var searxngUrl = settingsManager.getSearxngUrl()
@@ -165,18 +171,76 @@ internal val assistantVoiceDenylist = listOf(
     "are you interested"
 )
 
-internal fun isAssistantVoiced(line: String): Boolean {
+// The single source of truth for the assistant-voice filter: returns WHY a line
+// reads as the assistant speaking, or null when the line is usable. isAssistantVoiced
+// (used by parseAndFilterSuggestedReplies and its tests) is expressed in terms of this
+// so a logged drop reason can never drift from the filter that actually runs.
+internal fun assistantVoiceReason(line: String): String? {
     val trimmed = line.trim().lowercase()
-    if (assistantVoiceDenylist.any { trimmed.startsWith(it) }) return true
-    if (trimmed.endsWith("?") && (trimmed.contains("you ") || trimmed.contains(" your ") || trimmed.startsWith("would ") || trimmed.startsWith("do ") || trimmed.startsWith("can ") || trimmed.startsWith("is ") || trimmed.startsWith("are "))) {
-        if (trimmed.contains("like me") || trimmed.contains("want me") || trimmed.contains("shall i") || trimmed.contains("should i")) {
-            return true
-        }
+    assistantVoiceDenylist.firstOrNull { trimmed.startsWith(it) }?.let {
+        return "opens with assistant phrasing \"$it\""
     }
-    return false
+    val questionShaped = trimmed.endsWith("?") && (
+        trimmed.contains("you ") || trimmed.contains(" your ") ||
+            trimmed.startsWith("would ") || trimmed.startsWith("do ") ||
+            trimmed.startsWith("can ") || trimmed.startsWith("is ") || trimmed.startsWith("are ")
+        )
+    if (questionShaped) {
+        val followUp = listOf("like me", "want me", "shall i", "should i").firstOrNull { trimmed.contains(it) }
+        if (followUp != null) return "assistant-voiced question (contains \"$followUp\")"
+    }
+    return null
 }
 
-internal fun parseAndFilterSuggestedReplies(rawOutput: String): List<String> {
+internal fun isAssistantVoiced(line: String): Boolean = assistantVoiceReason(line) != null
+
+/** One parse+filter pass, keeping everything the suggested-replies diagnostics log needs. */
+internal data class SuggestionParseResult(
+    val parsed: List<String>,
+    val kept: List<String>,
+    val dropped: List<Pair<String, String>>,
+    val truncated: List<String>
+)
+
+internal fun parseAndFilterSuggestedRepliesDetailed(rawOutput: String): SuggestionParseResult {
     val parsed = parseRawSuggestedReplies(rawOutput)
-    return parsed.filter { !isAssistantVoiced(it) }.take(3)
+    val kept = mutableListOf<String>()
+    val dropped = mutableListOf<Pair<String, String>>()
+    for (line in parsed) {
+        val reason = assistantVoiceReason(line)
+        if (reason != null) dropped += line to reason else if (kept.size < 3) kept += line
+    }
+    return SuggestionParseResult(
+        parsed = parsed,
+        kept = kept,
+        dropped = dropped,
+        // Usable lines the 3-suggestion cap cut off — not a filter rejection.
+        truncated = parsed.filter { assistantVoiceReason(it) == null }.drop(3)
+    )
+}
+
+internal fun parseAndFilterSuggestedReplies(rawOutput: String): List<String> =
+    parseAndFilterSuggestedRepliesDetailed(rawOutput).kept
+
+/**
+ * Diagnostics for the suggested-replies path (fetchSuggestedReplies): the raw model
+ * output, every line the parser produced, which lines the assistant-voice filter
+ * dropped and the exact reason, lines cut by the 3-suggestion cap, and what survived.
+ * This is the log that tells an exception apart from empty model output apart from an
+ * over-rejecting filter.
+ */
+internal fun logSuggestedRepliesParse(stage: String, raw: String, result: SuggestionParseResult) {
+    Log.d(SUGGESTED_REPLIES_TAG, "[$stage] raw model output (${raw.length} chars):\n$raw")
+    Log.d(SUGGESTED_REPLIES_TAG, "[$stage] parser produced ${result.parsed.size} line(s): ${result.parsed.map { it.take(90) }}")
+    if (result.dropped.isEmpty()) {
+        Log.d(SUGGESTED_REPLIES_TAG, "[$stage] filter dropped 0 lines")
+    } else {
+        result.dropped.forEach { (line, reason) ->
+            Log.d(SUGGESTED_REPLIES_TAG, "[$stage] filter DROPPED \"${line.take(90)}\" — $reason")
+        }
+    }
+    result.truncated.forEach {
+        Log.d(SUGGESTED_REPLIES_TAG, "[$stage] cut by the 3-suggestion cap: \"${it.take(90)}\"")
+    }
+    Log.d(SUGGESTED_REPLIES_TAG, "[$stage] KEPT ${result.kept.size}: ${result.kept}")
 }
