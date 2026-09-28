@@ -920,7 +920,8 @@ fun MainScreen(service: AssistantService?) {
                         onDeleteMessage = { idx -> service?.deleteMessage(idx) },
                         onReplayAudio = { msg -> service?.replayMessageAudio(msg, currentPersona) },
                         service = service,
-                        isImageGenerator = currentPersona.isImageGenerator
+                        isImageGenerator = currentPersona.isImageGenerator,
+                        currentPersona = currentPersona
                         )
                     } // end celestial-if/else (HUD body vs classic ControlBar)
                 }
@@ -1101,8 +1102,20 @@ fun ControlBar(
     onDeleteMessage: (Int) -> Unit,
     onReplayAudio: (ChatMessage) -> Unit,
     service: AssistantService? = null,
-    isImageGenerator: Boolean = false
+    isImageGenerator: Boolean = false,
+    currentPersona: Persona
 ) {
+    val scope = rememberCoroutineScope()
+    var suggestionState by remember { mutableStateOf(SuggestionState.IDLE) }
+    var suggestionList by remember { mutableStateOf<List<String>>(emptyList()) }
+    var suggestionJob by remember { mutableStateOf<Job?>(null) }
+    val suggestionContextKey = "${currentPersona.name}_${messages.size}_${messages.lastOrNull()?.text?.hashCode() ?: 0}"
+
+    LaunchedEffect(suggestionContextKey, textModeOpen, state) {
+        suggestionJob?.cancel()
+        suggestionState = SuggestionState.IDLE
+        suggestionList = emptyList()
+    }
     // Task 2: Wider chat box. Padding reduced from 16.dp to 8.dp in text mode.
     val horizontalPadding = if (textModeOpen) 8.dp else 16.dp
     Column(modifier = Modifier.fillMaxWidth().padding(horizontal = horizontalPadding, vertical = 16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
@@ -1154,12 +1167,62 @@ fun ControlBar(
                 }
             }
             
+            val shouldShowSuggestions = textModeOpen &&
+                state == AssistantState.IDLE &&
+                messages.isNotEmpty() &&
+                messages.last().role == "assistant" &&
+                !messages.last().isError &&
+                !currentPersona.isTranslator &&
+                !currentPersona.isImageGenerator &&
+                currentPersona.model.isNotBlank()
+
+            if (shouldShowSuggestions) {
+                SuggestedRepliesRow(
+                    suggestionState = suggestionState,
+                    suggestions = suggestionList,
+                    onSuggestionClick = { chosen ->
+                        suggestionState = SuggestionState.IDLE
+                        suggestionList = emptyList()
+                        service?.sendTextMessageToServer(chosen, currentPersona, emptyList())
+                    },
+                    onRequestSuggestions = {
+                        suggestionJob?.cancel()
+                        suggestionState = SuggestionState.LOADING
+                        suggestionJob = scope.launch {
+                            try {
+                                val replies = service?.fetchSuggestedReplies(currentPersona) ?: emptyList()
+                                if (replies.isNotEmpty()) {
+                                    suggestionList = replies
+                                    suggestionState = SuggestionState.READY
+                                } else {
+                                    suggestionState = SuggestionState.FAILED
+                                }
+                            } catch (e: Exception) {
+                                suggestionState = SuggestionState.FAILED
+                            }
+                        }
+                    },
+                    onDismiss = {
+                        suggestionJob?.cancel()
+                        suggestionState = SuggestionState.IDLE
+                        suggestionList = emptyList()
+                    },
+                    personaColor = personaColor
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+            }
+
             TextInputRow(
                 textInput = textInput,
                 onTextInputChange = onTextInputChange,
                 onAttachClick = onAttachClick,
                 onImageAttachClick = onImageAttachClick,
-                onSendClick = onSendClick,
+                onSendClick = {
+                    suggestionJob?.cancel()
+                    suggestionState = SuggestionState.IDLE
+                    suggestionList = emptyList()
+                    onSendClick()
+                },
                 onMicClick = onMicClick,
                 onStopClick = onStopClick,
                 state = state,

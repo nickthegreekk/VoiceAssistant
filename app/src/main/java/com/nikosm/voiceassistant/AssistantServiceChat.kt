@@ -2089,6 +2089,176 @@ fun AssistantService.regenerateImageMessage(index: Int) {
     }
 }
 
+suspend fun AssistantService.fetchSuggestedReplies(persona: Persona): List<String> {
+    val recentMsgs = _messages.value.filter { !it.isError }.takeLast(6)
+    if (recentMsgs.isEmpty()) return emptyList()
+
+    val transcript = buildString {
+        recentMsgs.forEach { m ->
+            val role = if (m.role == "user") "User" else "Assistant"
+            val text = m.text.take(500)
+            append("$role: $text / ")
+        }
+    }
+
+    val systemInstruction = "write exactly 3 short messages the USER might plausibly send next (different intents, e.g. a follow-up question, a request for more detail or an example, a related next step), in first person, in the same language as the conversation, under ~15 words each, one per line, no numbering, no quotes, no commentary."
+
+    return withContext(Dispatchers.IO) {
+        val rawResponse = if (isCloudModel(persona.model)) {
+            val providerName = if (persona.model.startsWith("[") && persona.model.contains("] ")) {
+                persona.model.substring(1, persona.model.indexOf("]"))
+            } else ""
+            val apiSetting = (_cloudApis.value + _customCloudApis.value).find { it.name == providerName }
+                ?: throw Exception("No config for provider")
+
+            val actualModel = persona.model.substringAfter("] ")
+            val baseUrl = apiSetting.baseUrl.trim().removeSuffix("/")
+            val mediaType = "application/json; charset=utf-8".toMediaType()
+            val json = JSONObject()
+
+            when (apiSetting.icon) {
+                "A" -> {
+                    json.put("model", actualModel).put("max_tokens", 120).put("system", systemInstruction)
+                    json.put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", transcript)))
+                    val req = Request.Builder().url("$baseUrl/v1/messages").header("x-api-key", apiSetting.apiKey).header("anthropic-version", "2023-06-01").header("content-type", "application/json").post(json.toString().toRequestBody(mediaType)).build()
+                    getDynamicClient(persona).newCall(req).execute().use { resp ->
+                        if (!resp.isSuccessful) throw Exception("Anthropic error: ${resp.code}")
+                        val bodyStr = resp.body.string()
+                        val resJson = JSONObject(bodyStr)
+                        val content = resJson.getJSONArray("content")
+                        val sb = StringBuilder()
+                        for (i in 0 until content.length()) {
+                            val block = content.getJSONObject(i)
+                            if (block.optString("type") == "text") sb.append(block.optString("text"))
+                        }
+                        if (resJson.has("usage")) {
+                            val usage = resJson.getJSONObject("usage")
+                            val p = usage.optInt("input_tokens", 0)
+                            val c = usage.optInt("output_tokens", 0)
+                            val cost = calculateCost(persona, p, c)
+                            withContext(Dispatchers.Main) {
+                                val cur = _sessionUsage.value
+                                _sessionUsage.value = UsageInfo(cur.promptTokens + p, cur.completionTokens + c, cur.totalTokens + p + c, cur.cost + cost)
+                                _totalCost.value += cost
+                                saveSettings()
+                            }
+                        }
+                        sb.toString()
+                    }
+                }
+                "G" -> {
+                    val contents = JSONArray().put(JSONObject().put("role", "user").put("parts", JSONArray().put(JSONObject().put("text", transcript))))
+                    json.put("contents", contents)
+                    json.put("generationConfig", JSONObject().put("maxOutputTokens", 120))
+                    json.put("system_instruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", systemInstruction))))
+                    val req = Request.Builder().url("$baseUrl/v1beta/models/$actualModel:generateContent").header("x-goog-api-key", apiSetting.apiKey).post(json.toString().toRequestBody(mediaType)).build()
+                    getDynamicClient(persona).newCall(req).execute().use { resp ->
+                        if (!resp.isSuccessful) throw Exception("Gemini error: ${resp.code}")
+                        val bodyStr = resp.body.string()
+                        val resJson = JSONObject(bodyStr)
+                        val candidate = resJson.getJSONArray("candidates").getJSONObject(0)
+                        val parts = candidate.getJSONObject("content").getJSONArray("parts")
+                        val sb = StringBuilder()
+                        for (i in 0 until parts.length()) {
+                            sb.append(parts.getJSONObject(i).optString("text"))
+                        }
+                        if (resJson.has("usageMetadata")) {
+                            val usage = resJson.getJSONObject("usageMetadata")
+                            val p = usage.optInt("promptTokenCount", 0)
+                            val c = usage.optInt("candidatesTokenCount", 0)
+                            val cost = calculateCost(persona, p, c)
+                            withContext(Dispatchers.Main) {
+                                val cur = _sessionUsage.value
+                                _sessionUsage.value = UsageInfo(cur.promptTokens + p, cur.completionTokens + c, cur.totalTokens + p + c, cur.cost + cost)
+                                _totalCost.value += cost
+                                saveSettings()
+                            }
+                        }
+                        sb.toString()
+                    }
+                }
+                else -> {
+                    json.put("model", actualModel).put("max_tokens", 120)
+                    val msgs = JSONArray()
+                        .put(JSONObject().put("role", "system").put("content", systemInstruction))
+                        .put(JSONObject().put("role", "user").put("content", transcript))
+                    json.put("messages", msgs)
+                    val url = if (baseUrl.endsWith("/chat/completions")) baseUrl else "$baseUrl/chat/completions"
+                    val req = Request.Builder().url(url).header("Authorization", "Bearer ${apiSetting.apiKey}").post(json.toString().toRequestBody(mediaType)).build()
+                    getDynamicClient(persona).newCall(req).execute().use { resp ->
+                        if (!resp.isSuccessful) throw Exception("OpenAI error: ${resp.code}")
+                        val bodyStr = resp.body.string()
+                        val resJson = JSONObject(bodyStr)
+                        val content = resJson.getJSONArray("choices").getJSONObject(0).getJSONObject("message").optString("content")
+                        if (resJson.has("usage")) {
+                            val usage = resJson.getJSONObject("usage")
+                            val p = usage.optInt("prompt_tokens", 0)
+                            val c = usage.optInt("completion_tokens", 0)
+                            val cost = calculateCost(persona, p, c)
+                            withContext(Dispatchers.Main) {
+                                val cur = _sessionUsage.value
+                                _sessionUsage.value = UsageInfo(cur.promptTokens + p, cur.completionTokens + c, cur.totalTokens + p + c, cur.cost + cost)
+                                _totalCost.value += cost
+                                saveSettings()
+                            }
+                        }
+                        content
+                    }
+                }
+            }
+        } else {
+            val rawModel = persona.model
+            val (displayServer, actualModel) = if (rawModel.startsWith("[") && rawModel.contains("] ")) {
+                rawModel.substring(1, rawModel.indexOf("]")) to rawModel.substringAfter("] ")
+            } else {
+                null to rawModel
+            }
+
+            val ollamaBase = displayServer?.let { name -> _ollamaBaseUrls.value.find { it.name == name }?.url }
+                ?: persona.backendUrl.ifBlank { _ollamaBaseUrls.value.firstOrNull()?.url ?: "" }
+
+            if (ollamaBase.contains(":8880") || persona.voiceMode == VoiceMode.GATEWAY) {
+                val base = resolveGatewayConfig(_serverBases.value, persona.backendUrl, displayServer)?.url
+                    ?: _serverBases.value.firstOrNull()?.url ?: throw Exception("No gateway configured")
+                val requestBody = MultipartBody.Builder().setType(MultipartBody.FORM).apply {
+                    addFormDataPart("text", "$systemInstruction\n\n$transcript")
+                    addFormDataPart("model", actualModel)
+                    addFormDataPart("backend_url", persona.backendUrl)
+                    addFormDataPart("max_tokens", "120")
+                }.build()
+                val requestBuilder = Request.Builder().url("$base/text-chat").post(requestBody)
+                client.newCall(requestBuilder.build()).execute().use { response ->
+                    if (!response.isSuccessful) throw Exception("Gateway error: ${response.code}")
+                    val body = response.body.string()
+                    val json = JSONObject(body)
+                    json.optString("response").ifBlank { json.optString("text") }
+                }
+            } else {
+                val resolvedBackend = ollamaBase.trim().removeSuffix("/").removeSuffix("/api/chat")
+                val url = "$resolvedBackend/api/chat"
+                val json = JSONObject().apply {
+                    put("model", actualModel)
+                    put("stream", false)
+                    put("options", JSONObject().put("num_predict", 120).put("temperature", 0.7).put("think", false))
+                    put("messages", JSONArray().apply {
+                        put(JSONObject().put("role", "system").put("content", systemInstruction))
+                        put(JSONObject().put("role", "user").put("content", transcript))
+                    })
+                }
+                val requestBody = json.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
+                val request = Request.Builder().url(url).post(requestBody).build()
+                client.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) throw Exception("Ollama error: ${response.code}")
+                    val bodyStr = response.body.string()
+                    val jsonObj = JSONObject(bodyStr)
+                    jsonObj.optJSONObject("message")?.optString("content") ?: jsonObj.optString("response")
+                }
+            }
+        }
+        parseSuggestedReplies(rawResponse)
+    }
+}
+
 
 // Fix #6 (numCtx overflow): the ONE place the client-side history budget is computed,
 // shared by the two budgeted request builders — performDirectOllamaChat and

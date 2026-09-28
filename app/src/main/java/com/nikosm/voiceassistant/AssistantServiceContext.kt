@@ -128,3 +128,29 @@ internal fun AssistantService.extractImageGenerationPrompt(text: String): String
     }
     return trimmed
 }
+
+internal fun parseSuggestedReplies(rawOutput: String): List<String> {
+    if (rawOutput.isBlank()) return emptyList()
+    val lines = rawOutput.lines()
+    val results = mutableListOf<String>()
+    for (line in lines) {
+        var cleaned = line.trim()
+        if (cleaned.isBlank()) continue
+        cleaned = cleaned.replace(Regex("^(\\d+[.)]|[-•*])\\s*"), "").trim()
+        if ((cleaned.startsWith("\"") && cleaned.endsWith("\"")) || (cleaned.startsWith("'") && cleaned.endsWith("'"))) {
+            if (cleaned.length >= 2) {
+                cleaned = cleaned.substring(1, cleaned.length - 1).trim()
+            }
+        }
+        cleaned = cleaned.replace(Regex("^[-•*]\\s*"), "").trim()
+        if (cleaned.isNotBlank() && !results.contains(cleaned)) {
+            results.add(cleaned)
+            if (results.size >= 3) break
+        }
+    }
+    if (results.isEmpty() && rawOutput.contains("[")) {
+        val jsonClean = rawOutput.substringAfter("[").substringBeforeLast("]")
+        return parseSuggestedReplies(jsonClean)
+    }
+    return results.take(3)
+}
