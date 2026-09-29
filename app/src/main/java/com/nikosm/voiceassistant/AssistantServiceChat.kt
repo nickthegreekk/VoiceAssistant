@@ -9,6 +9,7 @@ import androidx.core.content.ContextCompat
 import androidx.compose.ui.graphics.Color
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.Call
@@ -649,7 +650,7 @@ private suspend fun encodeImageToBase64(path: String?): String? {
     }
 }
 
-internal fun AssistantService.sendTextMessageToServer(inputText: String, currentPersona: Persona, attachments: List<Uri> = emptyList(), imageUri: Uri? = null) {
+internal fun AssistantService.sendTextMessageToServer(inputText: String, currentPersona: Persona, attachments: List<Uri> = emptyList(), imageUri: Uri? = null, turnContext: TurnContext = TurnContext.Default) {
     if (inputText.isBlank() && attachments.isEmpty() && imageUri == null) return
     val startTime = System.currentTimeMillis()
     _voiceDuration.value = 0
@@ -657,13 +658,19 @@ internal fun AssistantService.sendTextMessageToServer(inputText: String, current
     serviceScope.launch {
         val imagePath = imageUri?.let { saveMessageImage(it) }
 
+        // Phase 0: this turn's transcript writes (the user turn, the error bubbles, the
+        // streamed partial and the final assistant message) all go through one sink, so a
+        // room turn runs this exact pipeline against its own transcript. Resolved at
+        // launch scope: inside serviceScope.launch, bare `this` binds to the CoroutineScope.
+        val sink = turnContext.sinkOrDefault(this@sendTextMessageToServer)
+
         // A9: the display/history user message shows a concise filename list
-        _messages.value = _messages.value + ChatMessage("user",
+        sink.append(ChatMessage("user",
             if (attachments.isNotEmpty())
                 "$inputText\n\n(Attached: ${attachments.mapNotNull { it.lastPathSegment }.joinToString(", ")})"
             else inputText,
             imagePath = imagePath
-        )
+        ))
         saveSettings()
 
         if (currentPersona.isImageGenerator || isImageGenerationRequest(inputText)) {
@@ -673,7 +680,7 @@ internal fun AssistantService.sendTextMessageToServer(inputText: String, current
         }
 
         if (currentPersona.model.isBlank()) {
-            _messages.value = _messages.value + ChatMessage("assistant", "Please choose a model for this persona in its settings.", isError = true)
+            sink.append(ChatMessage("assistant", "Please choose a model for this persona in its settings.", isError = true))
             return@launch
         }
 
@@ -686,7 +693,7 @@ internal fun AssistantService.sendTextMessageToServer(inputText: String, current
         var playbackRequested = false
 
         if (currentPersona.isCloud && isCloudModel(currentPersona.model)) {
-            performCloudChat(inputText, currentPersona, useDeviceVoice, startTime, currentTurnInHistory = true, generation = generation, imagePath = imagePath)
+            performCloudChat(inputText, currentPersona, useDeviceVoice, startTime, currentTurnInHistory = true, generation = generation, imagePath = imagePath, turnContext = turnContext)
             return@launch
         }
 
@@ -713,7 +720,7 @@ internal fun AssistantService.sendTextMessageToServer(inputText: String, current
                 if (displayServer != null) {
                      val ollamaBase = _ollamaBaseUrls.value.find { it.name == displayServer }?.url
                      if (ollamaBase != null) {
-                         val directRes = performDirectOllamaChat(ollamaBase, actualModel, inputText, currentPersona, attachments = attachments, imagePath = imagePath, currentTurnInHistory = true, generation = generation)
+                         val directRes = performDirectOllamaChat(ollamaBase, actualModel, inputText, currentPersona, attachments = attachments, imagePath = imagePath, currentTurnInHistory = true, generation = generation, turnContext = turnContext)
                          // Fix #5: clean markdown for TTS on IO — the cleaned variant feeds
                          // the on-device engines; the chat bubble/history keep the original.
                          val cleanedForTts = cleanTextForTts(directRes.first)
@@ -926,20 +933,18 @@ internal fun AssistantService.sendTextMessageToServer(inputText: String, current
             // in-place finalize).
             val streamedIdx = takeStreamedPlaceholderIfOwned(generation)
             clearStreamingTextIfOwned(generation)
-            if (streamedIdx != null && streamedIdx < _messages.value.size) {
-                _messages.value = _messages.value.mapIndexed { i, m ->
-                    if (i == streamedIdx) m.copy(
-                        text = rText as String,
-                        reasoning = reasoning as? String,
-                        audioFilePath = audioPath,
-                        responseTimeMs = responseTimeMs
-                    ) else m
-                }
+            if (streamedIdx != null && streamedIdx < sink.size()) {
+                sink.updateAt(streamedIdx) { m -> m.copy(
+                    text = rText as String,
+                    reasoning = reasoning as? String,
+                    audioFilePath = audioPath,
+                    responseTimeMs = responseTimeMs
+                ) }
             } else {
-                _messages.value = _messages.value + ChatMessage(
+                sink.append(ChatMessage(
                     "assistant", rText as String, reasoning as? String,
                     audioFilePath = audioPath, responseTimeMs = responseTimeMs
-                )
+                ))
             }
             saveSettings()
 
@@ -997,7 +1002,7 @@ internal fun AssistantService.sendTextMessageToServer(inputText: String, current
             } else {
                 android.util.Log.e("AssistantService", "Chat failed", e)
                 if (isChatContextCurrent(generation, personaName)) {
-                    _messages.value = _messages.value + ChatMessage("assistant", "Error: ${e.message ?: "Unknown error"}", isError = true)
+                    sink.append(ChatMessage("assistant", "Error: ${e.message ?: "Unknown error"}", isError = true))
                 } else {
                     android.util.Log.d("AssistantService", "Persona changed during request — discarding failure message: ${e.message}")
                 }
@@ -1149,8 +1154,8 @@ private fun AssistantService.isCloudModel(model: String): Boolean {
            _customCloudApis.value.any { it.name == providerName }
 }
 
-private fun AssistantService.performCloudChat(text: String, persona: Persona, useDeviceVoice: Boolean = false, startTime: Long, currentTurnInHistory: Boolean, generation: Long, attachments: List<Uri> = emptyList(), imagePath: String? = null) {
-    serviceScope.launch {
+internal fun AssistantService.performCloudChat(text: String, persona: Persona, useDeviceVoice: Boolean = false, startTime: Long, currentTurnInHistory: Boolean, generation: Long, attachments: List<Uri> = emptyList(), imagePath: String? = null, turnContext: TurnContext = TurnContext.Default, allowPlayback: Boolean = true): Job {
+    return serviceScope.launch {
         // M2: this turn owns the THINKING state it sets here (see stopVadListening()).
         recordThinkingOwner(generation)
         _state.value = AssistantState.THINKING
@@ -1159,6 +1164,11 @@ private fun AssistantService.performCloudChat(text: String, persona: Persona, us
         // turn that reaches here retained its focus through THINKING — release
         // it in the finally below if playback was never handed off.
         var playbackRequested = false
+        // Phase 0: resolved ONCE, at launch scope, so the failure path below writes its
+        // error bubble to the same transcript as the success path (a room turn must never
+        // drop a failure into the single-chat conversation). (Explicit receiver label:
+        // inside serviceScope.launch, bare `this` binds to the CoroutineScope.)
+        val sink = turnContext.sinkOrDefault(this@performCloudChat)
         try {
             val responseData = withContext(Dispatchers.IO) {
                 val providerName = if (persona.model.startsWith("[") && persona.model.contains("] ")) {
@@ -1169,7 +1179,7 @@ private fun AssistantService.performCloudChat(text: String, persona: Persona, us
                     ?: throw Exception("No config for provider '$providerName'")
 
                 if (apiSetting.apiKey.isBlank() && apiSetting.icon != "C") throw Exception("API Key for ${apiSetting.name} is missing")
-                val request = buildCloudRequest(apiSetting, persona, text, currentTurnInHistory, attachments, imagePath)
+                val request = buildCloudRequest(apiSetting, persona, text, currentTurnInHistory, attachments, imagePath, turnContext)
                 // A6: track the call so the Stop button can cancel cloud requests too
                 // (previously execute() was called on an untracked Call).
                 val call = getDynamicClient(persona).newCall(request)
@@ -1210,8 +1220,11 @@ private fun AssistantService.performCloudChat(text: String, persona: Persona, us
                 android.util.Log.d("AssistantService", "Cloud response discarded — active persona changed (gen $generation)")
                 return@launch
             }
+            // Phase 0: cloud turns are non-streaming, so the apply block only ever
+            // appends — but it writes to the same sink the rest of the turn uses
+            // (resolved at launch scope above).
             if (useDeviceVoice) {
-                _messages.value = _messages.value + ChatMessage("assistant", responseData.first, responseData.second, responseTimeMs = responseTimeMs)
+                sink.append(ChatMessage("assistant", responseData.first, responseData.second, responseTimeMs = responseTimeMs))
                 saveSettings()
                 playbackRequested = true
                 playResponse(persona, deviceText = responseData.third)
@@ -1232,7 +1245,7 @@ private fun AssistantService.performCloudChat(text: String, persona: Persona, us
                     outFile.absolutePath
                 } else null
 
-                _messages.value = _messages.value + ChatMessage("assistant", responseData.first, responseData.second, audioFilePath = audioPath, responseTimeMs = responseTimeMs)
+                sink.append(ChatMessage("assistant", responseData.first, responseData.second, audioFilePath = audioPath, responseTimeMs = responseTimeMs))
                 saveSettings()
 
                 if (audioPath != null) {
@@ -1240,17 +1253,17 @@ private fun AssistantService.performCloudChat(text: String, persona: Persona, us
                     playResponse(persona, file = File(audioPath))
                 } else if (!ttsGatewayResolved) {
                     // No synthesis request was sent at all — say why, at the point of use.
-                    _messages.value = _messages.value + ChatMessage(
+                    sink.append(ChatMessage(
                         "assistant",
                         "Error: no configured gateway matches this persona's Backend URL " +
                             "'${persona.backendUrl}', so the reply could not be spoken. Fix the Backend URL in " +
                             "the persona settings (or add the gateway in Servers), then resend.",
                         isError = true
-                    )
+                    ))
                     saveSettings()
                 }
             } else {
-                _messages.value = _messages.value + ChatMessage("assistant", responseData.first, responseData.second, responseTimeMs = responseTimeMs)
+                sink.append(ChatMessage("assistant", responseData.first, responseData.second, responseTimeMs = responseTimeMs))
                 saveSettings()
             }
         } catch (e: CancellationException) {
@@ -1263,7 +1276,7 @@ private fun AssistantService.performCloudChat(text: String, persona: Persona, us
                 android.util.Log.d("AssistantService", "Cloud chat request cancelled by user — no error bubble")
             } else {
                 if (isChatContextCurrent(generation, persona.name)) {
-                    _messages.value = _messages.value + ChatMessage("assistant", "Error: ${e.message}", isError = true)
+                    sink.append(ChatMessage("assistant", "Error: ${e.message}", isError = true))
                 } else {
                     android.util.Log.d("AssistantService", "Persona changed during cloud request — discarding failure message: ${e.message}")
                 }
@@ -1287,7 +1300,27 @@ private fun AssistantService.performCloudChat(text: String, persona: Persona, us
     }
 }
 
-private suspend fun AssistantService.performDirectOllamaChat(baseUrl: String, model: String, text: String, persona: Persona, currentTurnInHistory: Boolean, generation: Long, attachments: List<Uri> = emptyList(), imagePath: String? = null): Triple<String, String?, ByteArray?> {
+// Phase 0 (multi-persona Rooms groundwork): what ONE turn is allowed to see as
+// context. The defaults reproduce the historical single-chat behavior exactly —
+// history comes from the active persona's _messages transcript and no extra
+// system-prompt text is added — so every existing call site (text flow, voice
+// flow, cloud) is behaviorally unchanged. A room turn passes its own transcript
+// and its room-preamble suffix here instead; backend routing itself is untouched
+// and stays a property of the Persona.
+internal data class TurnContext(
+    val history: List<ChatMessage>? = null,
+    val systemPromptSuffix: String = "",
+    // Phase 0: where this turn's own transcript writes land. Null ⇒ the single-chat
+    // `_messages` transcript, i.e. exactly the pre-Rooms behavior. A room turn passes
+    // its own sink so the identical pipeline writes into the room transcript.
+    val sink: TurnSink? = null
+) {
+    companion object {
+        val Default = TurnContext()
+    }
+}
+
+internal suspend fun AssistantService.performDirectOllamaChat(baseUrl: String, model: String, text: String, persona: Persona, currentTurnInHistory: Boolean, generation: Long, attachments: List<Uri> = emptyList(), imagePath: String? = null, turnContext: TurnContext = TurnContext.Default): Triple<String, String?, ByteArray?> {
     // Resolve backend URL: fallback if empty or mistakenly pointing to a gateway (8880)
     val stripped = baseUrl.trim()
     val resolvedBackend = if (stripped.isBlank() || stripped.contains(":8880")) {
@@ -1333,6 +1366,12 @@ private suspend fun AssistantService.performDirectOllamaChat(baseUrl: String, mo
         if (contextPrefix.isNotEmpty()) {
             finalSystemPrompt = "$contextPrefix\n\n$finalSystemPrompt"
         }
+        // Phase 0: room preamble (if any) rides at the END of the persona's own
+        // system prompt — the persona's prompt keeps governing its response — and
+        // is appended BEFORE the budget math so resolveHistoryBudget accounts for it.
+        if (turnContext.systemPromptSuffix.isNotBlank()) {
+            finalSystemPrompt = "$finalSystemPrompt\n\n${turnContext.systemPromptSuffix}"
+        }
 
         // Add system prompt first
         // S4: contains the full system prompt (plus injected search/news context) — debug only.
@@ -1351,7 +1390,7 @@ private suspend fun AssistantService.performDirectOllamaChat(baseUrl: String, mo
         // A1: positional slice — the caller says whether the current user turn is
         // already the last entry in _messages (text flow appends it before the
         // request; the voice flow does not). No text-content matching.
-        val allNonError = _messages.value.filter { !it.isError }
+        val allNonError = (turnContext.history ?: _messages.value).filter { !it.isError }
         val historySource = if (currentTurnInHistory && allNonError.isNotEmpty()) allNonError.dropLast(1) else allNonError
 
         var usedTokens = 0
@@ -1438,13 +1477,18 @@ private suspend fun AssistantService.performDirectOllamaChat(baseUrl: String, mo
             val content = StringBuilder()
             val thinkingBuf = StringBuilder()
             var placeholderAppended = false
+            // Phase 0: this turn's transcript writes go to the sink its TurnContext
+            // names (the single-chat `_messages` for every pre-existing call site).
+            // (Explicit receiver label: bare `this` would bind to an enclosing
+            // withContext/lambda receiver, not the service.)
+            val sink = turnContext.sinkOrDefault(this@performDirectOllamaChat)
 
             fun appendPlaceholderIfNeeded() {
                 if (placeholderAppended) return
-                _messages.value = _messages.value + ChatMessage("assistant", "")
+                val idx = sink.append(ChatMessage("assistant", ""))
                 // H3: record this generation as the placeholder's owner, so a
                 // superseded turn unwinding later cannot claim/clear it.
-                adoptStreamedPlaceholder(generation, _messages.value.size - 1)
+                adoptStreamedPlaceholder(generation, idx)
                 placeholderAppended = true
             }
 
@@ -1454,14 +1498,10 @@ private suspend fun AssistantService.performDirectOllamaChat(baseUrl: String, mo
                 // "content jumps to the other turn's partial text" symptom).
                 if (!ownsStreamedPlaceholderSvc(generation)) return
                 val idx = streamedPlaceholderIndex ?: return
-                val current = _messages.value.toMutableList()
-                if (idx in current.indices) {
-                    current[idx] = current[idx].copy(
-                        text = content.toString(),
-                        reasoning = thinkingBuf.toString().ifBlank { null }
-                    )
-                    _messages.value = current
-                }
+                sink.updateAt(idx) { it.copy(
+                    text = content.toString(),
+                    reasoning = thinkingBuf.toString().ifBlank { null }
+                ) }
             }
 
             fun removeBlankPlaceholder() {
@@ -1472,10 +1512,8 @@ private suspend fun AssistantService.performDirectOllamaChat(baseUrl: String, mo
                 // bubble on a mid-stream network failure even if it was superseded.
                 if (!ownsStreamedPlaceholderRecord(generation)) return
                 val idx = streamedPlaceholderIndex ?: return
-                val current = _messages.value.toMutableList()
-                if (idx in current.indices && current[idx].text.isBlank()) {
-                    current.removeAt(idx)
-                    _messages.value = current
+                if (sink.peek(idx)?.text?.isBlank() == true) {
+                    sink.removeAt(idx)
                 }
                 releaseStreamedPlaceholderIfOwned(generation)
             }
@@ -1580,7 +1618,7 @@ private suspend fun AssistantService.performDirectOllamaChat(baseUrl: String, mo
 internal class StreamCancelledByUserException(val partialContent: String, val partialThinking: String) : java.io.IOException("Cancelled")
 internal class StreamPersonaChangedException(val partialContent: String, val partialThinking: String) : java.io.IOException("Persona changed mid-stream")
 
-private suspend fun AssistantService.buildCloudRequest(api: CloudApiSetting, persona: Persona, text: String, currentTurnInHistory: Boolean, attachments: List<Uri> = emptyList(), imagePath: String? = null): Request {
+private suspend fun AssistantService.buildCloudRequest(api: CloudApiSetting, persona: Persona, text: String, currentTurnInHistory: Boolean, attachments: List<Uri> = emptyList(), imagePath: String? = null, turnContext: TurnContext = TurnContext.Default): Request {
     val mediaType = "application/json; charset=utf-8".toMediaType()
     val json = JSONObject()
     
@@ -1601,6 +1639,12 @@ private suspend fun AssistantService.buildCloudRequest(api: CloudApiSetting, per
     if (contextPrefix.isNotEmpty()) {
         finalSystemPrompt = "$contextPrefix\n\n$finalSystemPrompt"
     }
+    // Phase 0: same room-preamble placement as the direct-Ollama path — appended to
+    // the persona's own prompt and applied BEFORE resolveHistoryBudget below, so the
+    // budget math and the overflow refusal see the real system prompt.
+    if (turnContext.systemPromptSuffix.isNotBlank()) {
+        finalSystemPrompt = "$finalSystemPrompt\n\n${turnContext.systemPromptSuffix}"
+    }
 
     // A-attachments: the model-facing prompt includes extracted file content. The
     // original `text` is still used for search/news above.
@@ -1617,7 +1661,7 @@ private suspend fun AssistantService.buildCloudRequest(api: CloudApiSetting, per
     // A1: positional slice — the caller says whether the current user turn is already
     // the last entry in _messages (text flow appends it; voice flow does not). No
     // text-content matching is used to decide what to drop.
-    val allNonError = _messages.value.filter { !it.isError }
+    val allNonError = (turnContext.history ?: _messages.value).filter { !it.isError }
     val historySource = if (currentTurnInHistory && allNonError.isNotEmpty()) allNonError.dropLast(1) else allNonError
 
     var usedTokens = 0

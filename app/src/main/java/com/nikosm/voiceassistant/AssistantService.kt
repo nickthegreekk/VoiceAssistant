@@ -493,6 +493,46 @@ class AssistantService : Service() {
     private val _personas = MutableStateFlow<List<Persona>>(emptyList())
     val personas = _personas.asStateFlow()
 
+    // ---------------------------------------------------------------- Rooms
+    // Room state is deliberately PARALLEL to, never merged into, the single-chat state
+    // above: a room has its own identity, its own transcript, and its own round state,
+    // and none of it may leak into a persona's individual history (or vice versa).
+    //
+    //  - _roomMessages holds the ACTIVE room's transcript only; other rooms load on
+    //    entry (mirroring switchPersona), so switching rooms does not deserialize
+    //    every room's history into memory.
+    //  - roomHistoryIoJob is a SEPARATE IO lane from the single-chat historyIoJob.
+    //    Room history is keyed by room UUID and owned by no persona, so there is no
+    //    messagesOwnerName-equivalent bookkeeping to do — but it must still serialize
+    //    its own writes, hence its own queue.
+    internal val _rooms = MutableStateFlow<List<Room>>(emptyList())
+    val rooms = _rooms.asStateFlow()
+
+    internal val _roomMessages = MutableStateFlow<List<RoomMessage>>(emptyList())
+    val roomMessages = _roomMessages.asStateFlow()
+
+    /** The room currently open, or null when the user is in single-chat mode. */
+    internal val _activeRoomId = MutableStateFlow<String?>(null)
+    val activeRoomId = _activeRoomId.asStateFlow()
+
+    val activeRoom: Room? get() = _activeRoomId.value?.let { id -> _rooms.value.find { it.id == id } }
+
+    /** Non-null exactly while a room round is running; drives the Stop button. */
+    internal val _roomRound = MutableStateFlow<RoomRoundState?>(null)
+    val roomRound = _roomRound.asStateFlow()
+
+    // The room whose transcript _roomMessages currently holds, and the room-history IO
+    // queue. Same settle-before-read discipline as messagesOwnerName/historyIoJob: a swap
+    // snapshots the outgoing transcript synchronously (before the id moves), writes it in
+    // the chained job, and only then loads the incoming one.
+    internal var roomMessagesOwnerId: String? = null
+    internal var roomHistoryLoadSeq: Long = 0
+    internal var roomHistoryIoJob: Job? = null
+
+    internal suspend fun awaitRoomHistoryIo() {
+        roomHistoryIoJob?.join()
+    }
+
     private val _favoriteModels = MutableStateFlow<List<String>>(emptyList())
     val favoriteModels = _favoriteModels.asStateFlow()
 
@@ -1267,6 +1307,11 @@ class AssistantService : Service() {
 
         _ollamaBaseUrls.value = settingsManager.getOllamaBases() ?: emptyList()
         _imageGenBases.value = settingsManager.getImageGenBases()?.takeIf { it.isNotEmpty() } ?: listOf(ServerConfig("Local A1111", "http://0.0.0.0:7860"))
+        // Rooms load AFTER the Ollama/cloud server lists, because eligibility is judged
+        // against them: a member whose backing server has since been deleted, or which is
+        // a gateway-only/image-generator/translator persona, cannot speak, so it is
+        // pruned from the member list on load (the transcript is kept — see loadRooms).
+        loadRooms()
         _totalCost.value = settingsManager.getTotalCost()
         _favoriteModels.value = settingsManager.getFavoriteModels() ?: emptyList()
         _lastPriceSyncTimestamp.value = settingsManager.getLastPriceSyncTimestamp()
@@ -1305,6 +1350,10 @@ class AssistantService : Service() {
         settingsManager.saveCloudApis(_cloudApis.value)
         settingsManager.saveCustomCloudApis(_customCloudApis.value)
         settingsManager.savePersonas(_personas.value)
+        // Rooms ride the same debounced save as everything else. Their transcripts do
+        // NOT — those go through saveRoomHistory(), because a room transcript belongs to
+        // no persona and must never be keyed off the single-chat owner bookkeeping below.
+        settingsManager.saveRooms(_rooms.value)
         // L5: save the pair that actually belongs together. `currentPersonaName` and
         // `_messages` disagree only while a persona-history swap is in flight (the name has
         // already moved to the incoming persona while the outgoing messages are still on
@@ -1635,6 +1684,10 @@ class AssistantService : Service() {
                 if (messagesOwnerName == oldName) {
                     messagesOwnerName = persona.name
                 }
+                // Room membership is name-keyed too, so a rename must re-point it —
+                // otherwise `loadRooms` would prune the old name out of every room
+                // the persona belonged to and the loss would become permanent.
+                renameRoomMemberEverywhere(oldName, persona.name)
             }
             current[index] = persona
             _personas.value = current
@@ -1718,6 +1771,10 @@ class AssistantService : Service() {
             // only rewritten by saveSettings() below — a name lookup would still find
             // (and therefore leave alone) the persona being removed.
             settingsManager.deletePersonaArtworkFiles(removedPersona)
+            // Deleting a persona must also drop it from every room it belonged to —
+            // same reasoning as the single-chat history delete above: a surviving
+            // membership reference is a name that can never resolve again.
+            removeRoomMemberEverywhere(removedName)
             saveSettings()
         }
     }

@@ -30,6 +30,10 @@ class SettingsManager(context: Context) {
     private companion object {
         const val MAX_PERSONA_MESSAGES = 200
 
+        // Same idea for room transcripts, which are separate entries entirely. A room
+        // round can emit several messages per turn, so its cap is a little higher.
+        const val MAX_ROOM_MESSAGES = 400
+
         // Persona artwork is COPIED into app-owned storage rather than persisted as
         // the raw photo-picker URI. A picked content:// URI is only readable while its
         // grant lasts, and that grant dies with the process; the user moving or
@@ -351,6 +355,59 @@ class SettingsManager(context: Context) {
         } else null
     }
 
+    // ---------------------------------------------------------------- Rooms
+    // Same shape as the persona list/history entries above: one JSON key for the room
+    // definitions, one key per room transcript, corruption-tolerant reads.
+    fun saveRooms(rooms: List<Room>) {
+        prefs.edit().putString("rooms_v1", json.encodeToString(rooms)).apply()
+    }
+
+    fun getRooms(): List<Room>? {
+        val data = prefs.getString("rooms_v1", null)
+        return if (data != null) {
+            runCatching { json.decodeFromString<List<Room>>(data) }
+                .onFailure { e ->
+                    Log.w("SettingsManager", "Corrupted/unreadable JSON in rooms_v1 — ignoring entry, returning null", e)
+                }
+                .getOrNull()
+        } else emptyList()
+    }
+
+    fun saveRoomMessages(roomId: String, messages: List<RoomMessage>) {
+        val capped = if (messages.size > MAX_ROOM_MESSAGES) {
+            messages.subList(messages.size - MAX_ROOM_MESSAGES, messages.size)
+        } else messages
+        prefs.edit().putString(roomMessagesKey(roomId), json.encodeToString(capped)).apply()
+    }
+
+    fun getRoomMessages(roomId: String): List<RoomMessage>? {
+        val data = prefs.getString(roomMessagesKey(roomId), null)
+        return if (data != null) {
+            runCatching { json.decodeFromString<List<RoomMessage>>(data) }
+                .onFailure { e ->
+                    Log.w(
+                        "SettingsManager",
+                        "Corrupted/unreadable JSON in room history for '$roomId' — ignoring entry, returning null",
+                        e
+                    )
+                }
+                .getOrNull()
+        } else null
+    }
+
+    /**
+     * Room deletion support: drop the room's transcript entry so it cannot sit on disk
+     * orphaned. Unlike persona history there are no cached audio/image files to reclaim
+     * (rooms are text-only in v1, and [RoomMessage] carries no file paths), so this is
+     * just the key removal.
+     */
+    fun deleteRoomHistory(roomId: String) {
+        prefs.edit().remove(roomMessagesKey(roomId)).apply()
+    }
+
+    private fun roomMessagesKey(roomId: String) = "room_messages_$roomId"
+
+
     // Rename support: history is persisted keyed by persona NAME, so a rename must
     // carry the old name-keyed entry over to the new one — otherwise the old entry
     // is orphaned on disk forever and the renamed persona starts empty. No-op when
@@ -541,6 +598,7 @@ class SettingsManager(context: Context) {
     fun exportBackup(): String {
         val personas = getPersonas() ?: emptyList()
         val personaMessages = personas.associate { it.name to (getPersonaMessages(it.name) ?: emptyList()) }
+        val exportedRooms = getRooms() ?: emptyList()
 
         // Persona artwork travels as base64 BYTES, not as the paths stored on the
         // Persona: those paths point into this device's filesDir and are meaningless
@@ -575,7 +633,11 @@ class SettingsManager(context: Context) {
             userLocation = getUserLocation(),
             ragServerUrl = getRagServerUrl(),
             ragUsername = getRagUsername(),
-            ragPassword = getRagPassword()
+            ragPassword = getRagPassword(),
+            // Rooms + their transcripts, keyed by room UUID. Resolved once: the
+            // transcript map must be built from the SAME room list the backup carries.
+            rooms = exportedRooms,
+            roomMessages = exportedRooms.associate { it.id to (getRoomMessages(it.id) ?: emptyList()) }
         )
         return json.encodeToString(backup)
     }
@@ -628,6 +690,15 @@ class SettingsManager(context: Context) {
             // persona isn't in the restored list — reusing deletePersonaHistory so any
             // referenced audio cache files are cleaned up too.
             val restoredNames = restoredPersonas.map { it.name }.toSet()
+            // Rooms: definitions first (pruned of members the restore dropped — the
+            // transcript survives, the vanished members don't), then their transcripts.
+            val restoredRooms = backup.rooms.map { room ->
+                room.copy(memberNames = room.memberNames.filter { it in restoredNames })
+            }
+            saveRooms(restoredRooms)
+            backup.roomMessages.forEach { (roomId, msgs) ->
+                saveRoomMessages(roomId, msgs)
+            }
             // Orphaned artwork sweep — the image-file sibling of the history cleanup
             // below. Any file a PRE-restore persona pointed at that no restored persona
             // points at is now unreachable forever: either the restore dropped that
@@ -649,6 +720,16 @@ class SettingsManager(context: Context) {
                 .map { it.removePrefix("persona_messages_") }
                 .filter { it !in restoredNames }
                 .forEach { deletePersonaHistory(it) }
+            // Same orphan sweep for room transcripts: the restore overwrites the ROOM
+            // list, so a room_messages_<id> entry for a room that existed before the
+            // restore but isn't in this backup would otherwise survive forever,
+            // unreachable. Keyed by room UUID (rooms are id-based, not name-based).
+            val restoredRoomIds = restoredRooms.map { it.id }.toSet()
+            prefs.all.keys
+                .filter { it.startsWith("room_messages_") }
+                .map { it.removePrefix("room_messages_") }
+                .filter { it !in restoredRoomIds }
+                .forEach { deleteRoomHistory(it) }
             true
         } catch (e: Exception) {
             // Try legacy import if new format fails
@@ -894,7 +975,12 @@ data class BackupData(
     // Defaulted, so backups written before artwork existed still decode: the Json
     // instance sets ignoreUnknownKeys/coerceInputValues, so an absent key (or a null
     // slot inside an entry) falls back to empty rather than failing the import.
-    val personaImages: Map<String, PersonaArtwork> = emptyMap()
+    val personaImages: Map<String, PersonaArtwork> = emptyMap(),
+    // Rooms travel with the backup, like personas do. Both fields are defaulted, so a
+    // backup written before Rooms existed still decodes (and, thanks to
+    // ignoreUnknownKeys, a NEW backup still imports into an older build).
+    val rooms: List<Room> = emptyList(),
+    val roomMessages: Map<String, List<RoomMessage>> = emptyMap()
 )
 
 // One persona's embedded artwork. Both slots are optional: a persona may have only an

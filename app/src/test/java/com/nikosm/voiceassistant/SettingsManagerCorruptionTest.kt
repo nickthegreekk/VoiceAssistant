@@ -171,6 +171,18 @@ class SettingsManagerCorruptionTest {
         assertNull(manager.getPersonaMessages("default"))
     }
 
+    @Test fun `corrupted room history returns null instead of crashing`() {
+        val (manager, prefs) = newManagerWithPlainPrefs()
+        prefs.edit().put("room_messages_r1", GARBAGE)
+        assertNull(manager.getRoomMessages("r1"))
+    }
+
+    @Test fun `corrupted rooms_v1 returns null instead of crashing`() {
+        val (manager, prefs) = newManagerWithPlainPrefs()
+        prefs.edit().put("rooms_v1", GARBAGE)
+        assertNull(manager.getRooms())
+    }
+
     @Test fun `corrupted favorite_models_v2 returns null instead of crashing`() {
         val (manager, prefs) = newManagerWithPlainPrefs()
         prefs.edit().put("favorite_models_v2", GARBAGE)
@@ -282,5 +294,76 @@ class SettingsManagerCorruptionTest {
         assertTrue(manager2.importBackup(export))
         assertEquals(listOf(ServerConfig("S1", "http://10.0.0.2:11434")), manager2.getServerBases())
         assertEquals(1.25, manager2.getTotalCost(), 0.0)
+    }
+
+    // ---- Rooms
+
+    @Test fun `rooms and their transcripts round-trip through a backup`() {
+        val (manager, _) = newManagerWithPlainPrefs()
+        // The personas must travel in the backup: restore prunes any room member that the
+        // restored persona list doesn't contain, so a room backed up without its members
+        // would legitimately come back empty. That pruning is asserted separately below.
+        manager.savePersonas(
+            listOf(
+                Persona("A", androidx.compose.ui.graphics.Color(0xFF4ADE80), "[S] m", "sys"),
+                Persona("B", androidx.compose.ui.graphics.Color(0xFF60A5FA), "[S] m", "sys")
+            )
+        )
+        val room = Room(id = "r1", name = "War Room", memberNames = listOf("A", "B"), autoReplyCap = 9)
+        manager.saveRooms(listOf(room))
+        val messages = listOf(RoomMessage(speakerName = "A", text = "hello"))
+        manager.saveRoomMessages("r1", messages)
+        val export = manager.exportBackup()
+
+        val (manager2, _) = newManagerWithPlainPrefs()
+        assertTrue(manager2.importBackup(export))
+        assertEquals(listOf(room), manager2.getRooms())
+        val restored = manager2.getRoomMessages("r1")!!
+        assertEquals(1, restored.size)
+        assertEquals("A", restored.single().speakerName)
+        assertEquals("hello", restored.single().text)
+        // The id and timestamp must survive too — a fresh id would mean a NEW message
+        // rather than the persisted one.
+        assertEquals(messages.single().id, restored.single().id)
+        assertEquals(messages.single().timestamp, restored.single().timestamp)
+    }
+
+    @Test fun `restoring prunes room members the restore dropped but keeps the transcript`() {
+        val (manager, _) = newManagerWithPlainPrefs()
+        // The backup knows "A" and "B"; only "A" survives the restore.
+        manager.savePersonas(
+            listOf(
+                Persona("A", androidx.compose.ui.graphics.Color(0xFF4ADE80), "[S] m", "sys")
+            )
+        )
+        manager.saveRooms(listOf(Room(id = "r1", name = "R", memberNames = listOf("A", "B"))))
+        val original = listOf(RoomMessage(speakerName = "B", text = "bye"))
+        manager.saveRoomMessages("r1", original)
+        val export = manager.exportBackup()
+
+        // Now simulate a restore onto a device that has no "B" at all.
+        val (manager2, _) = newManagerWithPlainPrefs()
+        val trimmed = export.replace("\"B\"", "\"ZZZ\"")
+        assertTrue(manager2.importBackup(trimmed))
+        assertEquals(listOf("A"), manager2.getRooms()!!.single().memberNames)
+        // B's words stay in the transcript: membership is corrected, history is not.
+        // Compared field-wise, NOT as whole objects — a freshly constructed RoomMessage
+        // carries a new id and timestamp and could never equal the persisted one.
+        val restored = manager2.getRoomMessages("r1")!!
+        assertEquals(1, restored.size)
+        assertEquals("ZZZ", restored.single().speakerName)
+        assertEquals("bye", restored.single().text)
+        assertEquals(original.single().timestamp, restored.single().timestamp)
+    }
+
+    @Test fun `a backup written before rooms existed still imports`() {
+        val (manager, _) = newManagerWithPlainPrefs()
+        manager.saveServerBases(listOf(ServerConfig("S1", "http://10.0.0.2:11434")))
+        val export = manager.exportBackup()
+        // Strip the room fields entirely, as an older build would have written it.
+        val legacy = export.replace(Regex(",\"rooms\":.*?\"roomMessages\":\\{.*?\\}"), "")
+        val (manager2, _) = newManagerWithPlainPrefs()
+        assertTrue("an old backup must still import", manager2.importBackup(legacy))
+        assertEquals(emptyList<Room>(), manager2.getRooms())
     }
 }

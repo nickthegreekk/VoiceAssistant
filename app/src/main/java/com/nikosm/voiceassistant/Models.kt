@@ -136,6 +136,69 @@ data class ServerConfig(
         get() = if (authType == AuthType.NONE && !username.isNullOrBlank()) AuthType.BASIC else authType
 }
 
+
+/**
+ * A multi-persona Room: a shared conversation space with its own persisted identity
+ * ([id]) and its own transcript, entirely separate from any participant's individual
+ * chat history. Participants are existing personas (see [Room.eligibleMembers]), each of
+ * which keeps its own system prompt and its own backend resolution — a Room changes
+ * WHO speaks and WHAT they can see, never WHERE a persona's request is routed.
+ *
+ * [id] is a UUID (not the display name, as for personas) so a room can be renamed freely
+ * and so a deleted-and-recreated room can never inherit the old transcript. Membership
+ * [memberNames] IS name-keyed, matching the app's name-based persona identity everywhere
+ * (history storage, rename migration, backup), and is kept in sync by
+ * `AssistantService.updatePersona`/`removePersona`.
+ */
+@Serializable
+data class Room(
+    val id: String = java.util.UUID.randomUUID().toString(),
+    val name: String,
+    /** Ordered participants. Order is speaking order in the initial round. */
+    val memberNames: List<String> = emptyList(),
+    /**
+     * Cap on TOTAL autonomous (persona-to-persona) messages in one round, summed across
+     * every participant — not rounds, and not per participant. `null` means "inherit the
+     * global default" so changing the global setting later updates existing rooms.
+     */
+    val autoReplyCap: Int? = null,
+    val createdAt: Long = System.currentTimeMillis()
+) {
+    companion object {
+        /**
+         * Rooms require a model, so a room needs at least two members to be meaningful.
+         * Enforced in the editor, not here — this only drives the empty/disabled UI.
+         */
+        const val MIN_MEMBERS = 2
+    }
+}
+
+/**
+ * One message in a Room transcript. Deliberately its own class rather than a [ChatMessage]
+ * with a speaker field: a room transcript needs explicit speaker identity, and a [ChatMessage]
+ * carries single-conversation concepts (cached TTS audio, generated images, the binary
+ * user/assistant `role` that is fed verbatim to the model) that do not apply here.
+ */
+@Serializable
+data class RoomMessage(
+    val id: String = java.util.UUID.randomUUID().toString(),
+    /** `user` for the human, or a participant's [Persona.name] for a persona turn. */
+    val speakerName: String,
+    val text: String,
+    val reasoning: String? = null,
+    val isError: Boolean = false,
+    val responseTimeMs: Long? = null,
+    val timestamp: Long = System.currentTimeMillis()
+) {
+    /** The human's own turn. */
+    val isUser: Boolean get() = speakerName == USER_SPEAKER
+
+    companion object {
+        /** Reserved [speakerName] for the human — cannot collide with a persona name. */
+        const val USER_SPEAKER = "__user__"
+    }
+}
+
 // Result of a setup-context connection test (Add/Edit Server dialogs, "Test Connection",
 // status-dot re-check). Structured so the setup UI can map the raw outcome to a specific,
 // actionable message — unlike the passive status dot, which intentionally stays coarse.
@@ -144,6 +207,120 @@ data class ServerConnectionResult(
     val httpCode: Int? = null,  // HTTP status when the server responded but rejected the request
     val detail: String? = null  // raw detail: HTTP status phrase or exception message
 )
+
+/**
+ * Can [persona] take part in a Room at all?
+ *
+ * This mirrors the real routing branches in `sendTextMessageToServer` rather than
+ * approximating them, because a persona that cannot be routed conversationally must never
+ * be offered as a room member — the turn would either corrupt the single-chat transcript or
+ * silently bypass the room. Each exclusion below is a HARD requirement, not a warning:
+ *
+ *  - [Persona.isImageGenerator]: `sendTextMessageToServer` short-circuits to
+ *    `performImageGeneration` BEFORE any conversational routing, and that function still
+ *    writes `_messages` directly. A room turn would drop the generated image into the
+ *    single-chat transcript. (Carried forward from Phase 0 as a requirement.)
+ *  - [Persona.isTranslator]: the Ollama/cloud request builders REPLACE both the system
+ *    prompt and the entire history with a single "translate this" user message, so a
+ *    translator cannot see — let alone participate in — a multi-party transcript.
+ *  - Gateway-only personas (no direct Ollama server and no cloud provider): the gateway
+ *    `/text-chat` path sends neither the system prompt nor any history, so such a persona
+ *    would reply blind, with no idea who it is talking to. Excluded in v1 by decision.
+ *
+ * Cloud personas ARE eligible: they simply never take part in autonomous continuation
+ * (see [RoomReplyPolicy.participatesInAutonomousRounds]).
+ */
+fun Persona.roomEligibility(ollamaServerNames: Set<String>, cloudProviderNames: Set<String>): RoomEligibility {
+    if (isImageGenerator) return RoomEligibility.Blocked("Image generators can't converse in a room")
+    if (isTranslator) return RoomEligibility.Blocked("Translators replace the conversation with a single translation request")
+    if (model.isBlank()) return RoomEligibility.Blocked("No model selected")
+
+    // Parse the same "[Provider] model" / "[Server] model" form the router parses.
+    // The trim() matters: the real isCloudModel() trims before testing the bracket form, so
+    // an untrimmed model routes to cloud while an untrimmed parse here would not.
+    val m = model.trim()
+    val displayServer: String? = if (m.startsWith("[") && m.contains("] ")) {
+        m.substring(1, m.indexOf("]"))
+    } else {
+        null
+    }
+
+    // Exactly `persona.isCloud && isCloudModel(model)`, decomposed against the configured
+    // provider names (named routesToCloud, not `isCloud`, to avoid shadowing the Persona
+    // property the left-hand side reads).
+    val routesToCloud = isCloud && displayServer != null && displayServer in cloudProviderNames
+    // Direct Ollama: a "[Server]" prefix naming a CONFIGURED Ollama server, exactly the
+    // `_ollamaBaseUrls.find { it.name == displayServer }` test the router performs.
+    val isDirectOllama = displayServer != null && displayServer in ollamaServerNames
+
+    return when {
+        routesToCloud -> RoomEligibility.Eligible(cloud = true)
+        isDirectOllama -> RoomEligibility.Eligible(cloud = false)
+        // A bare model name (no bracket prefix) reaches Ollama via the gateway's
+        // backend_url/failover path, which is history-blind — same exclusion.
+        else -> RoomEligibility.Blocked("Only reachable through the gateway, which can't carry room history")
+    }
+}
+
+/** Result of [roomEligibility]. */
+sealed class RoomEligibility {
+    data class Eligible(val cloud: Boolean) : RoomEligibility()
+    data class Blocked(val reason: String) : RoomEligibility()
+}
+
+/**
+ * How far a Room round may run on its own.
+ *
+ * The cap counts TOTAL autonomous messages across ALL participants (not rounds, not
+ * per-participant) — so a 3-persona room with a cap of 4 stops after 4 persona turns
+ * total, however they are distributed. [Room.autoReplyCap] overrides [globalCap] per
+ * room; the cap is a hard ceiling and the round can also be cut short at any point by
+ * the user pressing Stop (enforced in the turn loop, not here).
+ */
+object RoomReplyPolicy {
+    /**
+     * Default cap on autonomous messages per round. Deliberately tight: personas talking
+     * to each other is a novelty that degrades fast without supervision, and every
+     * autonomous message on a cloud persona costs real money.
+     */
+    const val DEFAULT_AUTO_REPLY_CAP = 4
+
+    /** The effective cap for [room]. */
+    fun capFor(room: Room): Int = room.autoReplyCap ?: DEFAULT_AUTO_REPLY_CAP
+
+    /**
+     * Q1: cloud personas take part in the INITIAL round (the user asked, everyone answers)
+     * but are EXCLUDED from autonomous continuation entirely. They therefore contribute
+     * exactly one message per user turn, and never consume autonomous budget.
+     */
+    fun participatesInAutonomousRounds(cloud: Boolean): Boolean = !cloud
+}
+
+/** Current phase of a Room round, for UI + the turn loop. */
+enum class RoomRoundPhase { IDLE, USER_TURN, INITIAL_ROUND, AUTONOMOUS, STOPPING }
+
+/** Observable round state. Null [activeRoom] means no round is in progress. */
+data class RoomRoundState(
+    val roomId: String,
+    val phase: RoomRoundPhase = RoomRoundPhase.USER_TURN,
+    /** Index into the room's member list of the persona whose turn is running. */
+    val currentMemberIndex: Int = 0,
+    /** Autonomous messages emitted so far this round (never exceeds the cap). */
+    val autonomousCount: Int = 0,
+    val cap: Int = RoomReplyPolicy.DEFAULT_AUTO_REPLY_CAP,
+    /** Set by Stop; the loop checks it between every participant turn. */
+    val stopRequested: Boolean = false
+)
+
+/** Personas eligible to join [room], in the order the caller supplied them. */
+fun eligibleRoomMembers(
+    personas: List<Persona>,
+    ollamaServerNames: Set<String>,
+    cloudProviderNames: Set<String>
+): List<Persona> = personas.filter {
+    it.roomEligibility(ollamaServerNames, cloudProviderNames) is RoomEligibility.Eligible
+}
+
 
 data class CertApprovalRequest(
     val host: String,
