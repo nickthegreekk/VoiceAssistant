@@ -603,6 +603,11 @@ fun AssistantService.stopEverything() {
         _state.value = AssistantState.IDLE
         updateNotification("Ready to help")
     }
+    // Phase 2: Stop also ends any room round — the round's loop checks this flag before
+    // starting each participant turn, and the generation bump above already invalidates the
+    // turn that is in flight. Without this, the global Stop button (the mic's STOP, which is
+    // reachable in room mode too) would leave the room's loop running to its cap.
+    markRoomRoundStopped()
     _voiceDuration.value = 0
     abandonAssistantFocus()
     audioManager.mode = AudioManager.MODE_NORMAL

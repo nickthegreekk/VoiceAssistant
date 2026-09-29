@@ -163,7 +163,10 @@ private suspend fun AssistantService.buildModelPrompt(text: String, attachments:
 // IOException("Cancelled"), while the cloud and direct-Ollama calls let OkHttp's own
 // IOException("Canceled") propagate directly. Recognising the shapes lets us skip the
 // spurious "Error: Cancelled" bubble and just return to idle.
-private fun isUserCancellation(e: Throwable): Boolean =
+// internal (not private): the Phase 2 room turn loop classifies the same cancellations when
+// its own direct-Ollama turn unwinds, and must reach the identical conclusion about whether
+// a failed turn deserves an error bubble.
+internal fun isUserCancellation(e: Throwable): Boolean =
     e is java.io.IOException && (e.message == "Cancelled" || e.message == "Canceled")
 
 // A3: a failed server becomes eligible for retry after a cooldown (e.g. 60 s) instead
@@ -1216,19 +1219,30 @@ internal fun AssistantService.performCloudChat(text: String, persona: Persona, u
                 android.util.Log.d("AssistantService", "Cloud response discarded — superseded by a newer request (gen $generation)")
                 return@launch
             }
-            if (!isChatContextCurrent(generation, persona.name)) {
+            // Phase 2: the active-persona half of the context check is a single-chat
+            // question — a room speaker is never the active persona, so asking it would
+            // discard every room reply. The round's generation (checked just above) is
+            // the room turn's ownership test.
+            if (turnContext.isSingleChat && !isChatContextCurrent(generation, persona.name)) {
                 android.util.Log.d("AssistantService", "Cloud response discarded — active persona changed (gen $generation)")
                 return@launch
             }
             // Phase 0: cloud turns are non-streaming, so the apply block only ever
             // appends — but it writes to the same sink the rest of the turn uses
             // (resolved at launch scope above).
-            if (useDeviceVoice) {
+            // Phase 2 (allowPlayback): a room round is text-only, so allowPlayback=false
+            // suppresses BOTH playback branches below — and, with the gateway branch, the
+            // synthesis request itself — and the reply lands as a plain text bubble
+            // attributed to the speaker. No call site passes useDeviceVoice together with
+            // allowPlayback=false today; the flag is checked on both branches anyway so no
+            // future caller can leak a playResponse call out of a room round. The default
+            // (true) leaves every pre-existing call site behaviorally identical.
+            if (useDeviceVoice && allowPlayback) {
                 sink.append(ChatMessage("assistant", responseData.first, responseData.second, responseTimeMs = responseTimeMs))
                 saveSettings()
                 playbackRequested = true
                 playResponse(persona, deviceText = responseData.third)
-            } else if (persona.voiceMode == VoiceMode.GATEWAY) {
+            } else if (persona.voiceMode == VoiceMode.GATEWAY && allowPlayback) {
                 // M1: synthesis authenticates with the persona's gateway entry, so
                 // resolve it first and make a resolution failure VISIBLE. Previously an
                 // unmatched Backend URL fell back to a credential-less config, the
@@ -1275,7 +1289,10 @@ internal fun AssistantService.performCloudChat(text: String, persona: Persona, u
                 // A5: the user deliberately stopped this request — no error bubble.
                 android.util.Log.d("AssistantService", "Cloud chat request cancelled by user — no error bubble")
             } else {
-                if (isChatContextCurrent(generation, persona.name)) {
+                // Phase 2: for a room turn the context question is the round's generation
+                // (already checked above), not the active persona — the failure bubble is
+                // attributed by the room sink, which is bound to the speaker.
+                if (!turnContext.isSingleChat || isChatContextCurrent(generation, persona.name)) {
                     sink.append(ChatMessage("assistant", "Error: ${e.message}", isError = true))
                 } else {
                     android.util.Log.d("AssistantService", "Persona changed during cloud request — discarding failure message: ${e.message}")
@@ -1315,6 +1332,19 @@ internal data class TurnContext(
     // its own sink so the identical pipeline writes into the room transcript.
     val sink: TurnSink? = null
 ) {
+    /**
+     * Phase 2: true when this turn writes into the single-chat transcript, i.e. exactly
+     * when "the ACTIVE persona is still this turn's persona" (`isChatContextCurrent`) is
+     * the right question to ask before applying a response.
+     *
+     * A room turn supplies its own [sink] and its speaker is by definition NOT the active
+     * persona, so that guard is false for it by construction and would discard every room
+     * reply (and, in the streaming path, abort the stream mid-flight). Ownership for a
+     * room turn is decided by its round generation alone (`isChatRequestCurrent`), which
+     * is bumped by Stop and by every newer round.
+     */
+    val isSingleChat: Boolean get() = sink == null
+
     companion object {
         val Default = TurnContext()
     }
@@ -1547,7 +1577,10 @@ internal suspend fun AssistantService.performDirectOllamaChat(baseUrl: String, m
                     // Per-chunk persona guard: persona switched mid-stream —
                     // cancel; the partial is written back into the OLD persona's
                     // persisted history so no empty stub is stranded there.
-                    if (!isChatContextCurrent(generation, persona.name)) {
+                    // Phase 2: single-chat only — a room turn's speaker is never the
+                    // active persona, so this question is meaningless for it (the round's
+                    // generation is what decides whether the turn may still write).
+                    if (turnContext.isSingleChat && !isChatContextCurrent(generation, persona.name)) {
                         call.cancel()
                         val idx = streamedPlaceholderIndexIfRecorded(generation)
                         if (idx != null) {

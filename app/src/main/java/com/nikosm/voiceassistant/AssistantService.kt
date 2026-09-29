@@ -521,6 +521,17 @@ class AssistantService : Service() {
     internal val _roomRound = MutableStateFlow<RoomRoundState?>(null)
     val roomRound = _roomRound.asStateFlow()
 
+    // Phase 2 (round ownership): the generation that currently OWNS `_roomRound`, and the
+    // job running that round's loop. `_roomRound` is service-global while rooms are
+    // switchable, so a round that was superseded mid-flight is still unwinding on its own
+    // job when its replacement has already published its state — the same hazard H3 solved
+    // for streamed placeholders, with the same answer: record the owner, and let only the
+    // recorded owner mutate/clear the shared state (see settleRoomRound). A new round
+    // records itself BEFORE the old one can observe the change, so the old round's late
+    // settle is refused rather than allowed to blank its replacement's round state.
+    internal var roomRoundGeneration: Long? = null
+    internal var roomRoundJob: Job? = null
+
     // The room whose transcript _roomMessages currently holds, and the room-history IO
     // queue. Same settle-before-read discipline as messagesOwnerName/historyIoJob: a swap
     // snapshots the outgoing transcript synchronously (before the id moves), writes it in
