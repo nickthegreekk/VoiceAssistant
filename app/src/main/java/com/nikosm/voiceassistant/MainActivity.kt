@@ -170,19 +170,18 @@ private val EditingPersonaSaver = Saver<Pair<Int, Persona>?, String>(
 }
 
 /**
- * Personas section: the list-then-editor pattern, now as the body of a
- * [SettingsExpandableSection] rather than a full-screen destination.
+ * Personas category screen: the list-then-editor pattern, one level below the top-level
+ * Settings list.
  *
- * The "+" add control is passed to the section header so it stays reachable while
- * collapsed, and the list keeps its existing add/edit/reorder/delete behaviour.
+ * Body of [SettingsCategoryScreen]. Tapping a persona opens its editor in place, exactly
+ * as before; the "add" control is now a trailing row in the list rather than a header
+ * affordance, because there is no collapsible header row any more.
  */
 @Composable
 fun PersonaSettings(
     service: AssistantService,
     personas: List<Persona>,
-    currentThemeColor: Color,
-    expanded: Boolean,
-    onToggle: () -> Unit
+    currentThemeColor: Color
 ) {
     var editingPersona by rememberSaveable(stateSaver = EditingPersonaSaver) { mutableStateOf<Pair<Int, Persona>?>(null) }
 
@@ -200,72 +199,87 @@ fun PersonaSettings(
     }
 
     // PersonaEditor is its own LazyColumn root, so it needs a bounded height to scroll
-    // inside. That bound belongs to the editor, not to the section surface: the section
-    // no longer caps or scrolls anything, and this keeps the editor working unchanged.
-    SettingsExpandableSection(
-        title = "Personas",
-        icon = Icons.Default.Person,
-        expanded = expanded,
-        onToggle = onToggle,
-        accentColor = currentThemeColor,
-        headerAction = {
-            IconButton(onClick = { editingPersona = -1 to DEFAULT_PERSONAS[0].copy(name = "New Persona", themeColor = PERSONA_PALETTE.random()) }) {
-                Icon(Icons.Default.Add, null, tint = currentThemeColor)
-            }
-        }
-    ) {
-        if (editingPersona == null) {
-            // Plain Column, not LazyColumn: the section surface already scrolls, and a
-            // nested lazy list inside a vertical scroll parent fights it for the drag.
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                personas.forEachIndexed { index, persona ->
-                    Surface(
-                        modifier = Modifier.fillMaxWidth().clickable { editingPersona = index to persona },
-                        shape = RoundedCornerShape(16.dp),
-                        color = Color.Black.copy(alpha = 0.2f),
-                        border = BorderStroke(1.dp, persona.themeColor.copy(alpha = 0.3f))
-                    ) {
-                        Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-                            ProviderLogo(icon = persona.providerIcon, isCloud = persona.isCloud, size = 52.dp, imagePath = persona.iconImageUri)
-                            // icon size is provider logo changed from 40 to 52 dp
-                            Spacer(Modifier.width(16.dp))
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(persona.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                                Text(persona.model, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f), maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            }
-                            // Reorder controls — same up/down pattern as the server and
-                            // cloud-API lists. Order is user-visible: the persona selector
-                            // and the deletion fallback ("first remaining persona") follow it.
-                            IconButton(onClick = { service.movePersonaUp(index) }, enabled = index > 0, modifier = Modifier.size(28.dp)) {
-                                Icon(Icons.Default.KeyboardArrowUp, null, modifier = Modifier.size(20.dp))
-                            }
-                            IconButton(onClick = { service.movePersonaDown(index) }, enabled = index < personas.size - 1, modifier = Modifier.size(28.dp)) {
-                                Icon(Icons.Default.KeyboardArrowDown, null, modifier = Modifier.size(20.dp))
-                            }
-                            Icon(Icons.Default.ChevronRight, null, tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f))
+    // inside. That bound belongs to the editor itself (PersonaEditorMaxHeight), not to any
+    // wrapper: a category screen caps nothing and scrolls nothing itself.
+    if (editingPersona == null) {
+        // Plain Column, not LazyColumn: the category page already scrolls, and a nested
+        // lazy list inside a vertical scroll parent fights it for the drag.
+        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            personas.forEachIndexed { index, persona ->
+                Surface(
+                    modifier = Modifier.fillMaxWidth().clickable { editingPersona = index to persona },
+                    shape = RoundedCornerShape(16.dp),
+                    color = Color.Black.copy(alpha = 0.2f),
+                    border = BorderStroke(1.dp, persona.themeColor.copy(alpha = 0.3f))
+                ) {
+                    Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                        ProviderLogo(icon = persona.providerIcon, isCloud = persona.isCloud, size = 52.dp, imagePath = persona.iconImageUri)
+                        // icon size is provider logo changed from 40 to 52 dp
+                        Spacer(Modifier.width(16.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(persona.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                            Text(persona.model, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f), maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
+                        // Reorder controls — same up/down pattern as the server and
+                        // cloud-API lists. Order is user-visible: the persona selector
+                        // and the deletion fallback ("first remaining persona") follow it.
+                        IconButton(onClick = { service.movePersonaUp(index) }, enabled = index > 0, modifier = Modifier.size(28.dp)) {
+                            Icon(Icons.Default.KeyboardArrowUp, null, modifier = Modifier.size(20.dp))
+                        }
+                        IconButton(onClick = { service.movePersonaDown(index) }, enabled = index < personas.size - 1, modifier = Modifier.size(28.dp)) {
+                            Icon(Icons.Default.KeyboardArrowDown, null, modifier = Modifier.size(20.dp))
+                        }
+                        Icon(Icons.Default.ChevronRight, null, tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f))
                     }
                 }
             }
-        } else {
-            val (index, persona) = editingPersona!!
-            PersonaEditor(
-                persona = persona,
-                onSave = { updated ->
-                    if (index == -1) {
-                        service.addPersona(updated)
-                        // Switch from "add" to "edit" mode for this persona
-                        val newIdx = service.personas.value.indexOf(updated)
-                        if (newIdx != -1) editingPersona = newIdx to updated
-                    } else {
-                        service.updatePersona(index, updated)
-                    }
-                },
-                onDelete = if (index != -1) { { service.removePersona(index); editingPersona = null } } else null,
-                onCancel = { editingPersona = null },
-                service = service
-            )
+
+            // "New persona" used to be an IconButton in the collapsible section header.
+            // A category screen has no header row, so it is a trailing list row instead —
+            // same seeded draft, always visible below the existing personas.
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable {
+                        editingPersona = -1 to DEFAULT_PERSONAS[0].copy(
+                            name = "New Persona",
+                            themeColor = PERSONA_PALETTE.random()
+                        )
+                    },
+                shape = RoundedCornerShape(16.dp),
+                color = Color.Black.copy(alpha = 0.2f),
+                border = BorderStroke(1.dp, currentThemeColor.copy(alpha = 0.3f))
+            ) {
+                Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.Add, null, tint = currentThemeColor, modifier = Modifier.size(32.dp))
+                    Spacer(Modifier.width(16.dp))
+                    Text(
+                        "New Persona",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = currentThemeColor
+                    )
+                }
+            }
         }
+    } else {
+        val (index, persona) = editingPersona!!
+        PersonaEditor(
+            persona = persona,
+            onSave = { updated ->
+                if (index == -1) {
+                    service.addPersona(updated)
+                    // Switch from "add" to "edit" mode for this persona
+                    val newIdx = service.personas.value.indexOf(updated)
+                    if (newIdx != -1) editingPersona = newIdx to updated
+                } else {
+                    service.updatePersona(index, updated)
+                }
+            },
+            onDelete = if (index != -1) { { service.removePersona(index); editingPersona = null } } else null,
+            onCancel = { editingPersona = null },
+            service = service
+        )
     }
 }
 

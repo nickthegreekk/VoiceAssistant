@@ -290,9 +290,11 @@ fun RoomPickerRows(
 // ---------------------------------------------------------------- Settings section
 
 /**
- * Rooms section: the list-then-editor pattern of PersonaSettings (MainActivity.kt),
- * now embedded in an expandable [SettingsExpandableSection] instead of being its own
- * full-screen destination.
+ * Rooms category screen: the list-then-editor pattern of PersonaSettings (MainActivity.kt),
+ * one level below the top-level Settings list.
+ *
+ * Body of [SettingsCategoryScreen]. The "new room" control is a trailing row in the list
+ * rather than a header affordance, since there is no collapsible header row any more.
  *
  * Rooms are edited in place (every field commits to the service as it changes, on the
  * service's existing debounced save), so there is no "save" button and no draft state
@@ -303,84 +305,91 @@ fun RoomSettings(
     service: AssistantService,
     rooms: List<Room>,
     personas: List<Persona>,
-    currentThemeColor: Color,
-    expanded: Boolean,
-    onToggle: () -> Unit
+    currentThemeColor: Color
 ) {
     var editingRoomId by rememberSaveable { mutableStateOf<String?>(null) }
     val editingRoom = rooms.find { it.id == editingRoomId }
 
-    // RoomEditor is its own verticalScroll root; like PersonaEditor it carries its own
-    // height bound (RoomEditorMaxHeight) so it still scrolls inside itself now that the
-    // section surface no longer caps or scrolls its content.
-    SettingsExpandableSection(
-        title = "Rooms",
-        icon = Icons.Default.Forum,
-        expanded = expanded,
-        onToggle = onToggle,
-        accentColor = currentThemeColor,
-        headerAction = {
-            IconButton(onClick = {
-                // Seed a new room with the first two ELIGIBLE personas: a room needs
-                // at least two members to do anything (Room.MIN_MEMBERS), and the
-                // ones the user most likely wants are the ones that can speak.
-                // Fully editable afterwards, including removing both.
-                val seed = service.roomEligiblePersonas()
-                    .filter { it.second is RoomEligibility.Eligible }
-                    .map { it.first.name }
-                    .take(Room.MIN_MEMBERS)
-                val room = Room(name = "New Room", memberNames = seed)
-                service.addRoom(room)
-                editingRoomId = room.id
-            }) {
-                Icon(Icons.Default.Add, null, tint = currentThemeColor)
-            }
-        }
-    ) {
-        if (editingRoom == null) {
-            // Back from a deleted room (deleted in the editor, or the persona-deletion
-            // cascade removed it): don't hold a stale id.
-            if (editingRoomId != null) editingRoomId = null
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                if (rooms.isEmpty()) {
-                    Text(
-                        text = "Rooms let two or more personas talk to each other and to you. " +
-                            "Pick members from your existing personas; each one keeps its own " +
-                            "model and settings.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-                    )
-                }
+    // Seeds a new room with the first two ELIGIBLE personas: a room needs at least two
+    // members to do anything (Room.MIN_MEMBERS), and the ones the user most likely wants
+    // are the ones that can speak. Fully editable afterwards, including removing both.
+    // Went from an IconButton in the old section header to a full-width list row.
+    fun createRoom() {
+        val seed = service.roomEligiblePersonas()
+            .filter { it.second is RoomEligibility.Eligible }
+            .map { it.first.name }
+            .take(Room.MIN_MEMBERS)
+        val room = Room(name = "New Room", memberNames = seed)
+        service.addRoom(room)
+        editingRoomId = room.id
+    }
 
-                // Plain Column, not LazyColumn: the section surface already scrolls.
-                rooms.forEach { room ->
-                    Surface(
-                        modifier = Modifier.fillMaxWidth().clickable { editingRoomId = room.id },
-                        shape = RoundedCornerShape(16.dp),
-                        color = Color.Black.copy(alpha = 0.2f),
-                        border = BorderStroke(1.dp, currentThemeColor.copy(alpha = 0.3f))
-                    ) {
-                        Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Default.Forum, null, tint = currentThemeColor, modifier = Modifier.size(32.dp))
-                            Spacer(Modifier.width(16.dp))
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(room.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                Text(
-                                    text = "${roomMemberSummary(room)} · ${roomCapSummary(room)}",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                            }
-                            Icon(Icons.Default.ChevronRight, null, tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f))
+    // RoomEditor is its own verticalScroll root; like PersonaEditor it carries its own
+    // height bound (RoomEditorMaxHeight) so it still scrolls inside itself.
+    if (editingRoom == null) {
+        // Back from a deleted room (deleted in the editor, or the persona-deletion
+        // cascade removed it): don't hold a stale id.
+        if (editingRoomId != null) editingRoomId = null
+        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            if (rooms.isEmpty()) {
+                Text(
+                    text = "Rooms let two or more personas talk to each other and to you. " +
+                        "Pick members from your existing personas; each one keeps its own " +
+                        "model and settings.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                )
+            }
+
+            // Plain Column, not LazyColumn: the section surface already scrolls.
+            rooms.forEach { room ->
+                Surface(
+                    modifier = Modifier.fillMaxWidth().clickable { editingRoomId = room.id },
+                    shape = RoundedCornerShape(16.dp),
+                    color = Color.Black.copy(alpha = 0.2f),
+                    border = BorderStroke(1.dp, currentThemeColor.copy(alpha = 0.3f))
+                ) {
+                    Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.Forum, null, tint = currentThemeColor, modifier = Modifier.size(32.dp))
+                        Spacer(Modifier.width(16.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(room.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(
+                                text = "${roomMemberSummary(room)} · ${roomCapSummary(room)}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
                         }
+                        Icon(Icons.Default.ChevronRight, null, tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f))
                     }
                 }
             }
-        } else {
-            RoomEditor(room = editingRoom, personas = personas, onClose = { editingRoomId = null }, service = service)
+
+            // "New room" used to be an IconButton in the collapsible section header. There
+            // is no header row on a category screen any more, so it is a trailing list row
+            // instead — same destination, always visible below the existing rooms.
+            Surface(
+                modifier = Modifier.fillMaxWidth().clickable { createRoom() },
+                shape = RoundedCornerShape(16.dp),
+                color = Color.Black.copy(alpha = 0.2f),
+                border = BorderStroke(1.dp, currentThemeColor.copy(alpha = 0.3f))
+            ) {
+                Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.Add, null, tint = currentThemeColor, modifier = Modifier.size(32.dp))
+                    Spacer(Modifier.width(16.dp))
+                    Text(
+                        "New Room",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = currentThemeColor
+                    )
+                }
+            }
         }
+    } else {
+        RoomEditor(room = editingRoom, personas = personas, onClose = { editingRoomId = null }, service = service)
     }
 }
 
