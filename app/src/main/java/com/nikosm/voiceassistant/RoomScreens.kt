@@ -286,60 +286,74 @@ fun RoomPickerRows(
 }
 
 
-// ---------------------------------------------------------------- Settings tab
+// ---------------------------------------------------------------- Settings section
 
 /**
- * Rooms tab: the list-then-editor pattern of PersonaSettings (MainActivity.kt).
+ * Rooms section: the list-then-editor pattern of PersonaSettings (MainActivity.kt),
+ * now embedded in an expandable [SettingsExpandableSection] instead of being its own
+ * full-screen destination.
  *
  * Rooms are edited in place (every field commits to the service as it changes, on the
  * service's existing debounced save), so there is no "save" button and no draft state
  * to keep in sync with the list.
  */
 @Composable
-fun RoomSettings(service: AssistantService, rooms: List<Room>, personas: List<Persona>, currentThemeColor: Color) {
+fun RoomSettings(
+    service: AssistantService,
+    rooms: List<Room>,
+    personas: List<Persona>,
+    currentThemeColor: Color,
+    expanded: Boolean,
+    onToggle: () -> Unit
+) {
     var editingRoomId by rememberSaveable { mutableStateOf<String?>(null) }
     val editingRoom = rooms.find { it.id == editingRoomId }
 
-    if (editingRoom == null) {
-        // Back from a deleted room (deleted in the editor, or the persona-deletion
-        // cascade removed it): don't hold a stale id.
-        if (editingRoomId != null) editingRoomId = null
-        Column {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                SettingsSectionHeader(title = "Rooms", icon = Icons.Default.Forum)
-                IconButton(onClick = {
-                    // Seed a new room with the first two ELIGIBLE personas: a room needs
-                    // at least two members to do anything (Room.MIN_MEMBERS), and the
-                    // ones the user most likely wants are the ones that can speak.
-                    // Fully editable afterwards, including removing both.
-                    val seed = service.roomEligiblePersonas()
-                        .filter { it.second is RoomEligibility.Eligible }
-                        .map { it.first.name }
-                        .take(Room.MIN_MEMBERS)
-                    val room = Room(name = "New Room", memberNames = seed)
-                    service.addRoom(room)
-                    editingRoomId = room.id
-                }) {
-                    Icon(Icons.Default.Add, null, tint = MaterialTheme.colorScheme.primary)
+    // RoomEditor is its own verticalScroll root, so the section leaves scrolling to it
+    // under the same height bound every other section uses.
+    val editorOpen = editingRoom != null
+    SettingsExpandableSection(
+        title = "Rooms",
+        icon = Icons.Default.Forum,
+        expanded = expanded,
+        onToggle = onToggle,
+        accentColor = currentThemeColor,
+        scrollableContent = !editorOpen,
+        headerAction = {
+            IconButton(onClick = {
+                // Seed a new room with the first two ELIGIBLE personas: a room needs
+                // at least two members to do anything (Room.MIN_MEMBERS), and the
+                // ones the user most likely wants are the ones that can speak.
+                // Fully editable afterwards, including removing both.
+                val seed = service.roomEligiblePersonas()
+                    .filter { it.second is RoomEligibility.Eligible }
+                    .map { it.first.name }
+                    .take(Room.MIN_MEMBERS)
+                val room = Room(name = "New Room", memberNames = seed)
+                service.addRoom(room)
+                editingRoomId = room.id
+            }) {
+                Icon(Icons.Default.Add, null, tint = currentThemeColor)
+            }
+        }
+    ) {
+        if (editingRoom == null) {
+            // Back from a deleted room (deleted in the editor, or the persona-deletion
+            // cascade removed it): don't hold a stale id.
+            if (editingRoomId != null) editingRoomId = null
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                if (rooms.isEmpty()) {
+                    Text(
+                        text = "Rooms let two or more personas talk to each other and to you. " +
+                            "Pick members from your existing personas; each one keeps its own " +
+                            "model and settings.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                    )
                 }
-            }
 
-            if (rooms.isEmpty()) {
-                Text(
-                    text = "Rooms let two or more personas talk to each other and to you. " +
-                        "Pick members from your existing personas; each one keeps its own " +
-                        "model and settings.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-                )
-            }
-
-            LazyColumn(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                itemsIndexed(rooms) { _, room ->
+                // Plain Column, not LazyColumn: the section surface already scrolls.
+                rooms.forEach { room ->
                     Surface(
                         modifier = Modifier.fillMaxWidth().clickable { editingRoomId = room.id },
                         shape = RoundedCornerShape(16.dp),
@@ -364,9 +378,9 @@ fun RoomSettings(service: AssistantService, rooms: List<Room>, personas: List<Pe
                     }
                 }
             }
+        } else {
+            RoomEditor(room = editingRoom, personas = personas, onClose = { editingRoomId = null }, service = service)
         }
-    } else {
-        RoomEditor(room = editingRoom, personas = personas, onClose = { editingRoomId = null }, service = service)
     }
 }
 

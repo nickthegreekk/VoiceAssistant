@@ -169,8 +169,21 @@ private val EditingPersonaSaver = Saver<Pair<Int, Persona>?, String>(
     }
 }
 
+/**
+ * Personas section: the list-then-editor pattern, now as the body of a
+ * [SettingsExpandableSection] rather than a full-screen destination.
+ *
+ * The "+" add control is passed to the section header so it stays reachable while
+ * collapsed, and the list keeps its existing add/edit/reorder/delete behaviour.
+ */
 @Composable
-fun PersonaSettings(service: AssistantService, personas: List<Persona>, currentThemeColor: Color) {
+fun PersonaSettings(
+    service: AssistantService,
+    personas: List<Persona>,
+    currentThemeColor: Color,
+    expanded: Boolean,
+    onToggle: () -> Unit
+) {
     var editingPersona by rememberSaveable(stateSaver = EditingPersonaSaver) { mutableStateOf<Pair<Int, Persona>?>(null) }
 
     // One-shot staleness guard: when the Activity is recreated while the editor is open,
@@ -186,21 +199,27 @@ fun PersonaSettings(service: AssistantService, personas: List<Persona>, currentT
         }
     }
 
-    if (editingPersona == null) {
-        Column {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                SettingsSectionHeader(title = "Personas & Voice", icon = Icons.Default.Person)
-                IconButton(onClick = { editingPersona = -1 to DEFAULT_PERSONAS[0].copy(name = "New Persona", themeColor = PERSONA_PALETTE.random()) }) {
-                    Icon(Icons.Default.Add, null, tint = MaterialTheme.colorScheme.primary)
-                }
+    // The editor is a self-scrolling LazyColumn, so the section hands it its own scroll
+    // (no wrapper) under the same height bound every other section uses.
+    val editorOpen = editingPersona != null
+    SettingsExpandableSection(
+        title = "Personas",
+        icon = Icons.Default.Person,
+        expanded = expanded,
+        onToggle = onToggle,
+        accentColor = currentThemeColor,
+        scrollableContent = !editorOpen,
+        headerAction = {
+            IconButton(onClick = { editingPersona = -1 to DEFAULT_PERSONAS[0].copy(name = "New Persona", themeColor = PERSONA_PALETTE.random()) }) {
+                Icon(Icons.Default.Add, null, tint = currentThemeColor)
             }
-            
-            LazyColumn(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                itemsIndexed(personas) { index, persona ->
+        }
+    ) {
+        if (editingPersona == null) {
+            // Plain Column, not LazyColumn: the section surface already scrolls, and a
+            // nested lazy list inside a vertical scroll parent fights it for the drag.
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                personas.forEachIndexed { index, persona ->
                     Surface(
                         modifier = Modifier.fillMaxWidth().clickable { editingPersona = index to persona },
                         shape = RoundedCornerShape(16.dp),
@@ -229,25 +248,25 @@ fun PersonaSettings(service: AssistantService, personas: List<Persona>, currentT
                     }
                 }
             }
+        } else {
+            val (index, persona) = editingPersona!!
+            PersonaEditor(
+                persona = persona,
+                onSave = { updated ->
+                    if (index == -1) {
+                        service.addPersona(updated)
+                        // Switch from "add" to "edit" mode for this persona
+                        val newIdx = service.personas.value.indexOf(updated)
+                        if (newIdx != -1) editingPersona = newIdx to updated
+                    } else {
+                        service.updatePersona(index, updated)
+                    }
+                },
+                onDelete = if (index != -1) { { service.removePersona(index); editingPersona = null } } else null,
+                onCancel = { editingPersona = null },
+                service = service
+            )
         }
-    } else {
-        val (index, persona) = editingPersona!!
-        PersonaEditor(
-            persona = persona,
-            onSave = { updated ->
-                if (index == -1) {
-                    service.addPersona(updated)
-                    // Switch from "add" to "edit" mode for this persona
-                    val newIdx = service.personas.value.indexOf(updated)
-                    if (newIdx != -1) editingPersona = newIdx to updated
-                } else {
-                    service.updatePersona(index, updated)
-                }
-            },
-            onDelete = if (index != -1) { { service.removePersona(index); editingPersona = null } } else null,
-            onCancel = { editingPersona = null },
-            service = service
-        )
     }
 }
 

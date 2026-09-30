@@ -16,8 +16,13 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.*
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.*
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.*
@@ -52,6 +57,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -74,7 +80,6 @@ import androidx.core.content.ContextCompat
 import com.nikosm.voiceassistant.ui.theme.VoiceAssistantTheme
 import com.nikosm.voiceassistant.ui.theme.isDynamicColorSupported
 import kotlinx.coroutines.*
-import androidx.compose.material3.TabRowDefaults.tabIndicatorOffset
 import androidx.compose.foundation.gestures.scrollBy
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -132,12 +137,139 @@ private val CloudApiSettingSaver = Saver<CloudApiSetting?, String>(
     restore = { if (it.isEmpty()) null else runCatching { Json.decodeFromString(CloudApiSetting.serializer(), it) }.getOrNull() }
 )
 
+/**
+ * Max height of an expanded section's content before it starts scrolling internally.
+ *
+ * REQUIRED, not cosmetic: Personas/Cloud provider lists, the three server lists and the
+ * Backup & Recovery form are all unbounded, and stacking five of them in one screen
+ * would push the lower sections off-screen entirely.
+ */
+internal val ExpandedSectionMaxHeight = 160.dp
+
+/**
+ * Editors (persona editor, room editor) use the same bound as every other section.
+ *
+ * They bring their own scroller (LazyColumn / verticalScroll root), so the section
+ * passes `scrollableContent = false` rather than wrapping them — but the height bound
+ * is the same one, so every expanded section on screen behaves identically: content
+ * larger than the bound scrolls inside it, and a stack of open sections still fits.
+ */
+
+/**
+ * One expandable Settings section: a tappable header row (leading icon, name, chevron)
+ * that toggles this section only, plus a content surface shown when it is expanded.
+ *
+ * Sections are independent — several can be open at once, which is the whole point of
+ * the layout: the previous TabRow showed exactly one at a time and its five labels
+ * were already truncating.
+ *
+ * @param maxContentHeight upper bound on the content surface's height.
+ * @param scrollableContent when true the content scrolls inside that bound. Pass false
+ *   for content that brings its own scroller (PersonaEditor/RoomEditor are LazyColumn /
+ *   verticalScroll roots) so the two never compete for the same drag.
+ * @param headerAction optional trailing control (e.g. the Personas "+" add button). It
+ *   sits outside the tappable area so tapping it adds without toggling the section.
+ */
+@Composable
+fun SettingsExpandableSection(
+    title: String,
+    icon: ImageVector,
+    expanded: Boolean,
+    onToggle: () -> Unit,
+    accentColor: Color = MaterialTheme.colorScheme.primary,
+    maxContentHeight: Dp = ExpandedSectionMaxHeight,
+    scrollableContent: Boolean = true,
+    headerAction: (@Composable () -> Unit)? = null,
+    content: @Composable () -> Unit
+) {
+    val chevronRotation by animateFloatAsState(
+        targetValue = if (expanded) 180f else 0f,
+        animationSpec = tween(durationMillis = 200),
+        label = "settingsSectionChevron"
+    )
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Row(
+                modifier = Modifier
+                    .weight(1f)
+                    .clickable(onClick = onToggle)
+                    .padding(vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    tint = accentColor,
+                    modifier = Modifier.size(22.dp)
+                )
+                Spacer(Modifier.width(12.dp))
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.weight(1f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Icon(
+                    imageVector = Icons.Default.ExpandMore,
+                    contentDescription = if (expanded) "Collapse $title" else "Expand $title",
+                    tint = accentColor.copy(alpha = 0.7f),
+                    modifier = Modifier
+                        .size(22.dp)
+                        .rotate(chevronRotation)
+                )
+            }
+            headerAction?.invoke()
+        }
+        AnimatedVisibility(
+            visible = expanded,
+            enter = expandVertically(expandFrom = Alignment.Top) + fadeIn(),
+            exit = shrinkVertically(shrinkTowards = Alignment.Top) + fadeOut()
+        ) {
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
+                color = Color.Black.copy(alpha = 0.2f),
+                border = BorderStroke(1.dp, accentColor.copy(alpha = 0.25f))
+            ) {
+                val bounded = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = maxContentHeight)
+                Box(
+                    modifier = if (scrollableContent) {
+                        bounded.verticalScroll(rememberScrollState())
+                    } else {
+                        bounded
+                    }
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        content()
+                    }
+                }
+            }
+        }
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsDialog(service: AssistantService?, onDismiss: () -> Unit, personaColor: Color) {
     val context = LocalContext.current
-    var selectedTab by rememberSaveable { mutableIntStateOf(0) }
-    val tabs = listOf("General", "Servers", "Cloud", "Personas", "Rooms")
+    // Ephemeral by design: a plain `remember` (not `rememberSaveable`, and nothing
+    // written to SettingsManager) so every section is collapsed each time Settings
+    // opens and no expand state is persisted across app restarts.
+    var expandedSections by remember { mutableStateOf(emptySet<String>()) }
+    fun toggleSection(id: String) {
+        expandedSections = if (expandedSections.contains(id)) {
+            expandedSections - id
+        } else {
+            expandedSections + id
+        }
+    }
 
     var totalCost by remember { mutableDoubleStateOf(0.0) }
     var serverBases by remember { mutableStateOf<List<ServerConfig>>(emptyList()) }
@@ -161,6 +293,7 @@ fun SettingsDialog(service: AssistantService?, onDismiss: () -> Unit, personaCol
 
     if (service == null) return
 
+    val svc = service
     AlertDialog(
         onDismissRequest = onDismiss,
         // Fullscreen settings: fill the whole screen (the previous 90%-height
@@ -177,33 +310,79 @@ fun SettingsDialog(service: AssistantService?, onDismiss: () -> Unit, personaCol
             tonalElevation = 6.dp
         ) {
             Column(modifier = Modifier.fillMaxSize()) {
-                TabRow(
-                    selectedTabIndex = selectedTab,
-                    containerColor = Color.Transparent,
-                    contentColor = personaColor,
-                    indicator = { tabPositions ->
-                        TabRowDefaults.SecondaryIndicator(
-                            Modifier.tabIndicatorOffset(tabPositions[selectedTab]),
-                            color = personaColor
-                        )
-                    }
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 20.dp, end = 20.dp, top = 20.dp, bottom = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    tabs.forEachIndexed { index, title ->
-                        Tab(
-                            selected = selectedTab == index,
-                            onClick = { selectedTab = index },
-                            text = { Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+                    Text(
+                        text = "Settings",
+                        style = MaterialTheme.typography.headlineSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = personaColor
+                    )
+                }
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f))
+
+                // One scrollable column of independently-expandable sections. Each section is
+                // its own item, so expanding a long one (Personas, Servers) can't push the
+                // headers below it off-screen — the whole list scrolls instead.
+                LazyColumn(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp),
+                    contentPadding = PaddingValues(top = 4.dp, bottom = 4.dp)
+                ) {
+                    item(key = "section-General") {
+                        GeneralSettings(
+                            service = svc,
+                            totalCost = totalCost,
+                            onDismiss = onDismiss,
+                            expanded = expandedSections.contains("General"),
+                            onToggle = { toggleSection("General") },
+                            accentColor = personaColor
                         )
                     }
-                }
-
-                Box(modifier = Modifier.weight(1f).padding(16.dp)) {
-                    when (selectedTab) {
-                        0 -> GeneralSettings(service, totalCost, onDismiss)
-                        1 -> ServerSettings(service, serverBases, ollamaBases, imageGenBases)
-                        2 -> CloudSettings(service, cloudApis)
-                        3 -> PersonaSettings(service, personas, personaColor)
-                        4 -> RoomSettings(service, rooms, personas, personaColor)
+                    item(key = "section-Servers") {
+                        ServerSettings(
+                            service = svc,
+                            gateways = serverBases,
+                            ollama = ollamaBases,
+                            imageGen = imageGenBases,
+                            expanded = expandedSections.contains("Servers"),
+                            onToggle = { toggleSection("Servers") },
+                            accentColor = personaColor
+                        )
+                    }
+                    item(key = "section-Cloud") {
+                        CloudSettings(
+                            service = svc,
+                            apis = cloudApis,
+                            expanded = expandedSections.contains("Cloud"),
+                            onToggle = { toggleSection("Cloud") },
+                            accentColor = personaColor
+                        )
+                    }
+                    item(key = "section-Personas") {
+                        PersonaSettings(
+                            service = svc,
+                            personas = personas,
+                            currentThemeColor = personaColor,
+                            expanded = expandedSections.contains("Personas"),
+                            onToggle = { toggleSection("Personas") }
+                        )
+                    }
+                    item(key = "section-Rooms") {
+                        RoomSettings(
+                            service = svc,
+                            rooms = rooms,
+                            personas = personas,
+                            currentThemeColor = personaColor,
+                            expanded = expandedSections.contains("Rooms"),
+                            onToggle = { toggleSection("Rooms") }
+                        )
                     }
                 }
 
@@ -246,8 +425,21 @@ internal fun adaptiveThemeDescription(sdkInt: Int): String =
         "Unavailable: dynamic color needs Android 12 (API 31) or newer. This device runs " +
             "API $sdkInt, so the standard theme is used instead."
 
+/**
+ * General section: appearance, chat font, cost, location, history, backup.
+ *
+ * Rendered as the body of a [SettingsExpandableSection] rather than a full screen — the
+ * whole form is one embeddable block, unchanged internally.
+ */
 @Composable
-fun GeneralSettings(service: AssistantService, totalCost: Double, onDismiss: () -> Unit) {
+fun GeneralSettings(
+    service: AssistantService,
+    totalCost: Double,
+    onDismiss: () -> Unit,
+    expanded: Boolean,
+    onToggle: () -> Unit,
+    accentColor: Color = MaterialTheme.colorScheme.primary
+) {
 
     // Celestial UI toggle state (collected from the service so the switch
     // reflects the live value and flips reactively when changed).
@@ -304,282 +496,280 @@ fun GeneralSettings(service: AssistantService, totalCost: Double, onDismiss: () 
         }
     }
 
-    LazyColumn(verticalArrangement = Arrangement.spacedBy(16.dp)) {
-        item {
-            SettingsSectionHeader(title = "Appearance", icon = Icons.Default.Palette)
-            SettingsSection {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("Celestial UI (beta)", style = MaterialTheme.typography.titleMedium)
-                        Text(
-                            "Starfield + planet voice screen with HUD transcript. " +
-                                "Text mode keeps the classic layout. Toggle back anytime.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-                        )
-                    }
-                    Switch(
-                        checked = celestialUi,
-                        onCheckedChange = { service.setCelestialUi(it) }
+    SettingsExpandableSection(
+        title = "General",
+        icon = Icons.Default.Settings,
+        expanded = expanded,
+        onToggle = onToggle,
+        accentColor = accentColor
+    ) {
+    Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+        SettingsSectionHeader(title = "Appearance", icon = Icons.Default.Palette)
+        SettingsSection {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Celestial UI (beta)", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        "Starfield + planet voice screen with HUD transcript. " +
+                            "Text mode keeps the classic layout. Toggle back anytime.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
                     )
                 }
-                HorizontalDivider(
-                    modifier = Modifier.padding(vertical = 12.dp),
-                    color = Color.White.copy(alpha = 0.05f)
+                Switch(
+                    checked = celestialUi,
+                    onCheckedChange = { service.setCelestialUi(it) }
                 )
-                // Adaptive Theme (Material You): base scheme derived from the wallpaper.
-                // The persona's own themeColor is deliberately NOT routed through the
-                // scheme — the voice screen/HUD paint `personaColor` directly — so the
-                // per-persona accent stays distinct on top of the dynamic base.
-                val dynamicSupported = isDynamicColorSupported(Build.VERSION.SDK_INT)
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("Adaptive Theme", style = MaterialTheme.typography.titleMedium)
-                        Text(
-                            adaptiveThemeDescription(Build.VERSION.SDK_INT),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-                        )
-                    }
-                    Switch(
-                        checked = adaptiveTheme,
-                        onCheckedChange = { service.setAdaptiveTheme(it) },
-                        // Disabled (with the reason above) rather than a silent no-op
-                        // when the platform can't provide dynamic color.
-                        enabled = dynamicSupported
+            }
+            HorizontalDivider(
+                modifier = Modifier.padding(vertical = 12.dp),
+                color = Color.White.copy(alpha = 0.05f)
+            )
+            // Adaptive Theme (Material You): base scheme derived from the wallpaper.
+            // The persona's own themeColor is deliberately NOT routed through the
+            // scheme — the voice screen/HUD paint `personaColor` directly — so the
+            // per-persona accent stays distinct on top of the dynamic base.
+            val dynamicSupported = isDynamicColorSupported(Build.VERSION.SDK_INT)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Adaptive Theme", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        adaptiveThemeDescription(Build.VERSION.SDK_INT),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
                     )
                 }
-                HorizontalDivider(
-                    modifier = Modifier.padding(vertical = 12.dp),
-                    color = Color.White.copy(alpha = 0.05f)
+                Switch(
+                    checked = adaptiveTheme,
+                    onCheckedChange = { service.setAdaptiveTheme(it) },
+                    // Disabled (with the reason above) rather than a silent no-op
+                    // when the platform can't provide dynamic color.
+                    enabled = dynamicSupported
                 )
-                Column(modifier = Modifier.fillMaxWidth()) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text("Chat Font Size", style = MaterialTheme.typography.titleMedium)
-                        Text("${chatFontSize.toInt()} sp", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary)
-                    }
-                    Slider(
-                        value = chatFontSize,
-                        onValueChange = { service.setChatFontSize(it) },
-                        valueRange = 12f..24f,
-                        steps = 11, // 12, 13, ..., 24 -> 13 values, 12 gaps -> 11 steps
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    // Live preview
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(top = 8.dp)
-                            .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.05f), RoundedCornerShape(8.dp))
-                            .padding(12.dp)
-                    ) {
-                        Text(
-                            "Sample message at ${chatFontSize.toInt()}sp size.",
-                            fontSize = chatFontSize.sp,
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f)
-                        )
-                    }
-                }
             }
-        }
-
-        item {
-            SettingsSectionHeader(title = "Data & Usage", icon = Icons.Default.Analytics)
-            SettingsSection {
+            HorizontalDivider(
+                modifier = Modifier.padding(vertical = 12.dp),
+                color = Color.White.copy(alpha = 0.05f)
+            )
+            Column(modifier = Modifier.fillMaxWidth()) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Column {
-                        Text("Total Session Cost", style = MaterialTheme.typography.titleMedium)
-                        Text("$${String.format(java.util.Locale.US, "%.6f", totalCost)}", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.primary)
-                    }
-                    Button(
-                        onClick = { service.resetTotalCost() },
-                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.errorContainer, contentColor = MaterialTheme.colorScheme.onErrorContainer),
-                        shape = RoundedCornerShape(8.dp)
-                    ) {
-                        Text("Reset")
-                    }
+                    Text("Chat Font Size", style = MaterialTheme.typography.titleMedium)
+                    Text("${chatFontSize.toInt()} sp", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary)
                 }
-            }
-        }
-
-        item {
-            SettingsSectionHeader(title = "Location", icon = Icons.Default.LocationOn)
-            SettingsSection {
-                var userLocation by remember { mutableStateOf("") }
-                LaunchedEffect(Unit) {
-                    userLocation = service.getUserLocation() ?: ""
-                }
-                OutlinedTextField(
-                    value = userLocation,
-                    onValueChange = { 
-                        userLocation = it
-                        service.saveUserLocation(it)
-                    },
-                    label = { Text("Assistant Location") },
-                    placeholder = { Text("e.g. Athens, Greece") },
+                Slider(
+                    value = chatFontSize,
+                    onValueChange = { service.setChatFontSize(it) },
+                    valueRange = 12f..24f,
+                    steps = 11, // 12, 13, ..., 24 -> 13 values, 12 gaps -> 11 steps
                     modifier = Modifier.fillMaxWidth()
                 )
-                Text(
-                    "Optional: Used to localize news briefings and searches.",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
-                    modifier = Modifier.padding(top = 4.dp)
-                )
-            }
-        }
-        item {
-            SettingsSectionHeader(title = "History", icon = Icons.Default.History)
-            var showClearConfirm by rememberSaveable { mutableStateOf(false) }
-            SettingsSection {
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(
-                        onClick = { showClearConfirm = true },
-                        modifier = Modifier.weight(1f),
-                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error.copy(alpha = 0.8f)),
-                        shape = RoundedCornerShape(8.dp)
-                    ) {
-                        Icon(Icons.Default.DeleteSweep, null)
-                        Spacer(Modifier.width(8.dp))
-                        Text("Clear All Messages")
-                    }
+                // Live preview
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 8.dp)
+                        .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.05f), RoundedCornerShape(8.dp))
+                        .padding(12.dp)
+                ) {
+                    Text(
+                        "Sample message at ${chatFontSize.toInt()}sp size.",
+                        fontSize = chatFontSize.sp,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f)
+                    )
                 }
             }
+        }
 
-            if (showClearConfirm) {
-                AlertDialog(
-                    onDismissRequest = { showClearConfirm = false },
-                    title = { Text("Clear History") },
-                    text = { Text("Are you sure you want to permanently delete all messages?") },
-                    confirmButton = {
-                        TextButton(
-                            onClick = {
-                                service.clearMessages()
-                                showClearConfirm = false
-                                onDismiss()
-                            },
-                            colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)
-                        ) {
-                            Text("Clear All")
+        SettingsSectionHeader(title = "Data & Usage", icon = Icons.Default.Analytics)
+        SettingsSection {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column {
+                    Text("Total Session Cost", style = MaterialTheme.typography.titleMedium)
+                    Text("$${String.format(java.util.Locale.US, "%.6f", totalCost)}", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.primary)
+                }
+                Button(
+                    onClick = { service.resetTotalCost() },
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.errorContainer, contentColor = MaterialTheme.colorScheme.onErrorContainer),
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Text("Reset")
+                }
+            }
+        }
+
+        SettingsSectionHeader(title = "Location", icon = Icons.Default.LocationOn)
+        SettingsSection {
+            var userLocation by remember { mutableStateOf("") }
+            LaunchedEffect(Unit) {
+                userLocation = service.getUserLocation() ?: ""
+            }
+            OutlinedTextField(
+                value = userLocation,
+                onValueChange = {
+                    userLocation = it
+                    service.saveUserLocation(it)
+                },
+                label = { Text("Assistant Location") },
+                placeholder = { Text("e.g. Athens, Greece") },
+                modifier = Modifier.fillMaxWidth()
+            )
+            Text(
+                "Optional: Used to localize news briefings and searches.",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
+                modifier = Modifier.padding(top = 4.dp)
+            )
+        }
+        SettingsSectionHeader(title = "History", icon = Icons.Default.History)
+        var showClearConfirm by rememberSaveable { mutableStateOf(false) }
+        SettingsSection {
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = { showClearConfirm = true },
+                    modifier = Modifier.weight(1f),
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error.copy(alpha = 0.8f)),
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Icon(Icons.Default.DeleteSweep, null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Clear All Messages")
+                }
+            }
+        }
+
+        if (showClearConfirm) {
+            AlertDialog(
+                onDismissRequest = { showClearConfirm = false },
+                title = { Text("Clear History") },
+                text = { Text("Are you sure you want to permanently delete all messages?") },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            service.clearMessages()
+                            showClearConfirm = false
+                            onDismiss()
+                        },
+                        colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)
+                    ) {
+                        Text("Clear All")
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showClearConfirm = false }) {
+                        Text("Cancel")
+                    }
+                }
+            )
+        }
+
+        SettingsSectionHeader(title = "Backup & Recovery", icon = Icons.Default.CloudSync)
+        SettingsSection {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(
+                        checked = encryptExport,
+                        onCheckedChange = {
+                            encryptExport = it
+                            exportPasswordError = null
+                        }
+                    )
+                    Text("Encrypt backup with password")
+                }
+                if (encryptExport) {
+                    OutlinedTextField(
+                        value = exportPassword,
+                        onValueChange = {
+                            exportPassword = it
+                            exportPasswordError = null
+                        },
+                        label = { Text("Password") },
+                        visualTransformation = PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = exportConfirmPassword,
+                        onValueChange = {
+                            exportConfirmPassword = it
+                            exportPasswordError = null
+                        },
+                        label = { Text("Confirm password") },
+                        visualTransformation = PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Text(
+                        "Minimum 8 characters. Encrypts API keys, server credentials and chats (AES-256-GCM, PBKDF2 key derivation).",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                    )
+                    exportPasswordError?.let { err ->
+                        Text(err, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+                OutlinedButton(
+                    onClick = {
+                        if (encryptExport) {
+                            when {
+                                exportPassword.length < 8 ->
+                                    exportPasswordError = "Password must be at least 8 characters."
+                                exportPassword != exportConfirmPassword ->
+                                    exportPasswordError = "Passwords do not match."
+                                else -> {
+                                    exportPasswordError = null
+                                    pendingExportPassword = exportPassword
+                                    exportLauncher.launch("voice_assistant_backup_${System.currentTimeMillis()}.json")
+                                }
+                            }
+                        } else {
+                            exportPasswordError = null
+                            pendingExportPassword = null
+                            exportLauncher.launch("voice_assistant_backup_${System.currentTimeMillis()}.json")
                         }
                     },
-                    dismissButton = {
-                        TextButton(onClick = { showClearConfirm = false }) {
-                            Text("Cancel")
-                        }
-                    }
-                )
-            }
-        }
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(8.dp),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.5f))
+                ) {
+                    Icon(Icons.Default.Save, null)
+                    Spacer(Modifier.width(12.dp))
+                    Text("Export Backup to File")
+                }
 
-        item {
-            SettingsSectionHeader(title = "Backup & Recovery", icon = Icons.Default.CloudSync)
-            SettingsSection {
-                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Checkbox(
-                            checked = encryptExport,
-                            onCheckedChange = {
-                                encryptExport = it
-                                exportPasswordError = null
-                            }
-                        )
-                        Text("Encrypt backup with password")
-                    }
-                    if (encryptExport) {
-                        OutlinedTextField(
-                            value = exportPassword,
-                            onValueChange = {
-                                exportPassword = it
-                                exportPasswordError = null
-                            },
-                            label = { Text("Password") },
-                            visualTransformation = PasswordVisualTransformation(),
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                            singleLine = true,
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                        OutlinedTextField(
-                            value = exportConfirmPassword,
-                            onValueChange = {
-                                exportConfirmPassword = it
-                                exportPasswordError = null
-                            },
-                            label = { Text("Confirm password") },
-                            visualTransformation = PasswordVisualTransformation(),
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                            singleLine = true,
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                        Text(
-                            "Minimum 8 characters. Encrypts API keys, server credentials and chats (AES-256-GCM, PBKDF2 key derivation).",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
-                        )
-                        exportPasswordError?.let { err ->
-                            Text(err, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
-                        }
-                    }
-                    OutlinedButton(
-                        onClick = {
-                            if (encryptExport) {
-                                when {
-                                    exportPassword.length < 8 ->
-                                        exportPasswordError = "Password must be at least 8 characters."
-                                    exportPassword != exportConfirmPassword ->
-                                        exportPasswordError = "Passwords do not match."
-                                    else -> {
-                                        exportPasswordError = null
-                                        pendingExportPassword = exportPassword
-                                        exportLauncher.launch("voice_assistant_backup_${System.currentTimeMillis()}.json")
-                                    }
-                                }
-                            } else {
-                                exportPasswordError = null
-                                pendingExportPassword = null
-                                exportLauncher.launch("voice_assistant_backup_${System.currentTimeMillis()}.json")
-                            }
-                        },
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(8.dp),
-                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.5f))
-                    ) {
-                        Icon(Icons.Default.Save, null)
-                        Spacer(Modifier.width(12.dp))
-                        Text("Export Backup to File")
-                    }
-
-                    OutlinedButton(
-                        onClick = {
-                            importLauncher.launch(arrayOf("*/*"))
-                        },
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(8.dp),
-                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.secondary.copy(alpha = 0.5f))
-                    ) {
-                        Icon(Icons.Default.SettingsBackupRestore, null)
-                        Spacer(Modifier.width(12.dp))
-                        Text("Import Backup from File")
-                    }
+                OutlinedButton(
+                    onClick = {
+                        importLauncher.launch(arrayOf("*/*"))
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(8.dp),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.secondary.copy(alpha = 0.5f))
+                ) {
+                    Icon(Icons.Default.SettingsBackupRestore, null)
+                    Spacer(Modifier.width(12.dp))
+                    Text("Import Backup from File")
                 }
             }
         }
+    }
     }
 
     // Fix #7: prompt for the password of an encrypted backup. Shown when the
@@ -630,8 +820,21 @@ fun GeneralSettings(service: AssistantService, totalCost: Double, onDismiss: () 
     }
 }
 
+/**
+ * Servers section: local gateways, Ollama, image-gen endpoints, external services and
+ * the knowledge base. Body of a [SettingsExpandableSection]; every list keeps its
+ * add/edit/reorder/delete/test-connection behaviour unchanged.
+ */
 @Composable
-fun ServerSettings(service: AssistantService, gateways: List<ServerConfig>, ollama: List<ServerConfig>, imageGen: List<ServerConfig>) {
+fun ServerSettings(
+    service: AssistantService,
+    gateways: List<ServerConfig>,
+    ollama: List<ServerConfig>,
+    imageGen: List<ServerConfig>,
+    expanded: Boolean,
+    onToggle: () -> Unit,
+    accentColor: Color = MaterialTheme.colorScheme.primary
+) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var serverStatus by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
@@ -641,205 +844,203 @@ fun ServerSettings(service: AssistantService, gateways: List<ServerConfig>, olla
     LaunchedEffect(service) {
         service.serverStatus.collect { serverStatus = it }
     }
-    Box(modifier = Modifier.fillMaxSize()) {
-    LazyColumn(verticalArrangement = Arrangement.spacedBy(16.dp)) {
-        item {
-            SettingsSectionHeader(title = "Connections", icon = Icons.Default.Dns)
-            ServerListSection(
-                title = "Local Gateways",
-                servers = gateways,
-                status = serverStatus,
-                onAdd = { name: String, url: String, user: String?, pass: String?, authType: AuthType, apiKey: String? -> service.addServerBase(name, url, user, pass, authType, apiKey) },
-                onRemove = { service.removeServerBase(it) },
-                onEdit = { old: ServerConfig, name: String, url: String, user: String?, pass: String?, authType: AuthType, apiKey: String? -> service.updateServerBase(old, name, url, user, pass, authType, apiKey) },
-                onRefreshHealth = { service.forceCheckHealth(it, true) },
-                onRefreshModels = { /* Gateways don't have models */ },
-                onMoveUp = { service.moveServerUp(it, false) },
-                onMoveDown = { service.moveServerDown(it, false) },
-                isGateway = true,
-                service = service,
-                snackbarHostState = snackbarHostState
-            )
-        }
-        item {
-            ServerListSection(
-                title = "Ollama Servers",
-                servers = ollama,
-                status = serverStatus,
-                onAdd = { name: String, url: String, user: String?, pass: String?, authType: AuthType, apiKey: String? -> service.addOllamaBase(name, url, user, pass, authType, apiKey) },
-                onRemove = { service.removeOllamaBase(it) },
-                onEdit = { old: ServerConfig, name: String, url: String, user: String?, pass: String?, authType: AuthType, apiKey: String? -> service.updateOllamaBase(old, name, url, user, pass, authType, apiKey) },
-                onRefreshHealth = { service.forceCheckHealth(it, false) },
-                onRefreshModels = { service.fetchModels(it) },
-                onMoveUp = { service.moveServerUp(it, true) },
-                onMoveDown = { service.moveServerDown(it, true) },
-                isGateway = false,
-                service = service,
-                snackbarHostState = snackbarHostState
-            )
-        }
-        item {
-            ServerListSection(
-                title = "Image Gen Servers",
-                servers = imageGen,
-                status = serverStatus,
-                onAdd = { name: String, url: String, user: String?, pass: String?, authType: AuthType, apiKey: String? -> service.addImageGenBase(name, url, user, pass, authType, apiKey) },
-                onRemove = { service.removeImageGenBase(it) },
-                onEdit = { old: ServerConfig, name: String, url: String, user: String?, pass: String?, authType: AuthType, apiKey: String? -> service.updateImageGenBase(old, name, url, user, pass, authType, apiKey) },
-                onRefreshHealth = { service.forceCheckHealth(it, false, true) },
-                onRefreshModels = { },
-                onMoveUp = { service.moveImageGenUp(it) },
-                onMoveDown = { service.moveImageGenDown(it) },
-                isGateway = false,
-                isImageGen = true,
-                service = service,
-                snackbarHostState = snackbarHostState
-            )
-        }
-        item {
-            SettingsSectionHeader(title = "External Services", icon = Icons.Default.Public)
-            SettingsSection {
-                var searxngUrl by remember { mutableStateOf("") }
-                LaunchedEffect(Unit) {
-                    searxngUrl = service.getSearxngUrl() ?: ""
-                }
+    Box(modifier = Modifier.fillMaxWidth()) {
+    SettingsExpandableSection(
+        title = "Servers",
+        icon = Icons.Default.Dns,
+        expanded = expanded,
+        onToggle = onToggle,
+        accentColor = accentColor
+    ) {
+    Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+        SettingsSectionHeader(title = "Connections", icon = Icons.Default.Dns)
+        ServerListSection(
+            title = "Local Gateways",
+            servers = gateways,
+            status = serverStatus,
+            onAdd = { name: String, url: String, user: String?, pass: String?, authType: AuthType, apiKey: String? -> service.addServerBase(name, url, user, pass, authType, apiKey) },
+            onRemove = { service.removeServerBase(it) },
+            onEdit = { old: ServerConfig, name: String, url: String, user: String?, pass: String?, authType: AuthType, apiKey: String? -> service.updateServerBase(old, name, url, user, pass, authType, apiKey) },
+            onRefreshHealth = { service.forceCheckHealth(it, true) },
+            onRefreshModels = { /* Gateways don't have models */ },
+            onMoveUp = { service.moveServerUp(it, false) },
+            onMoveDown = { service.moveServerDown(it, false) },
+            isGateway = true,
+            service = service,
+            snackbarHostState = snackbarHostState
+        )
+        ServerListSection(
+            title = "Ollama Servers",
+            servers = ollama,
+            status = serverStatus,
+            onAdd = { name: String, url: String, user: String?, pass: String?, authType: AuthType, apiKey: String? -> service.addOllamaBase(name, url, user, pass, authType, apiKey) },
+            onRemove = { service.removeOllamaBase(it) },
+            onEdit = { old: ServerConfig, name: String, url: String, user: String?, pass: String?, authType: AuthType, apiKey: String? -> service.updateOllamaBase(old, name, url, user, pass, authType, apiKey) },
+            onRefreshHealth = { service.forceCheckHealth(it, false) },
+            onRefreshModels = { service.fetchModels(it) },
+            onMoveUp = { service.moveServerUp(it, true) },
+            onMoveDown = { service.moveServerDown(it, true) },
+            isGateway = false,
+            service = service,
+            snackbarHostState = snackbarHostState
+        )
+        ServerListSection(
+            title = "Image Gen Servers",
+            servers = imageGen,
+            status = serverStatus,
+            onAdd = { name: String, url: String, user: String?, pass: String?, authType: AuthType, apiKey: String? -> service.addImageGenBase(name, url, user, pass, authType, apiKey) },
+            onRemove = { service.removeImageGenBase(it) },
+            onEdit = { old: ServerConfig, name: String, url: String, user: String?, pass: String?, authType: AuthType, apiKey: String? -> service.updateImageGenBase(old, name, url, user, pass, authType, apiKey) },
+            onRefreshHealth = { service.forceCheckHealth(it, false, true) },
+            onRefreshModels = { },
+            onMoveUp = { service.moveImageGenUp(it) },
+            onMoveDown = { service.moveImageGenDown(it) },
+            isGateway = false,
+            isImageGen = true,
+            service = service,
+            snackbarHostState = snackbarHostState
+        )
+        SettingsSectionHeader(title = "External Services", icon = Icons.Default.Public)
+        SettingsSection {
+            var searxngUrl by remember { mutableStateOf("") }
+            LaunchedEffect(Unit) {
+                searxngUrl = service.getSearxngUrl() ?: ""
+            }
 
+            OutlinedTextField(
+                value = searxngUrl,
+                onValueChange = {
+                    searxngUrl = it
+                    service.saveSearxngUrl(it)
+                },
+                label = { Text("SearXNG URL") },
+                placeholder = { Text("e.g. http://192.168.1.10:8080") },
+                modifier = Modifier.fillMaxWidth()
+            )
+            Text(
+                "Self-hosted search API for persona web capability.",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
+                modifier = Modifier.padding(top = 4.dp)
+            )
+        }
+        SettingsSectionHeader(title = "Knowledge Base", icon = Icons.Default.Book)
+        SettingsSection {
+            var ragUrl by remember { mutableStateOf("") }
+            var ragUser by remember { mutableStateOf("") }
+            var ragPass by remember { mutableStateOf("") }
+            var docCount by remember { mutableStateOf<Int?>(null) }
+            // Upload progress/outcome is hoisted to the service (StateFlow) so it
+            // survives dialog closure: the upload runs on serviceScope and the
+            // dialog just collects the status for display. The count display is
+            // still dialog-local (transient) — reset when an upload succeeds.
+            val uploadStatus by service.knowledgeUploadStatus.collectAsState()
+            LaunchedEffect(uploadStatus) {
+                if (uploadStatus.startsWith("Uploaded")) docCount = null
+            }
+
+            LaunchedEffect(service) {
+                ragUrl = service.getRagServerUrl() ?: ""
+                ragUser = service.getRagUsername() ?: ""
+                ragPass = service.getRagPassword() ?: ""
+            }
+
+            OutlinedTextField(
+                value = ragUrl,
+                onValueChange = {
+                    ragUrl = it
+                    service.saveRagServerUrl(it)
+                    docCount = null
+                },
+                label = { Text("RAG Server URL") },
+                placeholder = { Text("e.g. https://192.168.1.10:8882") },
+                modifier = Modifier.fillMaxWidth()
+            )
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedTextField(
-                    value = searxngUrl,
-                    onValueChange = { 
-                        searxngUrl = it
-                        service.saveSearxngUrl(it)
+                    value = ragUser,
+                    onValueChange = {
+                        ragUser = it
+                        service.saveRagUsername(it)
                     },
-                    label = { Text("SearXNG URL") },
-                    placeholder = { Text("e.g. http://192.168.1.10:8080") },
-                    modifier = Modifier.fillMaxWidth()
+                    label = { Text("RAG Username") },
+                    singleLine = true,
+                    modifier = Modifier.weight(1f)
                 )
-                Text(
-                    "Self-hosted search API for persona web capability.",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
-                    modifier = Modifier.padding(top = 4.dp)
+                OutlinedTextField(
+                    value = ragPass,
+                    onValueChange = {
+                        ragPass = it
+                        service.saveRagPassword(it)
+                    },
+                    label = { Text("RAG Password") },
+                    visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                    singleLine = true,
+                    modifier = Modifier.weight(1f)
                 )
             }
-        }
-        item {
-            SettingsSectionHeader(title = "Knowledge Base", icon = Icons.Default.Book)
-            SettingsSection {
-                var ragUrl by remember { mutableStateOf("") }
-                var ragUser by remember { mutableStateOf("") }
-                var ragPass by remember { mutableStateOf("") }
-                var docCount by remember { mutableStateOf<Int?>(null) }
-                // Upload progress/outcome is hoisted to the service (StateFlow) so it
-                // survives dialog closure: the upload runs on serviceScope and the
-                // dialog just collects the status for display. The count display is
-                // still dialog-local (transient) — reset when an upload succeeds.
-                val uploadStatus by service.knowledgeUploadStatus.collectAsState()
-                LaunchedEffect(uploadStatus) {
-                    if (uploadStatus.startsWith("Uploaded")) docCount = null
-                }
+            Text(
+                "Local RAG microservice (HTTPS with self-signed cert — approve the trust prompt on first connection). Enter the service's own username/password above. Leave blank to disable.",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
+                modifier = Modifier.padding(top = 4.dp)
+            )
 
-                LaunchedEffect(service) {
-                    ragUrl = service.getRagServerUrl() ?: ""
-                    ragUser = service.getRagUsername() ?: ""
-                    ragPass = service.getRagPassword() ?: ""
-                }
-
-                OutlinedTextField(
-                    value = ragUrl,
-                    onValueChange = {
-                        ragUrl = it
-                        service.saveRagServerUrl(it)
-                        docCount = null
-                    },
-                    label = { Text("RAG Server URL") },
-                    placeholder = { Text("e.g. https://192.168.1.10:8882") },
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(
-                        value = ragUser,
-                        onValueChange = {
-                            ragUser = it
-                            service.saveRagUsername(it)
-                        },
-                        label = { Text("RAG Username") },
-                        singleLine = true,
-                        modifier = Modifier.weight(1f)
+            if (ragUrl.isNotBlank()) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = docCount?.let { "Documents in collection: $it" } ?: "Click refresh to check collection",
+                        style = MaterialTheme.typography.bodySmall
                     )
-                    OutlinedTextField(
-                        value = ragPass,
-                        onValueChange = {
-                            ragPass = it
-                            service.saveRagPassword(it)
-                        },
-                        label = { Text("RAG Password") },
-                        visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
-                        singleLine = true,
-                        modifier = Modifier.weight(1f)
-                    )
-                }
-                Text(
-                    "Local RAG microservice (HTTPS with self-signed cert — approve the trust prompt on first connection). Enter the service's own username/password above. Leave blank to disable.",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
-                    modifier = Modifier.padding(top = 4.dp)
-                )
-
-                if (ragUrl.isNotBlank()) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = docCount?.let { "Documents in collection: $it" } ?: "Click refresh to check collection",
-                            style = MaterialTheme.typography.bodySmall
-                        )
-                        TextButton(onClick = {
-                            scope.launch {
-                                docCount = null
-                                when (val result = service.getKnowledgeCount(ragUrl)) {
-                                    is RagResult.Success -> docCount = result.value
-                                    is RagResult.Failure -> service._knowledgeUploadStatus.value = "Error: ${result.exception.message}"
-                                }
+                    TextButton(onClick = {
+                        scope.launch {
+                            docCount = null
+                            when (val result = service.getKnowledgeCount(ragUrl)) {
+                                is RagResult.Success -> docCount = result.value
+                                is RagResult.Failure -> service._knowledgeUploadStatus.value = "Error: ${result.exception.message}"
                             }
-                        }) {
-                            Text("Refresh")
                         }
+                    }) {
+                        Text("Refresh")
                     }
                 }
+            }
 
-                val kbAttachmentLauncher = rememberLauncherForActivityResult(
-                    ActivityResultContracts.OpenMultipleDocuments()
-                ) { uris ->
-                    // Upload runs on serviceScope (inside the service) so closing the
-                    // Settings dialog can no longer cancel it and silently discard the
-                    // outcome; progress/result is published via knowledgeUploadStatus.
-                    service.uploadKnowledgeDocumentsToRag(uris, ragUrl)
-                }
+            val kbAttachmentLauncher = rememberLauncherForActivityResult(
+                ActivityResultContracts.OpenMultipleDocuments()
+            ) { uris ->
+                // Upload runs on serviceScope (inside the service) so closing the
+                // Settings dialog can no longer cancel it and silently discard the
+                // outcome; progress/result is published via knowledgeUploadStatus.
+                service.uploadKnowledgeDocumentsToRag(uris, ragUrl)
+            }
 
-                OutlinedButton(
-                    onClick = { kbAttachmentLauncher.launch(arrayOf("*/*")) },
-                    enabled = ragUrl.isNotBlank(),
-                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
-                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.5f))
-                ) {
-                    Icon(Icons.Default.UploadFile, null)
-                    Spacer(Modifier.width(12.dp))
-                    Text("Add Document")
-                }
+            OutlinedButton(
+                onClick = { kbAttachmentLauncher.launch(arrayOf("*/*")) },
+                enabled = ragUrl.isNotBlank(),
+                modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.5f))
+            ) {
+                Icon(Icons.Default.UploadFile, null)
+                Spacer(Modifier.width(12.dp))
+                Text("Add Document")
+            }
 
-                if (uploadStatus.isNotBlank()) {
-                    Text(
-                        uploadStatus,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = if (uploadStatus.startsWith("Failed") || uploadStatus.startsWith("Unsupported")) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.padding(top = 4.dp)
-                    )
-                }
+            if (uploadStatus.isNotBlank()) {
+                Text(
+                    uploadStatus,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (uploadStatus.startsWith("Failed") || uploadStatus.startsWith("Unsupported")) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.padding(top = 4.dp)
+                )
             }
         }
-        }
+    }
+    }
         SnackbarHost(
             hostState = snackbarHostState,
             modifier = Modifier.align(Alignment.BottomCenter)
@@ -888,14 +1089,14 @@ fun ServerListSection(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(text = title, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
-            IconButton(onClick = { 
+            IconButton(onClick = {
                 newName = ""; newUrl = ""; newUser = ""; newPass = ""
-                showAddDialog = true 
+                showAddDialog = true
             }, modifier = Modifier.size(32.dp)) {
                 Icon(Icons.Default.Add, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
             }
         }
-        
+
         SettingsSection {
             if (servers.isEmpty()) {
                 Text("No servers configured", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f), modifier = Modifier.padding(vertical = 8.dp))
@@ -938,7 +1139,7 @@ fun ServerListSection(
                             Text(err, style = MaterialTheme.typography.labelSmall, color = if (isOnline) Color.Gray else MaterialTheme.colorScheme.error)
                         }
                     }
-                    
+
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         IconButton(onClick = { onMoveUp(server) }, enabled = index > 0, modifier = Modifier.size(28.dp)) {
                             Icon(Icons.Default.KeyboardArrowUp, null, modifier = Modifier.size(20.dp))
@@ -946,7 +1147,7 @@ fun ServerListSection(
                         IconButton(onClick = { onMoveDown(server) }, enabled = index < servers.size - 1, modifier = Modifier.size(28.dp)) {
                             Icon(Icons.Default.KeyboardArrowDown, null, modifier = Modifier.size(20.dp))
                         }
-                        
+
                         if (!isGateway) {
                             IconButton(onClick = { onRefreshModels(server) }, modifier = Modifier.size(28.dp)) {
                                 Icon(Icons.Default.Sync, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
@@ -1108,8 +1309,18 @@ fun ServerListSection(
     }
 }
 
+/**
+ * Cloud section: dynamic pricing, per-provider API keys and the custom-provider list.
+ * Body of a [SettingsExpandableSection]; add/edit/reorder/delete/refresh unchanged.
+ */
 @Composable
-fun CloudSettings(service: AssistantService, apis: List<CloudApiSetting>) {
+fun CloudSettings(
+    service: AssistantService,
+    apis: List<CloudApiSetting>,
+    expanded: Boolean,
+    onToggle: () -> Unit,
+    accentColor: Color = MaterialTheme.colorScheme.primary
+) {
     var customApis by remember { mutableStateOf<List<CloudApiSetting>>(emptyList()) }
     var lastSync by remember { mutableLongStateOf(0L) }
 
@@ -1117,93 +1328,93 @@ fun CloudSettings(service: AssistantService, apis: List<CloudApiSetting>) {
         launch { service.customCloudApis.collect { customApis = it } }
         launch { service.lastPriceSyncTimestamp.collect { lastSync = it } }
     }
-    
-    LazyColumn(verticalArrangement = Arrangement.spacedBy(16.dp)) {
-        item {
-            SettingsSectionHeader(title = "Cloud Providers", icon = Icons.Default.Cloud)
-        }
 
-        item {
-            SettingsSection {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("Dynamic Pricing", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
-                        val syncLabel = remember(lastSync) {
-                            if (lastSync == 0L) "Never synced" 
-                            else "Last synced: ${java.text.SimpleDateFormat("MMM d, HH:mm", java.util.Locale.US).format(java.util.Date(lastSync))}"
-                        }
-                        Text(
-                            text = syncLabel,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-                        )
+    SettingsExpandableSection(
+        title = "Cloud",
+        icon = Icons.Default.Cloud,
+        expanded = expanded,
+        onToggle = onToggle,
+        accentColor = accentColor
+    ) {
+    Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+        SettingsSectionHeader(title = "Cloud Providers", icon = Icons.Default.Cloud)
+
+        SettingsSection {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Dynamic Pricing", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+                    val syncLabel = remember(lastSync) {
+                        if (lastSync == 0L) "Never synced"
+                        else "Last synced: ${java.text.SimpleDateFormat("MMM d, HH:mm", java.util.Locale.US).format(java.util.Date(lastSync))}"
                     }
-                    TextButton(onClick = { service.syncOpenRouterPricing(force = true) }) {
-                        Icon(Icons.Default.Refresh, null, modifier = Modifier.size(16.dp))
-                        Spacer(Modifier.width(8.dp))
-                        Text("Refresh Now")
-                    }
+                    Text(
+                        text = syncLabel,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                    )
+                }
+                TextButton(onClick = { service.syncOpenRouterPricing(force = true) }) {
+                    Icon(Icons.Default.Refresh, null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Refresh Now")
                 }
             }
         }
 
         apis.forEachIndexed { index, api ->
-            item {
-                var apiKey by remember { mutableStateOf(api.apiKey) }
+            var apiKey by remember { mutableStateOf(api.apiKey) }
 
-                SettingsSection {
-                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            ProviderLogo(icon = api.icon, isCloud = true)
-                            Spacer(Modifier.width(12.dp))
-                            Text(api.name, style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
-                            
-                            IconButton(onClick = { service.moveCloudApiUp(api) }, enabled = index > 0, modifier = Modifier.size(28.dp)) {
-                                Icon(Icons.Default.KeyboardArrowUp, null, modifier = Modifier.size(20.dp))
-                            }
-                            IconButton(onClick = { service.moveCloudApiDown(api) }, enabled = index < apis.size - 1, modifier = Modifier.size(28.dp)) {
-                                Icon(Icons.Default.KeyboardArrowDown, null, modifier = Modifier.size(20.dp))
-                            }
+            SettingsSection {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        ProviderLogo(icon = api.icon, isCloud = true)
+                        Spacer(Modifier.width(12.dp))
+                        Text(api.name, style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
+
+                        IconButton(onClick = { service.moveCloudApiUp(api) }, enabled = index > 0, modifier = Modifier.size(28.dp)) {
+                            Icon(Icons.Default.KeyboardArrowUp, null, modifier = Modifier.size(20.dp))
                         }
-                        
-                        OutlinedTextField(
-                            value = apiKey,
-                            onValueChange = { apiKey = it; service.updateCloudApi(index, api.copy(apiKey = it)) },
-                            label = { Text("API Key") },
-                            modifier = Modifier.fillMaxWidth(),
-                            visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation()
-                        )
-                        
-                        Button(
-                            onClick = { service.fetchCloudModels(api) },
-                            modifier = Modifier.align(Alignment.End),
-                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
-                            shape = RoundedCornerShape(8.dp)
-                        ) {
-                            Icon(Icons.Default.Refresh, null, modifier = Modifier.size(16.dp))
-                            Spacer(Modifier.width(8.dp))
-                            Text("Refresh Models", style = MaterialTheme.typography.labelSmall)
+                        IconButton(onClick = { service.moveCloudApiDown(api) }, enabled = index < apis.size - 1, modifier = Modifier.size(28.dp)) {
+                            Icon(Icons.Default.KeyboardArrowDown, null, modifier = Modifier.size(20.dp))
                         }
+                    }
+
+                    OutlinedTextField(
+                        value = apiKey,
+                        onValueChange = { apiKey = it; service.updateCloudApi(index, api.copy(apiKey = it)) },
+                        label = { Text("API Key") },
+                        modifier = Modifier.fillMaxWidth(),
+                        visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation()
+                    )
+
+                    Button(
+                        onClick = { service.fetchCloudModels(api) },
+                        modifier = Modifier.align(Alignment.End),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Icon(Icons.Default.Refresh, null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text("Refresh Models", style = MaterialTheme.typography.labelSmall)
                     }
                 }
             }
         }
-        
-        item {
-            CustomCloudApiList(
-                apis = customApis,
-                onAdd = { name, url, key -> service.addCustomCloudApi(name, url, key) },
-                onRemove = { service.removeCustomCloudApi(it) },
-                onEdit = { old, new -> service.updateCustomCloudApi(old, new) },
-                onRefresh = { service.fetchCloudModels(it) },
-                onMoveUp = { service.moveCustomCloudApiUp(it) },
-                onMoveDown = { service.moveCustomCloudApiDown(it) }
-            )
-        }
+
+        CustomCloudApiList(
+            apis = customApis,
+            onAdd = { name, url, key -> service.addCustomCloudApi(name, url, key) },
+            onRemove = { service.removeCustomCloudApi(it) },
+            onEdit = { old, new -> service.updateCustomCloudApi(old, new) },
+            onRefresh = { service.fetchCloudModels(it) },
+            onMoveUp = { service.moveCustomCloudApiUp(it) },
+            onMoveDown = { service.moveCustomCloudApiDown(it) }
+        )
+    }
     }
 }
 
@@ -1243,7 +1454,7 @@ fun CustomCloudApiList(
 ) {
     var showAddDialog by rememberSaveable { mutableStateOf(false) }
     var editingApi by rememberSaveable(stateSaver = CloudApiSettingSaver) { mutableStateOf<CloudApiSetting?>(null) }
-    
+
     var name by rememberSaveable { mutableStateOf("") }
     var url by rememberSaveable { mutableStateOf("") }
     var key by rememberSaveable { mutableStateOf("") }
@@ -1259,7 +1470,7 @@ fun CustomCloudApiList(
                 Icon(Icons.Default.Add, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
             }
         }
-        
+
         SettingsSection {
             if (apis.isEmpty()) {
                 Text("No custom providers", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f), modifier = Modifier.padding(vertical = 8.dp))
@@ -1273,7 +1484,7 @@ fun CustomCloudApiList(
                         Text(api.name, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
                         Text(api.baseUrl, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f), maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
-                    
+
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         IconButton(onClick = { onMoveUp(api) }, enabled = index > 0, modifier = Modifier.size(28.dp)) {
                             Icon(Icons.Default.KeyboardArrowUp, null, modifier = Modifier.size(20.dp))
@@ -1301,7 +1512,7 @@ fun CustomCloudApiList(
         if (showAddDialog || editingApi != null) {
             val isEditing = editingApi != null
             AlertDialog(
-                onDismissRequest = { 
+                onDismissRequest = {
                     showAddDialog = false; editingApi = null
                     name = ""; url = ""; key = ""
                 },
@@ -1327,7 +1538,7 @@ fun CustomCloudApiList(
                     }) { Text(if (isEditing) "Save" else "Add") }
                 },
                 dismissButton = {
-                    TextButton(onClick = { 
+                    TextButton(onClick = {
                         showAddDialog = false; editingApi = null
                         name = ""; url = ""; key = ""
                     }) { Text("Cancel") }
