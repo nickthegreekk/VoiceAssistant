@@ -199,16 +199,15 @@ fun PersonaSettings(
         }
     }
 
-    // The editor is a self-scrolling LazyColumn, so the section hands it its own scroll
-    // (no wrapper) under the same height bound every other section uses.
-    val editorOpen = editingPersona != null
+    // PersonaEditor is its own LazyColumn root, so it needs a bounded height to scroll
+    // inside. That bound belongs to the editor, not to the section surface: the section
+    // no longer caps or scrolls anything, and this keeps the editor working unchanged.
     SettingsExpandableSection(
         title = "Personas",
         icon = Icons.Default.Person,
         expanded = expanded,
         onToggle = onToggle,
         accentColor = currentThemeColor,
-        scrollableContent = !editorOpen,
         headerAction = {
             IconButton(onClick = { editingPersona = -1 to DEFAULT_PERSONAS[0].copy(name = "New Persona", themeColor = PERSONA_PALETTE.random()) }) {
                 Icon(Icons.Default.Add, null, tint = currentThemeColor)

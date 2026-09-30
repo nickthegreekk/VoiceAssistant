@@ -126,6 +126,17 @@ fun SettingsSection(content: @Composable () -> Unit) {
     }
 }
 
+/**
+ * Max height of the persona editor before it scrolls inside itself.
+ *
+ * PersonaEditor is a LazyColumn, so it REQUIRES a bounded height — an unbounded
+ * (infinite) height inside the page LazyColumn throws "Vertically scrollable component
+ * was measured with an infinity maximum height constraints". This bound is the editor's
+ * own, deliberately not the section surface's: sections are uncapped and page-scrolled,
+ * but the editor is a self-scrolling form, so it caps itself.
+ */
+internal val PersonaEditorMaxHeight = 420.dp
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PersonaEditor(
@@ -351,7 +362,10 @@ fun PersonaEditor(
         }
     }
 
-    LazyColumn(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+    LazyColumn(
+        modifier = Modifier.heightIn(max = PersonaEditorMaxHeight),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
         item {
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 Text("Edit Persona", style = MaterialTheme.typography.titleMedium)

@@ -138,35 +138,18 @@ private val CloudApiSettingSaver = Saver<CloudApiSetting?, String>(
 )
 
 /**
- * Max height of an expanded section's content before it starts scrolling internally.
- *
- * REQUIRED, not cosmetic: Personas/Cloud provider lists, the three server lists and the
- * Backup & Recovery form are all unbounded, and stacking five of them in one screen
- * would push the lower sections off-screen entirely.
- */
-internal val ExpandedSectionMaxHeight = 160.dp
-
-/**
- * Editors (persona editor, room editor) use the same bound as every other section.
- *
- * They bring their own scroller (LazyColumn / verticalScroll root), so the section
- * passes `scrollableContent = false` rather than wrapping them — but the height bound
- * is the same one, so every expanded section on screen behaves identically: content
- * larger than the bound scrolls inside it, and a stack of open sections still fits.
- */
-
-/**
  * One expandable Settings section: a tappable header row (leading icon, name, chevron)
- * that toggles this section only, plus a content surface shown when it is expanded.
+ * that toggles it, plus a content surface shown when it is expanded.
  *
- * Sections are independent — several can be open at once, which is the whole point of
- * the layout: the previous TabRow showed exactly one at a time and its five labels
- * were already truncating.
+ * Exclusive accordion: [SettingsDialog] keeps at most one section id open, so opening a
+ * section collapses whichever one was showing. The content is NOT height-capped and does
+ * NOT scroll here — an expanded section takes exactly the height its content needs, and
+ * the page-level LazyColumn is the single thing that reaches content below the fold.
  *
- * @param maxContentHeight upper bound on the content surface's height.
- * @param scrollableContent when true the content scrolls inside that bound. Pass false
- *   for content that brings its own scroller (PersonaEditor/RoomEditor are LazyColumn /
- *   verticalScroll roots) so the two never compete for the same drag.
+ * The editors (PersonaEditor/RoomEditor) are the one exception: they are self-scrolling
+ * by construction, so each bounds ITSELF (see PersonaEditorMaxHeight / RoomEditorMaxHeight)
+ * rather than borrowing a bound from here.
+ *
  * @param headerAction optional trailing control (e.g. the Personas "+" add button). It
  *   sits outside the tappable area so tapping it adds without toggling the section.
  */
@@ -177,8 +160,6 @@ fun SettingsExpandableSection(
     expanded: Boolean,
     onToggle: () -> Unit,
     accentColor: Color = MaterialTheme.colorScheme.primary,
-    maxContentHeight: Dp = ExpandedSectionMaxHeight,
-    scrollableContent: Boolean = true,
     headerAction: (@Composable () -> Unit)? = null,
     content: @Composable () -> Unit
 ) {
@@ -236,19 +217,10 @@ fun SettingsExpandableSection(
                 color = Color.Black.copy(alpha = 0.2f),
                 border = BorderStroke(1.dp, accentColor.copy(alpha = 0.25f))
             ) {
-                val bounded = Modifier
-                    .fillMaxWidth()
-                    .heightIn(max = maxContentHeight)
-                Box(
-                    modifier = if (scrollableContent) {
-                        bounded.verticalScroll(rememberScrollState())
-                    } else {
-                        bounded
-                    }
-                ) {
-                    Column(modifier = Modifier.padding(16.dp)) {
-                        content()
-                    }
+                // No heightIn and no inner scroller: the surface grows to fit its
+                // content, and the page-level LazyColumn does the scrolling.
+                Column(modifier = Modifier.padding(16.dp)) {
+                    content()
                 }
             }
         }
@@ -259,16 +231,15 @@ fun SettingsExpandableSection(
 @Composable
 fun SettingsDialog(service: AssistantService?, onDismiss: () -> Unit, personaColor: Color) {
     val context = LocalContext.current
+    // Exclusive accordion: at most ONE section id is open, so opening a section
+    // collapses whichever was showing. null = everything collapsed.
+    //
     // Ephemeral by design: a plain `remember` (not `rememberSaveable`, and nothing
     // written to SettingsManager) so every section is collapsed each time Settings
     // opens and no expand state is persisted across app restarts.
-    var expandedSections by remember { mutableStateOf(emptySet<String>()) }
+    var expandedSection by remember { mutableStateOf<String?>(null) }
     fun toggleSection(id: String) {
-        expandedSections = if (expandedSections.contains(id)) {
-            expandedSections - id
-        } else {
-            expandedSections + id
-        }
+        expandedSection = if (expandedSection == id) null else id
     }
 
     var totalCost by remember { mutableDoubleStateOf(0.0) }
@@ -340,7 +311,7 @@ fun SettingsDialog(service: AssistantService?, onDismiss: () -> Unit, personaCol
                             service = svc,
                             totalCost = totalCost,
                             onDismiss = onDismiss,
-                            expanded = expandedSections.contains("General"),
+                            expanded = expandedSection == "General",
                             onToggle = { toggleSection("General") },
                             accentColor = personaColor
                         )
@@ -351,7 +322,7 @@ fun SettingsDialog(service: AssistantService?, onDismiss: () -> Unit, personaCol
                             gateways = serverBases,
                             ollama = ollamaBases,
                             imageGen = imageGenBases,
-                            expanded = expandedSections.contains("Servers"),
+                            expanded = expandedSection == "Servers",
                             onToggle = { toggleSection("Servers") },
                             accentColor = personaColor
                         )
@@ -360,7 +331,7 @@ fun SettingsDialog(service: AssistantService?, onDismiss: () -> Unit, personaCol
                         CloudSettings(
                             service = svc,
                             apis = cloudApis,
-                            expanded = expandedSections.contains("Cloud"),
+                            expanded = expandedSection == "Cloud",
                             onToggle = { toggleSection("Cloud") },
                             accentColor = personaColor
                         )
@@ -370,7 +341,7 @@ fun SettingsDialog(service: AssistantService?, onDismiss: () -> Unit, personaCol
                             service = svc,
                             personas = personas,
                             currentThemeColor = personaColor,
-                            expanded = expandedSections.contains("Personas"),
+                            expanded = expandedSection == "Personas",
                             onToggle = { toggleSection("Personas") }
                         )
                     }
@@ -380,7 +351,7 @@ fun SettingsDialog(service: AssistantService?, onDismiss: () -> Unit, personaCol
                             rooms = rooms,
                             personas = personas,
                             currentThemeColor = personaColor,
-                            expanded = expandedSections.contains("Rooms"),
+                            expanded = expandedSection == "Rooms",
                             onToggle = { toggleSection("Rooms") }
                         )
                     }

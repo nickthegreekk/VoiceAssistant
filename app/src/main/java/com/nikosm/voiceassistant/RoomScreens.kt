@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -309,16 +310,15 @@ fun RoomSettings(
     var editingRoomId by rememberSaveable { mutableStateOf<String?>(null) }
     val editingRoom = rooms.find { it.id == editingRoomId }
 
-    // RoomEditor is its own verticalScroll root, so the section leaves scrolling to it
-    // under the same height bound every other section uses.
-    val editorOpen = editingRoom != null
+    // RoomEditor is its own verticalScroll root; like PersonaEditor it carries its own
+    // height bound (RoomEditorMaxHeight) so it still scrolls inside itself now that the
+    // section surface no longer caps or scrolls its content.
     SettingsExpandableSection(
         title = "Rooms",
         icon = Icons.Default.Forum,
         expanded = expanded,
         onToggle = onToggle,
         accentColor = currentThemeColor,
-        scrollableContent = !editorOpen,
         headerAction = {
             IconButton(onClick = {
                 // Seed a new room with the first two ELIGIBLE personas: a room needs
@@ -392,6 +392,16 @@ fun RoomSettings(
  * draft to drift. The name and cap fields are the only locals, mirroring
  * PersonaEditor's edit-then-commit discipline for text fields.
  */
+/**
+ * Max height of the room editor before it scrolls inside itself.
+ *
+ * RoomEditor is a `verticalScroll` root, which likewise requires a bounded height —
+ * unbounded inside the page LazyColumn throws "Vertically scrollable component was
+ * measured with an infinity maximum height constraints". The editor owns this bound
+ * itself, independently of the (now uncapped) section surface.
+ */
+internal val RoomEditorMaxHeight = 420.dp
+
 @Composable
 fun RoomEditor(room: Room, personas: List<Persona>, onClose: () -> Unit, service: AssistantService) {
     var name by rememberSaveable(room.id) { mutableStateOf(room.name) }
@@ -401,7 +411,7 @@ fun RoomEditor(room: Room, personas: List<Persona>, onClose: () -> Unit, service
     // The delete dialog asks whether the transcript goes with the room (default: yes).
     var deleteTranscript by rememberSaveable(room.id) { mutableStateOf(true) }
 
-    Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+    Column(modifier = Modifier.heightIn(max = RoomEditorMaxHeight).verticalScroll(rememberScrollState())) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onClose) {
                 Icon(Icons.Default.ChevronRight, null, modifier = Modifier.size(20.dp))
