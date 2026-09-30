@@ -358,6 +358,16 @@ fun MainScreen(service: AssistantService?) {
 
     var state by remember { mutableStateOf(AssistantState.IDLE) }
     var messages by remember { mutableStateOf<List<ChatMessage>>(emptyList()) }
+    // Room mode (Phase 3): which room is open, its transcript, and its round state.
+    // Collected from the service exactly like the single-chat flows above; the persona
+    // chat state (messages/currentPersona) is never touched by room mode, so leaving a
+    // room returns to the conversation that was there before.
+    var rooms by remember { mutableStateOf<List<Room>>(emptyList()) }
+    var activeRoomId by remember { mutableStateOf<String?>(null) }
+    var roomMessages by remember { mutableStateOf<List<RoomMessage>>(emptyList()) }
+    var roomRound by remember { mutableStateOf<RoomRoundState?>(null) }
+    var roomTextInput by rememberSaveable { mutableStateOf("") }
+    val roomListState = rememberLazyListState()
     var voiceDuration by remember { mutableIntStateOf(0) }
     var personaList by remember { mutableStateOf<List<Persona>>(emptyList()) }
     var sessionUsage by remember { mutableStateOf(UsageInfo()) }
@@ -402,6 +412,10 @@ fun MainScreen(service: AssistantService?) {
             launch { service.revealRestartRequest.collect { revealRestartRequest = it } }
             launch { service.pendingCertApproval.collect { pendingCert = it } }
             launch { service.updateAvailable.collect { updateInfo = it } }
+            launch { service.rooms.collect { rooms = it } }
+            launch { service.activeRoomId.collect { activeRoomId = it } }
+            launch { service.roomMessages.collect { roomMessages = it } }
+            launch { service.roomRound.collect { roomRound = it } }
         }
     }
 
@@ -731,35 +745,48 @@ fun MainScreen(service: AssistantService?) {
             personaColor = personaColor
         )
     } else {
+        // Room mode: the header shows the open room (name + member count + a Leave
+        // action) instead of the persona; currentPersona is left alone so the persona
+        // chat underneath is exactly as it was.
+        val activeRoom = rooms.find { it.id == activeRoomId }
         Scaffold(
             modifier = Modifier.fillMaxSize(),
             containerColor = MaterialTheme.colorScheme.background,
             topBar = {
-                Header(
-                    currentPersona = currentPersona,
-                    sessionUsage = sessionUsage,
-                    onPersonaClick = { showPersonaPicker = true },
-                    onEarpieceToggle = { service?.toggleEarpieceMode() },
-                    isEarpieceMode = isEarpieceMode,
-                    onSettingsClick = { showSettings = true },
-                    onTranslatorClick = {
-                        val t = personaList.find { it.isTranslator }
-                        if (t != null) {
-                            currentPersona = t
-                            service?.switchPersona(t)
-                            service?.clearMessages()
-                        } else {
-                            currentPersona = TRANSLATOR_PERSONA
-                            service?.addPersona(TRANSLATOR_PERSONA)
-                            service?.switchPersona(TRANSLATOR_PERSONA)
-                            service?.clearMessages()
-                        }
-                    },
-                    textModeOpen = textModeOpen,
-                    onTextModeToggle = { textModeOpen = !textModeOpen },
-                    silenced = silenced,
-                    onSilenceToggle = { service?.toggleSilence() }
-                )
+                if (activeRoom != null) {
+                    RoomHeader(
+                        room = activeRoom,
+                        onRoomClick = { showPersonaPicker = true },
+                        onLeaveClick = { service?.leaveRoom() },
+                        onSettingsClick = { showSettings = true }
+                    )
+                } else {
+                    Header(
+                        currentPersona = currentPersona,
+                        sessionUsage = sessionUsage,
+                        onPersonaClick = { showPersonaPicker = true },
+                        onEarpieceToggle = { service?.toggleEarpieceMode() },
+                        isEarpieceMode = isEarpieceMode,
+                        onSettingsClick = { showSettings = true },
+                        onTranslatorClick = {
+                            val t = personaList.find { it.isTranslator }
+                            if (t != null) {
+                                currentPersona = t
+                                service?.switchPersona(t)
+                                service?.clearMessages()
+                            } else {
+                                currentPersona = TRANSLATOR_PERSONA
+                                service?.addPersona(TRANSLATOR_PERSONA)
+                                service?.switchPersona(TRANSLATOR_PERSONA)
+                                service?.clearMessages()
+                            }
+                        },
+                        textModeOpen = textModeOpen,
+                        onTextModeToggle = { textModeOpen = !textModeOpen },
+                        silenced = silenced,
+                        onSilenceToggle = { service?.toggleSilence() }
+                    )
+                }
             }
         ) { innerPadding ->
             // Persona backdrop: an app-owned copy of the chosen image (see
@@ -839,7 +866,35 @@ fun MainScreen(service: AssistantService?) {
                         )
                     }
 
-                    if (celestialActive) {
+                    // Room mode owns the whole body: the room transcript + round status
+                    // + room input replace the voice/HUD body AND the ControlBar below.
+                    // The persona chat state above is untouched, so the normal UI below
+                    // renders exactly as before the moment the room is left.
+                    val roomScope = activeRoom
+                    if (roomScope != null) {
+                        RoomChatArea(
+                            room = roomScope,
+                            messages = roomMessages,
+                            personas = personaList,
+                            roundState = roomRound,
+                            chatFontSize = chatFontSize,
+                            textInput = roomTextInput,
+                            onTextInputChange = { roomTextInput = it },
+                            onSend = { text ->
+                                // The existing supersede path: a send during a round is
+                                // a new round, no new supersede logic here.
+                                if (service?.startRoomRound(roomScope, text) == true) {
+                                    roomTextInput = ""
+                                }
+                            },
+                            // The existing red Stop control, in room mode: stopRoomRound
+                            // instead of stopEverything (which also stops room rounds
+                            // via its markRoomRoundStopped hook, so both stay correct).
+                            onStop = { service?.stopRoomRound() },
+                            focusRequester = focusRequester,
+                            listState = roomListState
+                        )
+                    } else if (celestialActive) {
                         CelestialHudBody(
                             state = state,
                             personaColor = personaColor,
@@ -950,13 +1005,21 @@ fun MainScreen(service: AssistantService?) {
         PersonaSelector(
             personaList = personaList,
             currentPersona = currentPersona,
-            onPersonaSelected = { 
+            onPersonaSelected = {
                 currentPersona = it
                 showPersonaPicker = false
                 service?.switchPersona(it)
                 if (it.isTranslator) {
                     service?.clearMessages()
                 }
+            },
+            // Room entry point: selecting a room switches the main screen into room
+            // mode (switchRoom) without disturbing the persona chat state.
+            rooms = rooms,
+            activeRoomId = activeRoomId,
+            onRoomSelected = { room ->
+                showPersonaPicker = false
+                service?.switchRoom(room)
             },
             onDismiss = { showPersonaPicker = false },
             personaColor = personaColor
@@ -996,6 +1059,68 @@ fun MainScreen(service: AssistantService?) {
                 }
             }
         )
+    }
+}
+
+/**
+ * Room-mode header: the open room's name + member count, with a Leave action back to
+ * single chat. Selecting the room title re-opens the persona sheet (which lists rooms
+ * too); leaving calls leaveRoom() and reveals the untouched persona conversation.
+ */
+@Composable
+fun RoomHeader(
+    room: Room,
+    onRoomClick: () -> Unit,
+    onLeaveClick: () -> Unit,
+    onSettingsClick: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .statusBarsPadding()
+            .padding(horizontal = 16.dp, vertical = 8.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Row(
+                modifier = Modifier
+                    .weight(1f)
+                    .clip(MaterialTheme.shapes.small)
+                    .clickable { onRoomClick() }
+                    .padding(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(Icons.Default.Forum, null, tint = MaterialTheme.colorScheme.primary)
+                Spacer(modifier = Modifier.width(12.dp))
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        text = room.name,
+                        color = MaterialTheme.colorScheme.onBackground,
+                        style = MaterialTheme.typography.titleMedium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = if (room.memberNames.isEmpty()) "room · no members"
+                        else "room · ${room.memberNames.joinToString(", ")}",
+                        color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.4f),
+                        style = MaterialTheme.typography.labelSmall,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+
+            TextButton(onClick = onLeaveClick) {
+                Text("Leave")
+            }
+            IconButton(onClick = onSettingsClick, modifier = Modifier.size(48.dp)) {
+                Icon(Icons.Default.Settings, contentDescription = "Settings", tint = MaterialTheme.colorScheme.onBackground)
+            }
+        }
     }
 }
 

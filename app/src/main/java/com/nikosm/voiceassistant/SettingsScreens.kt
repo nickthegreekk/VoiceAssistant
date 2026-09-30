@@ -84,7 +84,12 @@ fun PersonaSelector(
     currentPersona: Persona,
     onPersonaSelected: (Persona) -> Unit,
     onDismiss: () -> Unit,
-    personaColor: Color
+    personaColor: Color,
+    // Room entry point (Phase 3): listed below the personas; selecting one switches
+    // the main screen into room mode. Defaults keep every existing call site working.
+    rooms: List<Room> = emptyList(),
+    activeRoomId: String? = null,
+    onRoomSelected: ((Room) -> Unit)? = null
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState, containerColor = MaterialTheme.colorScheme.surface) {
@@ -101,6 +106,14 @@ fun PersonaSelector(
                     Spacer(modifier = Modifier.width(16.dp))
                     Text(persona.name, style = MaterialTheme.typography.bodyLarge, color = if (persona.name == currentPersona.name) personaColor else MaterialTheme.colorScheme.onSurface)
                 }
+            }
+            if (onRoomSelected != null) {
+                RoomPickerRows(
+                    rooms = rooms,
+                    activeRoomId = activeRoomId,
+                    accentColor = personaColor,
+                    onRoomSelected = onRoomSelected
+                )
             }
             Spacer(modifier = Modifier.height(24.dp))
         }
@@ -124,7 +137,7 @@ private val CloudApiSettingSaver = Saver<CloudApiSetting?, String>(
 fun SettingsDialog(service: AssistantService?, onDismiss: () -> Unit, personaColor: Color) {
     val context = LocalContext.current
     var selectedTab by rememberSaveable { mutableIntStateOf(0) }
-    val tabs = listOf("General", "Servers", "Cloud", "Personas")
+    val tabs = listOf("General", "Servers", "Cloud", "Personas", "Rooms")
 
     var totalCost by remember { mutableDoubleStateOf(0.0) }
     var serverBases by remember { mutableStateOf<List<ServerConfig>>(emptyList()) }
@@ -132,6 +145,7 @@ fun SettingsDialog(service: AssistantService?, onDismiss: () -> Unit, personaCol
     var imageGenBases by remember { mutableStateOf<List<ServerConfig>>(emptyList()) }
     var cloudApis by remember { mutableStateOf<List<CloudApiSetting>>(emptyList()) }
     var personas by remember { mutableStateOf<List<Persona>>(emptyList()) }
+    var rooms by remember { mutableStateOf<List<Room>>(emptyList()) }
 
     LaunchedEffect(service) {
         if (service != null) {
@@ -141,6 +155,7 @@ fun SettingsDialog(service: AssistantService?, onDismiss: () -> Unit, personaCol
             launch { service.imageGenBases.collect { imageGenBases = it } }
             launch { service.cloudApis.collect { cloudApis = it } }
             launch { service.personas.collect { personas = it } }
+            launch { service.rooms.collect { rooms = it } }
         }
     }
 
@@ -188,6 +203,7 @@ fun SettingsDialog(service: AssistantService?, onDismiss: () -> Unit, personaCol
                         1 -> ServerSettings(service, serverBases, ollamaBases, imageGenBases)
                         2 -> CloudSettings(service, cloudApis)
                         3 -> PersonaSettings(service, personas, personaColor)
+                        4 -> RoomSettings(service, rooms, personas, personaColor)
                     }
                 }
 

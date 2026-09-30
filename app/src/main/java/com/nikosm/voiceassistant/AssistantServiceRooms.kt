@@ -154,13 +154,20 @@ internal fun AssistantService.moveRoomMember(roomId: String, from: Int, to: Int)
 }
 
 /**
- * Delete a room and its transcript.
+ * Delete a room, and (by default) its transcript.
  *
  * The transcript delete is queued on the room-history IO lane, joining any in-flight write
  * first, so a swap that is still writing this room's transcript can't resurrect the key
  * after the delete (the same ordering hazard `removePersona` handles for persona history).
+ *
+ * [deleteTranscript] is exposed for the editor's confirmation, which asks the user whether
+ * the transcript should go with the room. Keeping it leaves an orphaned-but-intact history
+ * key: nothing reads it (a recreated room gets a fresh UUID and can therefore never inherit
+ * an old transcript — see [Room.id]), so it is purely a "not destroyed yet" state, which is
+ * what the user asked for. The in-memory detach below happens either way: the deleted room
+ * must not stay on screen as the active room just because its history survived.
  */
-internal fun AssistantService.removeRoom(roomId: String) {
+internal fun AssistantService.removeRoom(roomId: String, deleteTranscript: Boolean = true) {
     val wasActive = _activeRoomId.value == roomId
     _rooms.value = _rooms.value.filterNot { it.id == roomId }
     if (wasActive) {
@@ -171,10 +178,12 @@ internal fun AssistantService.removeRoom(roomId: String) {
         _roomMessages.value = emptyList()
         roomMessagesOwnerId = null
     }
-    val previousIo = roomHistoryIoJob
-    roomHistoryIoJob = serviceScope.launch {
-        previousIo?.join()
-        withContext(Dispatchers.IO) { settingsManager.deleteRoomHistory(roomId) }
+    if (deleteTranscript) {
+        val previousIo = roomHistoryIoJob
+        roomHistoryIoJob = serviceScope.launch {
+            previousIo?.join()
+            withContext(Dispatchers.IO) { settingsManager.deleteRoomHistory(roomId) }
+        }
     }
     saveSettings()
 }

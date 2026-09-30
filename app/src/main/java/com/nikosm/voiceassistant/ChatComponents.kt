@@ -116,6 +116,12 @@ fun ChatMessageBubble(
     onLongClick: (() -> Unit)? = null,
     onReplayAudio: (() -> Unit)? = null,
     onRegenerateImage: (() -> Unit)? = null,
+    // Room mode only: who is speaking, and the color of that persona's theme.
+    // Both default to null so every single-persona call site renders EXACTLY as before
+    // (the chip below is skipped entirely). A null [speakerColor] on a labeled message
+    // (the speaker's persona was removed after the message was sent) renders neutral.
+    speakerLabel: String? = null,
+    speakerColor: Color? = null,
     modifier: Modifier = Modifier
 ) {
     val isUser = message.role == "user"
@@ -123,6 +129,38 @@ fun ChatMessageBubble(
         horizontalAlignment = horizontalAlignment,
         modifier = modifier
     ) {
+        // Multi-party speaker chip (Rooms): a small color-coded name above the bubble.
+        // Skipped for the user's own turns — those are already visually distinct (own
+        // alignment + own-voice color) and need no attribution — and in the celestial
+        // HUD's compact body, which is a voice surface with no room mode.
+        if (speakerLabel != null && !isUser && !isCompact) {
+            val chipColor = speakerColor ?: MaterialTheme.colorScheme.onSurfaceVariant
+            Surface(
+                modifier = Modifier
+                    .padding(bottom = 3.dp)
+                    .align(horizontalAlignment),
+                shape = MaterialTheme.shapes.small,
+                color = chipColor.copy(alpha = 0.16f)
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(6.dp)
+                            .background(chipColor, CircleShape)
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    Text(
+                        text = speakerLabel,
+                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                        color = chipColor
+                    )
+                }
+            }
+        }
+
         if (!message.reasoning.isNullOrBlank()) {
             var expandedReasoning by rememberSaveable { mutableStateOf(false) }
             Surface(
