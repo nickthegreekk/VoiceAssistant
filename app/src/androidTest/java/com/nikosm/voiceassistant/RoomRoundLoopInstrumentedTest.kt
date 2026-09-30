@@ -385,6 +385,120 @@ class RoomRoundLoopInstrumentedTest {
         }
     }
 
+    /**
+     * Property 2a (regression): a cap of 0 set THROUGH THE UI PARSER gives exactly one reply
+     * per persona and no autonomous continuation.
+     *
+     * Every other room test builds its room with a literal `autoReplyCap`, which bypasses the
+     * layer that was actually broken: the editor's parser used to reject a typed 0 outright
+     * and, before that, collapsed it into the blank/inherit sentinel so it persisted as
+     * `null`. Driving the round from the TEXT the editor would have committed means this test
+     * fails if the field can no longer express "initial round only" — the real user path —
+     * and not merely if the loop mishandles a 0 handed to it directly.
+     */
+    @Test
+    fun aZeroCapSetThroughTheEditorParserRunsTheInitialRoundOnly() {
+        RoomTurnServer().use { server ->
+            enterRoom(server, probeRoom(cap = null, members = listOf(LOCAL_A, LOCAL_B)))
+            val room = service.activeRoom!!
+
+            // Precondition: the room starts on the global default, so a 0 that came back as
+            // "inherit" could not be told apart from a 0 that was really stored.
+            assertEquals(
+                "precondition: an unset cap inherits the global default",
+                RoomReplyPolicy.DEFAULT_AUTO_REPLY_CAP,
+                RoomReplyPolicy.capFor(room)
+            )
+
+            // Exactly what the editor's Done button does with the text "0" in the field.
+            val committed = autoReplyCapOverrideOrNull("0")
+            assertEquals("the editor must accept a typed 0 as a real cap", 0, committed)
+            mainSync { service.updateRoomCap(room.id, committed) }
+
+            assertEquals(
+                "the stored override must be 0, NOT null (null would silently inherit)",
+                0,
+                service.activeRoom!!.autoReplyCap
+            )
+            assertEquals(
+                "capFor must resolve the explicit 0 rather than the default",
+                0,
+                RoomReplyPolicy.capFor(service.activeRoom!!)
+            )
+
+            assertTrue("the probe round never started", startRound(service.activeRoom!!, USER_FIRST))
+            awaitRoundSettled()
+
+            assertEquals(
+                "with a cap of 0 every persona answers EXACTLY once and nobody continues",
+                listOf(RoomMessage.USER_SPEAKER, LOCAL_A, LOCAL_B),
+                speakers()
+            )
+            assertEquals(
+                "only the two initial-round requests may reach the provider",
+                listOf(LOCAL_A, LOCAL_B),
+                server.requests.map { it.speakerTag }
+            )
+            assertNull("the round must settle", service.roomRound.value)
+            assertNoFurtherRequests(server, expected = 2)
+        }
+    }
+
+    /**
+     * Property 2b: a cap of 1 still buys exactly ONE extra message beyond the initial round —
+     * the behaviour verified before the cap-of-0 fix. Run alongside it so a fix for 0 that
+     * quietly shifted the cap's baseline would fail here rather than pass silently.
+     */
+    @Test
+    fun aOneCapSetThroughTheEditorParserStillAddsExactlyOneAutonomousMessage() {
+        RoomTurnServer().use { server ->
+            enterRoom(server, probeRoom(cap = null, members = listOf(LOCAL_A, LOCAL_B)))
+            val room = service.activeRoom!!
+
+            assertEquals("the editor must accept a typed 1 as a real cap", 1, autoReplyCapOverrideOrNull("1"))
+            mainSync { service.updateRoomCap(room.id, autoReplyCapOverrideOrNull("1")) }
+            assertEquals(1, RoomReplyPolicy.capFor(service.activeRoom!!))
+
+            assertTrue("the probe round never started", startRound(service.activeRoom!!, USER_FIRST))
+            awaitRoundSettled()
+
+            assertEquals(
+                "cap 1 is one extra message beyond the initial round — unchanged by the 0 fix",
+                listOf(RoomMessage.USER_SPEAKER, LOCAL_A, LOCAL_B, LOCAL_A),
+                speakers()
+            )
+            assertNoFurtherRequests(server, expected = 3)
+        }
+    }
+
+    /**
+     * Property 2c: blanking the field goes back to inheriting the default, so fixing the 0
+     * case did not steal the "clear the override" behaviour that shares the same text field.
+     */
+    @Test
+    fun blankingTheCapFieldGoesBackToInheritingTheDefault() {
+        RoomTurnServer().use { server ->
+            enterRoom(server, probeRoom(cap = 0, members = listOf(LOCAL_A, LOCAL_B)))
+            val room = service.activeRoom!!
+            assertEquals("precondition: the room starts capped at 0", 0, RoomReplyPolicy.capFor(room))
+
+            // The editor commits `null` for a blank field — that must clear the override,
+            // not be swallowed, and must NOT be mistaken for the cap value 0.
+            assertNull(autoReplyCapOverrideOrNull(""))
+            mainSync { service.updateRoomCap(room.id, autoReplyCapOverrideOrNull("")) }
+
+            assertNull(
+                "blanking the field must clear the override",
+                service.activeRoom!!.autoReplyCap
+            )
+            assertEquals(
+                "a cleared override inherits the default again",
+                RoomReplyPolicy.DEFAULT_AUTO_REPLY_CAP,
+                RoomReplyPolicy.capFor(service.activeRoom!!)
+            )
+        }
+    }
+
     // ---- harness ----------------------------------------------------------------------------
 
     /**

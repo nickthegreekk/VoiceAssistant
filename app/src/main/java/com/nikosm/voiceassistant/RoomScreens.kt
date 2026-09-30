@@ -140,33 +140,68 @@ internal fun roomMemberCandidates(
     }
 
 /**
- * Cap value the editor's field maps to: [ROOM_CAP_INVALID] when the text is not a
- * committable cap, 0 for "inherit the global default" (blank), else the integer.
+ * Cap value the editor's field maps to.
+ *
+ * Three DISTINCT outcomes, deliberately not sharing a sentinel:
+ *  - [ROOM_CAP_INVALID] — the text is not a committable cap (garbage, or negative). The
+ *    editor shows this as an error and refuses to commit.
+ *  - [ROOM_CAP_INHERIT] — the field is blank, meaning "use the global default".
+ *  - anything >= 0 — a real cap, including 0.
+ *
+ * 0 used to double as the blank/inherit marker, which is what made it impossible to
+ * express "initial round only": the parser read a typed 0 as the inherit sentinel and
+ * then collapsed it to `null`. "Inherit" now has a sentinel of its own, so 0 survives
+ * parsing as the value it is.
  */
 internal const val ROOM_CAP_INVALID = Int.MIN_VALUE
 
+/** Blank field = "inherit the global default". Distinct from the cap value 0 on purpose. */
+internal const val ROOM_CAP_INHERIT = Int.MIN_VALUE + 1
+
+/** Lowest cap a room may be set to: initial round only, no autonomous continuation. */
+internal const val ROOM_CAP_MIN = 0
+
+/**
+ * Parse the editor's cap field. Returns [ROOM_CAP_INHERIT] for blank, [ROOM_CAP_INVALID]
+ * for anything uncommittable, else the cap itself — [ROOM_CAP_MIN] (`0`) included, since
+ * 0 is a real setting ("no autonomous continuation"), not an absence of one.
+ */
 internal fun parseAutoReplyCap(text: String): Int {
     val trimmed = text.trim()
-    if (trimmed.isEmpty()) return 0 // blank = use the global default
+    if (trimmed.isEmpty()) return ROOM_CAP_INHERIT // blank = use the global default
     val value = trimmed.toIntOrNull() ?: return ROOM_CAP_INVALID
-    return if (value > 0) value else ROOM_CAP_INVALID
+    return if (value >= ROOM_CAP_MIN) value else ROOM_CAP_INVALID
 }
 
-/** What the cap field should persist for [text], or null when not committable. */
+/**
+ * What the cap field should persist for [text], or null when not committable.
+ *
+ * [ROOM_CAP_INHERIT] is the ONLY path to null — a parsed 0 persists as 0, so clearing a
+ * room's cap to "initial round only" is a real, storable value rather than a silent
+ * reversion to the global default.
+ */
 internal fun autoReplyCapOverrideOrNull(text: String): Int? {
     val parsed = parseAutoReplyCap(text)
-    if (parsed == ROOM_CAP_INVALID) return null
-    return if (parsed == 0) null else parsed
+    if (parsed == ROOM_CAP_INVALID || parsed == ROOM_CAP_INHERIT) return null
+    return parsed
 }
 
 /** One-line member summary for a room row ("Bob, Alice" / "No members yet"). */
 internal fun roomMemberSummary(room: Room): String =
     if (room.memberNames.isEmpty()) "No members yet" else room.memberNames.joinToString(", ")
 
-/** One-line cap summary for a room row, naming the effective source. */
+/**
+ * One-line cap summary for a room row, naming the effective source.
+ *
+ * A cap of 0 is spelled out rather than printed bare: "cap 0/round" on its own reads as
+ * "no limit", which is the exact opposite of what it does — it means nobody speaks again
+ * on their own.
+ */
 internal fun roomCapSummary(room: Room): String =
-    room.autoReplyCap?.let { "cap $it/round" }
-        ?: "cap ${RoomReplyPolicy.DEFAULT_AUTO_REPLY_CAP}/round (default)"
+    room.autoReplyCap?.let { cap ->
+        if (cap == ROOM_CAP_MIN) "initial round only (no autonomous replies)"
+        else "cap $cap/round"
+    } ?: "cap ${RoomReplyPolicy.DEFAULT_AUTO_REPLY_CAP}/round (default)"
 
 // ---------------------------------------------------------------- Bottom-sheet entry
 
@@ -365,8 +400,10 @@ fun RoomEditor(room: Room, personas: List<Persona>, onClose: () -> Unit, service
                         service.updateRoom(room.copy(name = trimmed))
                     }
                     val cap = autoReplyCapOverrideOrNull(capText)
-                    // Commit only when committable: blank (inherit) and positive ints
-                    // persist; garbage keeps the current value, never coerces.
+                    // Commit only when committable: blank (inherit), 0 (initial round only)
+                    // and positive ints all persist; garbage keeps the current value, never
+                    // coerces. `cap != room.autoReplyCap` is a genuine change check — 0 and
+                    // null are different states, so a room already at 0 is not rewritten.
                     if (parseAutoReplyCap(capText) != ROOM_CAP_INVALID && cap != room.autoReplyCap) {
                         service.updateRoomCap(room.id, cap)
                     }
@@ -410,10 +447,30 @@ fun RoomEditor(room: Room, personas: List<Persona>, onClose: () -> Unit, service
             }),
             isError = parseAutoReplyCap(capText) == ROOM_CAP_INVALID,
             supportingText = {
-                if (parseAutoReplyCap(capText) == ROOM_CAP_INVALID) {
-                    Text("Enter a positive number, or leave blank for the default.")
+                val parsed = parseAutoReplyCap(capText)
+                if (parsed == ROOM_CAP_INVALID) {
+                    Text("Enter 0 or a positive number, or leave blank for the default.")
+                } else if (parsed == ROOM_CAP_INHERIT) {
+                    Text(
+                        "How many persona-to-persona messages a round may add after everyone " +
+                            "has answered you. Blank uses the default of " +
+                            "${RoomReplyPolicy.DEFAULT_AUTO_REPLY_CAP}; 0 means nobody replies " +
+                            "on their own. Applies to the next round."
+                    )
+                } else if (parsed == ROOM_CAP_MIN) {
+                    // Spell 0 out. It is the one value that reads as "disabled" but is NOT:
+                    // it does not switch rooms off, it stops only the self-started chatter.
+                    Text(
+                        "Initial round only. Everyone answers you once, then the round stops — " +
+                            "nobody replies on their own. Rooms still work normally. Applies to " +
+                            "the next round."
+                    )
                 } else {
-                    Text("Total persona-to-persona messages before a round stops itself. Applies on the next round.")
+                    Text(
+                        "Everyone answers you once, then up to $parsed persona-to-persona " +
+                            "messages are added before the round stops itself. Use 0 for " +
+                            "initial round only. Applies to the next round."
+                    )
                 }
             },
             modifier = Modifier.fillMaxWidth()

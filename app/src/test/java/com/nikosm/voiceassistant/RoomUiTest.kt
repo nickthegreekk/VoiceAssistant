@@ -3,6 +3,7 @@ package com.nikosm.voiceassistant
 import androidx.compose.ui.graphics.Color
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -115,8 +116,10 @@ class RoomUiTest {
     // ------------------------------------------------------------- Cap parsing
 
     @Test fun `blank cap means inherit the global default`() {
-        assertEquals(0, parseAutoReplyCap(""))
-        assertEquals(0, parseAutoReplyCap("   "))
+        // Blank is its OWN sentinel, never the value 0: conflating the two is what made
+        // "exactly one reply each, no continuation" unexpressible in the first place.
+        assertEquals(ROOM_CAP_INHERIT, parseAutoReplyCap(""))
+        assertEquals(ROOM_CAP_INHERIT, parseAutoReplyCap("   "))
         assertNull(autoReplyCapOverrideOrNull(""))
     }
 
@@ -125,9 +128,34 @@ class RoomUiTest {
         assertEquals(6, autoReplyCapOverrideOrNull(" 6 "))
     }
 
-    @Test fun `garbage and non-positive caps are not committable`() {
+    @Test fun `a cap of zero is committable and persists as zero`() {
+        // The regression this pins: 0 used to parse to ROOM_CAP_INVALID (field turned red,
+        // Done disabled), and even once parsed it collapsed to null via the inherit
+        // sentinel. Both halves are asserted, because either alone re-breaks the feature.
+        assertEquals(0, parseAutoReplyCap("0"))
+        assertEquals(0, parseAutoReplyCap(" 0 "))
+        assertEquals(0, autoReplyCapOverrideOrNull("0"))
+        assertNotEquals(
+            "0 must not be confused with 'inherit the global default'",
+            ROOM_CAP_INHERIT,
+            parseAutoReplyCap("0")
+        )
+        assertNotEquals(
+            "0 must not be confused with 'garbage, refuse to commit'",
+            ROOM_CAP_INVALID,
+            parseAutoReplyCap("0")
+        )
+    }
+
+    @Test fun `zero and blank stay distinguishable end to end`() {
+        // Same-shaped inputs, opposite meanings, and only ONE of them may collapse to null.
+        assertNull(autoReplyCapOverrideOrNull(""))
+        assertEquals(0, autoReplyCapOverrideOrNull("0"))
+    }
+
+    @Test fun `garbage and negative caps are not committable`() {
         assertEquals(ROOM_CAP_INVALID, parseAutoReplyCap("abc"))
-        assertEquals(ROOM_CAP_INVALID, parseAutoReplyCap("0"))
+        assertEquals(ROOM_CAP_INVALID, parseAutoReplyCap("1.5"))
         assertEquals(ROOM_CAP_INVALID, parseAutoReplyCap("-3"))
         assertNull(autoReplyCapOverrideOrNull("abc"))
     }
@@ -139,5 +167,12 @@ class RoomUiTest {
         assertEquals("Bob, Alice", roomMemberSummary(Room(name = "R", memberNames = listOf("Bob", "Alice"))))
         assertEquals("cap 4/round (default)", roomCapSummary(Room(name = "R")))
         assertEquals("cap 7/round", roomCapSummary(Room(name = "R", autoReplyCap = 7)))
+    }
+
+    @Test fun `a zero cap is spelled out, never rendered as a bare 0`() {
+        // "cap 0/round" reads as "no limit", the opposite of what 0 does.
+        val summary = roomCapSummary(Room(name = "R", autoReplyCap = 0))
+        assertFalse("a zero cap must not print as a bare number", summary.contains("cap 0"))
+        assertTrue("it must say the continuation is off, not unbounded", summary.contains("no autonomous"))
     }
 }

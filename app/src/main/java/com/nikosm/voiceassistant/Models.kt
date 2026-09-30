@@ -160,6 +160,9 @@ data class Room(
      * Cap on TOTAL autonomous (persona-to-persona) messages in one round, summed across
      * every participant — not rounds, and not per participant. `null` means "inherit the
      * global default" so changing the global setting later updates existing rooms.
+     *
+     * `0` is a real value meaning "initial round only, no autonomous continuation"; it is
+     * never treated as unset. See [RoomReplyPolicy.capFor].
      */
     val autoReplyCap: Int? = null,
     val createdAt: Long = System.currentTimeMillis()
@@ -285,7 +288,15 @@ object RoomReplyPolicy {
      */
     const val DEFAULT_AUTO_REPLY_CAP = 4
 
-    /** The effective cap for [room]. */
+    /**
+     * The effective cap for [room].
+     *
+     * 0 is a REAL cap, not an "unset" marker: `?:` only falls back on `null`, so a room
+     * explicitly set to 0 resolves to 0 and the turn loop's `while (emitted < cap)` never
+     * enters — the initial round still runs in full, and only the self-started
+     * continuation is suppressed. "Inherit the default" is expressed by `null`, never by
+     * 0, and the editor's parser keeps those two apart via ROOM_CAP_INHERIT.
+     */
     fun capFor(room: Room): Int = room.autoReplyCap ?: DEFAULT_AUTO_REPLY_CAP
 
     /**

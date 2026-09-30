@@ -328,6 +328,35 @@ class SettingsManagerCorruptionTest {
         assertEquals(messages.single().timestamp, restored.single().timestamp)
     }
 
+    @Test fun `a zero cap round-trips as zero, not as an absent cap`() {
+        // The serialization hazard behind "0 means initial round only": a stored 0 must come
+        // back as 0. If it decayed to null on the way, the room would silently inherit the
+        // default and resume autonomous chatter the user had switched off — and a null here
+        // is exactly what an absent key looks like, so this pins the two apart.
+        val (manager, _) = newManagerWithPlainPrefs()
+        manager.savePersonas(
+            listOf(
+                Persona("A", androidx.compose.ui.graphics.Color(0xFF4ADE80), "[S] m", "sys"),
+                Persona("B", androidx.compose.ui.graphics.Color(0xFF60A5FA), "[S] m", "sys")
+            )
+        )
+        manager.saveRooms(
+            listOf(
+                Room(id = "zero", name = "Zero", memberNames = listOf("A", "B"), autoReplyCap = 0),
+                Room(id = "inherit", name = "Inherit", memberNames = listOf("A", "B"), autoReplyCap = null)
+            )
+        )
+        val loaded = manager.getRooms()!!.associateBy { it.id }
+        assertEquals(0, loaded.getValue("zero").autoReplyCap)
+        assertNull("an unset cap must still read back as null", loaded.getValue("inherit").autoReplyCap)
+        assertEquals(0, RoomReplyPolicy.capFor(loaded.getValue("zero")))
+        assertEquals(
+            "only the unset room inherits the default",
+            RoomReplyPolicy.DEFAULT_AUTO_REPLY_CAP,
+            RoomReplyPolicy.capFor(loaded.getValue("inherit"))
+        )
+    }
+
     @Test fun `restoring prunes room members the restore dropped but keeps the transcript`() {
         val (manager, _) = newManagerWithPlainPrefs()
         // The backup knows "A" and "B"; only "A" survives the restore.

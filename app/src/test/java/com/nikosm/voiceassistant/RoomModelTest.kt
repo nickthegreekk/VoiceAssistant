@@ -4,6 +4,7 @@ import androidx.compose.ui.graphics.Color
 import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -133,6 +134,24 @@ class RoomModelTest {
         assertEquals(4, RoomReplyPolicy.DEFAULT_AUTO_REPLY_CAP)
         assertEquals(4, RoomReplyPolicy.capFor(room("A", "B")))
         assertEquals(9, RoomReplyPolicy.capFor(room("A", "B", cap = 9)))
+    }
+
+    @Test fun `a cap of zero is a real cap, not an unset marker`() {
+        // The design contract this guards: 0 means "initial round only, no autonomous
+        // continuation". capFor must return 0 here and fall back to the default ONLY for
+        // null — if it ever coalesced 0 into the default, a user who asked for "one reply
+        // each" would silently get four messages of personas talking among themselves.
+        assertEquals(0, RoomReplyPolicy.capFor(room("A", "B", cap = 0)))
+        assertNotEquals(
+            "a 0 cap must not silently resolve to the global default",
+            RoomReplyPolicy.DEFAULT_AUTO_REPLY_CAP,
+            RoomReplyPolicy.capFor(room("A", "B", cap = 0))
+        )
+        // The two states that mean different things must not collide.
+        assertEquals(
+            RoomReplyPolicy.DEFAULT_AUTO_REPLY_CAP,
+            RoomReplyPolicy.capFor(room("A", "B", cap = null))
+        )
     }
 
     @Test fun `cloud personas join the initial round but never the autonomous one`() {
