@@ -93,6 +93,13 @@ private val EditingPersonaSaver = Saver<Pair<Int, Persona>?, String>(
     class MainActivity : ComponentActivity() {
     private var assistantService by mutableStateOf<AssistantService?>(null)
     private var isBound = false
+
+    /**
+     * Persona name carried by a spontaneous-message notification tap. `MutableState` (not a
+     * plain field) so Compose picks up a tap that lands while the tree is already composed —
+     * `onNewIntent` fires with no recomposition of its own.
+     */
+    private var deepLinkPersona by mutableStateOf<String?>(null)
     private val connection = object : android.content.ServiceConnection {
         override fun onServiceConnected(name: android.content.ComponentName?, service: android.os.IBinder?) {
             val binder = service as AssistantService.AssistantBinder
@@ -139,8 +146,36 @@ private val EditingPersonaSaver = Saver<Pair<Int, Persona>?, String>(
                 if (bound == null) adaptiveTheme = false
                 else bound.adaptiveTheme.collect { adaptiveTheme = it }
             }
-            VoiceAssistantTheme(dynamicColor = adaptiveTheme) { MainScreen(svc) }
+            VoiceAssistantTheme(dynamicColor = adaptiveTheme) {
+                MainScreen(
+                    service = svc,
+                    deepLinkPersona = deepLinkPersona,
+                    onDeepLinkHandled = { deepLinkPersona = null }
+                )
+            }
         }
+        // O3: a cold start from a notification tap arrives via onCreate, not onNewIntent.
+        handleSpontaneousDeepLink(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        // O3: with launchMode="singleTop", a tap while the activity exists (backgrounded OR
+        // foreground — the foreground case keeps working because the state above is picked
+        // up) routes here instead of stacking a second instance.
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleSpontaneousDeepLink(intent)
+    }
+
+    /**
+     * Pull [EXTRA_TARGET_PERSONA_NAME] out of a notification tap into [deepLinkPersona].
+     * The actual switch waits for `MainScreen` for two reasons: the service may not be
+     * bound yet (cold start), and only the UI knows which overlays (`showSettings`,
+     * room mode) would hide the chat the notification promised.
+     */
+    private fun handleSpontaneousDeepLink(intent: Intent?) {
+        val target = intent?.getStringExtra(EXTRA_TARGET_PERSONA_NAME)?.takeIf { it.isNotBlank() }
+        if (target != null) deepLinkPersona = target
     }
 
     override fun onResume() {

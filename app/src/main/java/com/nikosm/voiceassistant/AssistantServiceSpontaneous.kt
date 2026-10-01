@@ -1,7 +1,9 @@
 package com.nikosm.voiceassistant
 
+import java.time.ZoneId
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.Credentials
 import okhttp3.MediaType.Companion.toMediaType
@@ -315,16 +317,172 @@ private suspend fun AssistantService.performSpontaneousOllamaCall(
     }
 }
 
+// ---------------------------------------------------------------- scheduling hooks
+
+/**
+ * Apply a spontaneous-message notification tap.
+ *
+ * Lives on the SERVICE, not in the composable, because everything it touches is service
+ * state: the persona list, the selection, and room mode. The composable keeps only the two
+ * things only it can do — close its own overlays and mirror the selection — which also makes
+ * this decision testable without composing the screen.
+ *
+ * Returns the selected persona, or `null` when the name no longer exists. **A null return is
+ * still a consumed tap**: the caller must clear the request either way, or a stale name would
+ * sit there and ambush the next tap.
+ *
+ * O14: the extra names the persona, never a message — nothing here scrolls anywhere.
+ * O4: a tap is always honoured, even mid-turn on another persona; `switchPersona`
+ * `stopEverything()`s first, so it interrupts that turn exactly as tapping in the picker does.
+ */
+internal fun AssistantService.applySpontaneousDeepLink(personaName: String): Persona? {
+    val persona = personas.value.find { it.name == personaName }
+    if (persona == null) {
+        android.util.Log.w("VoiceAssistant", "Deep link for '$personaName' ignored — persona is gone")
+        return null
+    }
+    switchPersona(persona)
+    // The notification promised a conversation, so room mode must not stay in front of it.
+    // Ordered after the switch only because switchPersona cannot re-enter a room.
+    if (activeRoomId.value != null) leaveRoom()
+    return persona
+}
+
+/**
+ * Arm — or leave alone — the unique WorkManager chain for [personaName].
+ *
+ * [force] decides between two very different jobs:
+ *
+ *  - `false` (the default, and what `loadSettings` uses): a SAFETY NET. It only arms when
+ *    nothing is pending, and never replaces. WorkManager already persists and reboots the
+ *    request on its own, so unconditionally re-arming here would restart the countdown on
+ *    every service start and could cancel a run that is mid-turn. This is also what picks
+ *    up personas that reached storage without passing through `updatePersona`, such as an
+ *    `importBackup`.
+ *  - `true` (what `updatePersona` uses when `spontaneousScheduleDiffers` says the schedule
+ *    actually changed): a RESET. The previous delay was computed from settings that no
+ *    longer hold, so both slots are cleared and slot 0 is armed fresh. Clearing first — and
+ *    arming into slot 0 rather than "whichever slot is free" — is what keeps a reset from
+ *    ever leaving two live chains for one persona.
+ *
+ * Either way the chain is dropped when the persona is gone, switched off or no longer
+ * eligible — the same precondition test the worker re-runs at execution time, evaluated
+ * here so the timer stops promptly instead of waiting out the gap.
+ *
+ * The WorkManager calls run on `Dispatchers.IO`: `getWorkInfosForUniqueWork().get()` blocks,
+ * and `serviceScope` is a Main-dispatcher scope.
+ */
+internal fun AssistantService.refreshSpontaneousSchedule(personaName: String, force: Boolean = false) {
+    serviceScope.launch {
+        val persona = settingsManager.getPersonas()?.find { it.name == personaName }
+        if (persona == null ||
+            !persona.spontaneousEnabled ||
+            !SpontaneousPolicy.isEligible(persona, ollamaServerNames(), cloudProviderNames())
+        ) {
+            withContext(Dispatchers.IO) {
+                disarmSpontaneousWork(applicationContext, personaName)
+                // The chain is gone, so a card still sitting in the shade would open a chat
+                // that will never hear from this persona again. The two must move together,
+                // which is why they are cleared in one place rather than at each caller.
+                cancelSpontaneousNotification(applicationContext, personaName)
+            }
+            return@launch
+        }
+        withContext(Dispatchers.IO) {
+            if (force) {
+                // Order matters here — and unlike the in-run re-arm, this one really is
+                // order-sensitive, because WorkManager processes cancels and enqueues in
+                // submission order. Clearing both slots first means the fresh arm can only
+                // ever leave one live chain.
+                disarmSpontaneousWork(applicationContext, personaName)
+            } else if (isSpontaneouslyArmed(applicationContext, personaName)) {
+                return@withContext
+            }
+            val now = System.currentTimeMillis()
+            armSpontaneousWork(
+                context = applicationContext,
+                personaName = personaName,
+                // A fresh start always begins in slot 0; the worker owns the alternation
+                // from there. Any leftover slot-1 entry was cleared by the disarm above (or
+                // never existed, on the safety-net path).
+                slot = 0,
+                // One full gap from NOW: the first message arrives after a gap, not the
+                // instant the toggle is switched on, and the delay is clamped into the
+                // window so arming never schedules something out of hours.
+                delayMillis = nextSpontaneousAttempt(
+                    lastAttemptAt = now,
+                    gapMillis = SpontaneousPolicy.effectiveGapMinutes(persona) * 60_000L,
+                    now = now,
+                    zoneId = ZoneId.systemDefault(),
+                    windowStartMin = persona.spontaneousWindowStartMin,
+                    windowEndMin = persona.spontaneousWindowEndMin
+                ) - now
+            )
+        }
+    }
+}
+
+/** Stop the chain for a persona that was deleted or renamed out from under it. */
+internal fun AssistantService.removeSpontaneousSchedule(personaName: String) {
+    serviceScope.launch(Dispatchers.IO) {
+        disarmSpontaneousWork(applicationContext, personaName)
+        cancelSpontaneousNotification(applicationContext, personaName)
+    }
+}
+
+/**
+ * Safety net over every persona, called once when settings load. Never replaces pending
+ * work — see [refreshSpontaneousSchedule].
+ */
+internal fun AssistantService.refreshAllSpontaneousSchedules() {
+    // Reads the IN-MEMORY list, which `loadSettings` has already run the load-time guard
+    // over — so this schedules the personas the service will actually serve, not whatever
+    // happens to be sitting in `personas_v2` underneath it.
+    personas.value
+        .filter { it.spontaneousEnabled }
+        .forEach { refreshSpontaneousSchedule(it.name, force = false) }
+}
+
+
 // ---------------------------------------------------------------- orchestration
+
+/**
+ * What one spontaneous turn produced.
+ *
+ * The turn's job stops at "produce a message and put it in this persona's history"; turning
+ * that into a *delivery* is the caller's, because only the caller knows whether delivery is
+ * wanted. That split is what lets the scheduler notify while the editor's send-now button
+ * does not: the button's user is already looking at the conversation, so a notification
+ * would be a duplicate of the screen in front of them.
+ *
+ * Transport failures are deliberately NOT a variant here — they are thrown, per the contract
+ * established in step 4 and relied on by both callers. See [SpontaneousTurnOutcome.Skipped]
+ * for the non-throwing "there was nothing to do" cases.
+ */
+internal sealed interface SpontaneousTurnOutcome {
+    /** A message really did land in the persona's history, with the text that landed. */
+    data class Sent(val text: String) : SpontaneousTurnOutcome
+
+    /** The model chose silence. Nothing was written, and nothing should be delivered. */
+    data object Silent : SpontaneousTurnOutcome
+
+    /**
+     * The turn could not be attributed to a live target (server removed, persona deleted
+     * between the guard and the write). Note this is NOT a transport failure: the request was
+     * never made, so it must not be reported as "unreachable" or re-armed on that basis.
+     */
+    data class Skipped(val reason: String) : SpontaneousTurnOutcome
+}
 
 /**
  * Run one spontaneous turn for [persona] and land its message in that persona's history.
  *
- * Silence (see [parseSpontaneousReply]) and failure are both normal outcomes and both write
- * NOTHING — a background message that could not be produced must not leave an error bubble in
- * a conversation the user never asked about. Failures are logged only.
+ * Silence (see [parseSpontaneousReply]) and the skipped cases are normal outcomes and both
+ * write NOTHING — a background message that could not be produced must not leave an error
+ * bubble in a conversation the user never asked about. Transport failures are logged by the
+ * caller and, again, write nothing.
  */
-internal suspend fun AssistantService.runSpontaneousTurn(persona: Persona) {
+internal suspend fun AssistantService.runSpontaneousTurn(persona: Persona): SpontaneousTurnOutcome {
     // Resolve the "[Server] model" form exactly as the router does. Eligibility was already
     // checked by the caller; a miss here means the server was deleted in between, which is a
     // skip rather than an error.
@@ -338,7 +496,7 @@ internal suspend fun AssistantService.runSpontaneousTurn(persona: Persona) {
     val baseUrl = displayServer?.let { name -> _ollamaBaseUrls.value.find { it.name == name }?.url }
     if (baseUrl == null) {
         android.util.Log.w("AssistantService", "Spontaneous turn skipped — server '$displayServer' is gone")
-        return
+        return SpontaneousTurnOutcome.Skipped("server '$displayServer' is gone")
     }
 
     val history = withContext(Dispatchers.IO) {
@@ -362,7 +520,7 @@ internal suspend fun AssistantService.runSpontaneousTurn(persona: Persona) {
     val text = parseSpontaneousReply(content)
     if (text == null) {
         android.util.Log.i("AssistantService", "Spontaneous turn for '${persona.name}' chose silence — nothing sent")
-        return
+        return SpontaneousTurnOutcome.Silent
     }
 
     val index = sink.append(
@@ -372,12 +530,25 @@ internal suspend fun AssistantService.runSpontaneousTurn(persona: Persona) {
         // The persona was deleted between the guard and the write; the output is dropped
         // rather than filed against a persona that no longer exists.
         android.util.Log.w("AssistantService", "Spontaneous turn for '${persona.name}' discarded — persona gone")
-        return
+        return SpontaneousTurnOutcome.Skipped("persona '${persona.name}' is gone")
     }
     sink.persist()
+
+    // Record the send HERE rather than at either call site, so the editor's send-now button
+    // and the scheduler's worker cannot disagree about when this persona last spoke. This
+    // is the ONLY writer of `lastSentAt`: silence (above) and failure (which never reaches
+    // here) leave it untouched, which is exactly why a quiet persona keeps its schedule
+    // instead of pushing its own gap forward forever.
+    val sentAt = System.currentTimeMillis()
+    settingsManager.recordSpontaneousSent(
+        personaName = persona.name,
+        at = sentAt,
+        todayDate = spontaneousToday(sentAt, java.time.ZoneId.systemDefault())
+    )
     android.util.Log.i(
         "AssistantService",
         "Spontaneous message from '${persona.name}' landed (${text.length} chars, ${responseTimeMs}ms)"
     )
+    return SpontaneousTurnOutcome.Sent(text)
 }
 

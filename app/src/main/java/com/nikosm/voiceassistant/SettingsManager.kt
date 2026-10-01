@@ -310,6 +310,56 @@ class SettingsManager(context: Context) {
         } catch (e: Exception) { null }
     }
 
+    // ----------------------------------------------------------- Spontaneous state
+
+    private val SPONTANEOUS_STATE_KEY = "spontaneous_state_v1"
+
+    /**
+     * Read every persona's delivery state at once. Corruption-tolerant like every other
+     * stored-format read in here: one bad entry degrades to "no state", never to a startup
+     * crash.
+     */
+    fun getSpontaneousStates(): Map<String, SpontaneousState> {
+        val data = prefs.getString(SPONTANEOUS_STATE_KEY, null) ?: return emptyMap()
+        return runCatching { json.decodeFromString<Map<String, SpontaneousState>>(data) }
+            .onFailure { e ->
+                Log.w(
+                    "SettingsManager",
+                    "$SPONTANEOUS_STATE_KEY is corrupted/unreadable — ignoring entry, returning no state",
+                    e
+                )
+            }
+            .getOrDefault(emptyMap())
+    }
+
+    fun spontaneousStateFor(personaName: String): SpontaneousState =
+        getSpontaneousStates()[personaName] ?: SpontaneousState()
+
+    /**
+     * Record that [personaName] actually SENT a message at [at] on [todayDate].
+     *
+     * Only ever called on a genuine send — silence and failures leave the state untouched,
+     * which is what stops a persona that keeps declining from pushing its own gap forward
+     * and never speaking again.
+     */
+    fun recordSpontaneousSent(personaName: String, at: Long, todayDate: String) {
+        val current = spontaneousStateFor(personaName)
+        val sameDay = current.sentTodayDate == todayDate
+        val updated = SpontaneousState(
+            lastSentAt = at,
+            sentTodayCount = if (sameDay) current.sentTodayCount + 1 else 1,
+            sentTodayDate = todayDate
+        )
+        val all = getSpontaneousStates() + (personaName to updated)
+        prefs.edit().putString(SPONTANEOUS_STATE_KEY, json.encodeToString(all)).apply()
+    }
+
+    fun deleteSpontaneousState(personaName: String) {
+        val all = getSpontaneousStates()
+        if (personaName !in all) return
+        prefs.edit().putString(SPONTANEOUS_STATE_KEY, json.encodeToString(all - personaName)).apply()
+    }
+
     fun saveMessages(messages: List<ChatMessage>) {
         prefs.edit().putString("chat_history_v2", json.encodeToString(messages)).apply()
     }

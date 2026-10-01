@@ -75,6 +75,11 @@ dependencies {
     implementation(libs.androidx.security.crypto)
     implementation(libs.kotlinx.serialization.json)
     implementation("com.squareup.okhttp3:okhttp:5.5.0")
+    // Spontaneous-message scheduling (step 5). Deliberately NOT used for exact timing —
+    // WorkManager batches and defers for battery, which the persona editor states out loud.
+    // Chosen over AlarmManager chiefly because it reschedules itself across reboots and
+    // this app has no boot receiver.
+    implementation(libs.androidx.work.runtime.ktx)
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.19.2")
     testImplementation(libs.junit)
     // Real org.json for JVM tests: the android.jar stub's JSONObject returns default
@@ -86,6 +91,9 @@ dependencies {
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
     androidTestImplementation(libs.androidx.espresso.core)
     androidTestImplementation(libs.androidx.junit)
+    // Lets an instrumented test drive SpontaneousDeliveryWorker directly (TestWorkerBuilder)
+    // and inspect the unique-work chain it leaves behind, without waiting out a real delay.
+    androidTestImplementation(libs.androidx.work.testing)
     debugImplementation(libs.androidx.compose.ui.test.manifest)
     debugImplementation(libs.androidx.compose.ui.tooling)
 

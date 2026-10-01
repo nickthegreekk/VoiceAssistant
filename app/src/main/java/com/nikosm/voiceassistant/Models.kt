@@ -421,6 +421,28 @@ object RoomReplyPolicy {
     fun participatesInAutonomousRounds(cloud: Boolean): Boolean = !cloud
 }
 
+/** Observable per-persona delivery counters for the spontaneous scheduler (step 5). */
+@Serializable
+data class SpontaneousState(
+    /**
+     * Epoch millis of the last message this persona actually SENT. 0 = never.
+     * The gap is measured from this, never from a scheduled slot — which is what makes
+     * "no catch-up" structural: after any outcome the next attempt is derived from here
+     * and from `now`, so a phone that was off for two days cannot replay missed slots.
+     */
+    val lastSentAt: Long = 0L,
+
+    /** Messages sent on [sentTodayDate]. Reset (not summed) when the local date rolls. */
+    val sentTodayCount: Int = 0,
+
+    /**
+     * Device-local `yyyy-MM-dd` the counter belongs to. `sentTodayCount` is only meaningful
+     * when this equals today; storing the date rather than clearing the count on a rollover
+     * keeps the decision a pure comparison and survives process death for free.
+     */
+    val sentTodayDate: String = ""
+)
+
 /**
  * How spontaneous (persona-initiated) messaging is bounded, and the ONE guard function
  * every write path funnels through.
@@ -446,6 +468,22 @@ object SpontaneousPolicy {
 
     /** Daily cap used when [Persona.spontaneousMaxPerDay] is 0. */
     const val DEFAULT_MAX_PER_DAY = 6
+
+    /**
+     * O10: ceiling on spontaneous messages across ALL personas for one local day, not just
+     * per persona.
+     *
+     * The per-persona cap bounds a single persona but says nothing about the aggregate: six
+     * personas at the default of 6 would be 36 unsolicited notifications a day, and because
+     * they all default to the same 4-hour gap they would happily arrive together. 12 is
+     * roughly two an hour if spread evenly — enough for the feature to feel alive on a phone
+     * with several personas enabled, and clearly not enough to be mistaken for spam.
+     *
+     * Enforced in `evaluateSpontaneousCycle` alongside the per-persona cap, so a persona that
+     * loses the global race is simply NOT DUE (re-armed for tomorrow), never cancelled.
+     */
+    const val GLOBAL_MAX_PER_DAY = 12
+
 
     // Reasons are constants rather than inline strings so the editor's gate and this
     // policy cannot show different wording for the same decision.
@@ -474,8 +512,15 @@ object SpontaneousPolicy {
         else DEFAULT_GAP_MINUTES
 
     /** The daily cap actually honoured. */
-    fun effectiveMaxPerDay(persona: Persona): Int =
-        if (persona.spontaneousMaxPerDay > 0) persona.spontaneousMaxPerDay else DEFAULT_MAX_PER_DAY
+    fun effectiveMaxPerDay(persona: Persona): Int = effectiveMaxPerDay(persona.spontaneousMaxPerDay)
+
+    /**
+     * [effectiveMaxPerDay] for a raw stored value, mirroring [effectiveGapMinutes]: same
+     * rule, one place, so the scheduler and the editor can never disagree about whether
+     * 0 means "unset" (it does) rather than "no messages today" (it does not).
+     */
+    fun effectiveMaxPerDay(storedMaxPerDay: Int): Int =
+        if (storedMaxPerDay > 0) storedMaxPerDay else DEFAULT_MAX_PER_DAY
 
     /**
      * THE guard. Returns [persona] with [Persona.spontaneousEnabled] forced to `false`
@@ -529,6 +574,31 @@ fun eligibleRoomMembers(
 ): List<Persona> = personas.filter {
     it.roomEligibility(ollamaServerNames, cloudProviderNames) is RoomEligibility.Eligible
 }
+
+/**
+ * Which persona a stored selection NAME refers to, i.e. the one join that turns "the active
+ * name" into "the active persona".
+ *
+ * Extracted so it exists exactly once. It was previously written out twice with two different
+ * fallback policies — `AssistantService.currentPersona` (null when unresolved) and the VAD
+ * speech-end path (which substitutes `firstOrNull()` because it must send *something*). Those
+ * two keep their own fallbacks; what they no longer duplicate is the lookup itself.
+ *
+ * Resolution is **by name**, and returns the stored instance rather than a copy, so every
+ * consumer observes the same object the service holds. Consequences worth knowing:
+ *
+ *  - `null` name (no selection) and a name absent from the list both resolve to `null`. The
+ *    "unresolved" state is deliberately NOT repaired here — re-pointing the selection is a
+ *    policy decision with history side effects, and it belongs to a caller that can perform
+ *    the switch, not to a pure lookup.
+ *  - A duplicated name resolves to the FIRST occurrence, deterministically. Nothing enforces
+ *    persona name uniqueness (unlike server configs, which reject duplicate URLs), so this is
+ *    a real possibility; making both consumers agree on the first match is still strictly
+ *    better than the previous arrangement, where the UI could display one same-named persona
+ *    while the service resolved to another.
+ */
+internal fun resolveCurrentPersona(name: String?, personas: List<Persona>): Persona? =
+    name?.let { wanted -> personas.find { it.name == wanted } }
 
 
 data class CertApprovalRequest(

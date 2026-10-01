@@ -40,7 +40,12 @@ import kotlin.concurrent.Volatile
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.stateIn
 import okhttp3.*
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.asRequestBody
@@ -326,7 +331,23 @@ class AssistantService : Service() {
     val _knowledgeUploadStatus = MutableStateFlow("")
     val knowledgeUploadStatus = _knowledgeUploadStatus.asStateFlow()
 
-    internal var currentPersonaName: String? = null
+    // The active persona's NAME — the single source of truth for "who is selected".
+    //
+    // Backed by a flow rather than a plain field so the selection is *observable*. It was a
+    // bare `var`, which meant nothing owned the selection: the service published the persona
+    // LIST and the MESSAGES, while "which one is active" was only readable by polling. Every
+    // consumer that needed to react therefore had to be told separately, by hand — which is
+    // exactly how a persona switch could move the service while a UI mirror kept showing the
+    // previous persona (the spontaneous-message deep-link bug).
+    //
+    // Deliberately still a `var` with the same name and type, backed by the flow: every
+    // existing writer — switchPersona, the rename path, the delete fallback, the cold-start
+    // seed — and every test that stages a scenario by assigning it keep working unchanged,
+    // and each write now PUBLISHES automatically instead of having to remember to.
+    internal var currentPersonaName: String?
+        get() = _currentPersonaName.value
+        set(value) { _currentPersonaName.value = value }
+    private val _currentPersonaName = MutableStateFlow<String?>(null)
 
     // L5: persona history lives in SharedPreferences as one JSON blob per persona, and both
     // switchPersona and clearMessages used to read/write it ON THE MAIN THREAD — a persona tap
@@ -492,6 +513,33 @@ class AssistantService : Service() {
 
     private val _personas = MutableStateFlow<List<Persona>>(emptyList())
     val personas = _personas.asStateFlow()
+
+    /**
+     * The active persona, DERIVED from [currentPersonaName] and [personas] — the single value
+     * every consumer observes instead of mirroring.
+     *
+     * The join itself is [resolveCurrentPersona], so it exists once. `distinctUntilChanged`
+     * keeps an edit to an unrelated persona (the editor republishes the whole list on every
+     * keystroke) from producing a new emission: what matters is whether the RESOLVED persona
+     * changed, not whether the list did.
+     *
+     * `SharingStarted.Eagerly` rather than `WhileSubscribed`: the value has to be current
+     * whether or not anyone is collecting, because a late subscriber (the UI after a rotation)
+     * must not see a stale or null selection, and because it makes `.value` readable in tests
+     * without a collector. The cost is one coroutine on the existing [serviceScope] for the
+     * service's lifetime.
+     *
+     * Null is a real state — "no persona selected" — so this stays nullable rather than
+     * inventing a fallback; picking a substitute persona is a policy decision (see
+     * [resolveCurrentPersona]).
+     *
+     * Declared after [serviceScope] and [_personas] because its initialiser starts collecting
+     * at construction.
+     */
+    val currentPersonaFlow: StateFlow<Persona?> =
+        combine(_currentPersonaName, _personas) { name, list -> resolveCurrentPersona(name, list) }
+            .distinctUntilChanged()
+            .stateIn(serviceScope, SharingStarted.Eagerly, null)
 
     // ---------------------------------------------------------------- Skills
     // The shared, persona-independent instruction library. Deliberately ONE list every
@@ -1342,6 +1390,14 @@ class AssistantService : Service() {
         _personas.value = _personas.value.map {
             SpontaneousPolicy.sanitize(it, ollamaServerNames(), cloudProviderNames())
         }
+        // Spontaneous scheduling (step 5): safety net, deliberately NEVER replacing work
+        // that is already pending. WorkManager persists the request across process death
+        // and reboot on its own, so re-arming unconditionally here would restart every
+        // countdown on each service start (a user opening the app hourly would never see a
+        // 4-hour gap elapse) and could REPLACE a run that is mid-turn. What this does catch
+        // is personas that reached storage without passing through add/updatePersona — an
+        // importBackup being the one that matters — where nothing has armed them at all.
+        refreshAllSpontaneousSchedules()
         _imageGenBases.value = settingsManager.getImageGenBases()?.takeIf { it.isNotEmpty() } ?: listOf(ServerConfig("Local A1111", "http://0.0.0.0:7860"))
         // Rooms load AFTER the Ollama/cloud server lists, because eligibility is judged
         // against them: a member whose backing server has since been deleted, or which is
@@ -1693,6 +1749,9 @@ class AssistantService : Service() {
         val guarded = SpontaneousPolicy.sanitize(persona, ollamaServerNames(), cloudProviderNames())
         _personas.value = _personas.value + guarded
         saveSettings()
+        // A new persona may already be enabled (added by a restore, or created from a
+        // template), and there is certainly no chain for it yet, so arm it outright.
+        refreshSpontaneousSchedule(guarded.name, force = true)
     }
 
     fun updatePersona(index: Int, persona: Persona) {
@@ -1747,6 +1806,18 @@ class AssistantService : Service() {
             // unaffected — those compare name and image paths, never this flag.
             current[index] = SpontaneousPolicy.sanitize(persona, ollamaServerNames(), cloudProviderNames())
             _personas.value = current
+            // Spontaneous scheduling (step 5): touching WorkManager is not free — REPLACE
+            // restarts the countdown AND cancels any run currently in flight — so it happens
+            // only when the save actually changed something the schedule is derived from.
+            // A prompt/temperature/artwork edit must leave the timer exactly where it was.
+            // Compared against the PREVIOUS stored persona and the SANITIZED new one, so a
+            // guard flipping spontaneousEnabled off counts as a change (and disarms).
+            if (spontaneousScheduleDiffers(previous, current[index])) {
+                // The unique-work key is the persona name, so a rename orphans the old
+                // chain — drop it explicitly rather than waiting for its own guard to fire.
+                if (oldName != current[index].name) removeSpontaneousSchedule(oldName)
+                refreshSpontaneousSchedule(current[index].name, force = true)
+            }
             // Artwork lifecycle: a save that REPLACED a slot points the persona at a
             // new file, and a save that CLEARED one points it at null — either way the
             // previously referenced file is now unreachable and would sit in filesDir
@@ -1949,7 +2020,12 @@ class AssistantService : Service() {
                 }
             }
             _personas.value = current
+            // Spontaneous scheduling (step 5): drop the chain for the name that no longer
+            // exists. Without this the timer would keep ticking until its next run, at
+            // which point the guard would end it anyway — this just makes it immediate.
+            removeSpontaneousSchedule(removedName)
             // Followup to Fix #4: the removal must also drop the persona's persisted
+
             // history — a genuine deletion leaves no persona_messages_<name> entry
             // behind on disk. (Rename is handled by migratePersonaHistory in
             // updatePersona and MIGRATES rather than deletes, so this only ever fires
@@ -2500,13 +2576,13 @@ class AssistantService : Service() {
         if (persona.voiceMode == VoiceMode.BUNDLED_ESPEAK) warmUpEspeakEngine()
     }
 
-    // The persona the service currently considers active. The UI seeds itself from
-    // this on (re)bind — the service outlives the Activity, so after rotation this
-    // IS the user's actual selection, and reading it prevents the old behavior of
-    // silently resetting to the default persona on every recreation. Null when no
+    // The persona the service currently considers active, DERIVED through the same
+    // [resolveCurrentPersona] join that `currentPersonaFlow` uses, so the synchronous read and
+    // the observable one can never disagree. Kept because service-internal logic needs a pull
+    // read with no dispatch delay; observers should collect `currentPersonaFlow`. Null when no
     // persona is selected yet, or the selected name no longer exists in the list.
     val currentPersona: Persona?
-        get() = currentPersonaName?.let { name -> _personas.value.find { it.name == name } }
+        get() = resolveCurrentPersona(currentPersonaName, _personas.value)
 
     fun clearMessages() { 
         // Clear-chat is the same "move on" gesture as a persona switch: an in-flight
@@ -2830,7 +2906,9 @@ class AssistantService : Service() {
                     // outlives persona switches, and the old start-of-session capture ran
                     // every utterance with (and then had it silently discarded by
                     // isChatContextCurrent against) whatever persona was first in the list.
-                    val resolvedPersona = currentPersonaName?.let { name -> personas.value.find { it.name == name } }
+                    // Shares the one join with currentPersona/currentPersonaFlow; the extra
+                    // fallback is this path's own requirement — it must send SOMETHING.
+                    val resolvedPersona = resolveCurrentPersona(currentPersonaName, personas.value)
                         ?: personas.value.firstOrNull() ?: DEFAULT_PERSONAS[0]
                     sendAudioToServer(file, resolvedPersona)
                 },

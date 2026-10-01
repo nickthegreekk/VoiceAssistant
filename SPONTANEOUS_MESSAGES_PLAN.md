@@ -1031,3 +1031,268 @@ scheduler, no `SpontaneousState` store, no notification. The button's toast is n
    false-positive strip a legitimately-enabled local persona. The gate `#1` will use the
    tested `spontaneousEligibility` predicate once there is a section to render.
 
+### Phase 5 (step 5) — the scheduler: DONE
+
+(The arm/disarm API below is described as it shipped in step 5. A follow-up before step 6
+replaced the single `spontaneous/<personaName>` name with the alternating slots
+`spontaneous/<personaName>/0|1` — see §10a — because `REPLACE` cancelling the run that
+performs the re-arm was a statement-ordering landmine enforced only by a comment.)
+
+**Delivered**
+
+- **Dependency.** `androidx.work:work-runtime-ktx:2.10.0` (`libs.versions.toml` +
+  `app/build.gradle.kts`), plus `work-testing` for `androidTest` only. WorkManager over
+  AlarmManager for one decisive reason: it is the only candidate that **reschedules itself
+  across reboot**, and this app has **no boot receiver** — anything else would silently stop
+  after a restart. It also needs no custom `Application` (its initializer arrives via
+  `androidx.startup`).
+- **`SpontaneousScheduler.kt`** (new; pure, no Android and no network in the decision path) —
+  `SpontaneousDecision` (`Cancel` / `NotDue(absoluteInstant)` / `Proceed`),
+  `SpontaneousCycleRequest`, `isInSpontaneousWindow`, `nextWindowOpen`, `nextDailyReset`,
+  `clampIntoWindow`, `nextSpontaneousAttempt` (the no-catch-up rule),
+  `withSpontaneousJitter`, `spontaneousScheduleDiffers`, `resolveSpontaneousTarget`,
+  `preflightSpontaneousServer`, `describeSpontaneousFailure`.
+- **`SpontaneousDeliveryWorker.kt`** (new) — `armSpontaneousWork` / `disarmSpontaneousWork` /
+  `isSpontaneouslyArmed`, `spontaneous/<personaName>` + `Constraints.NONE` +
+  `ExistingWorkPolicy.REPLACE`, `useAssistantService` (bind/unbind), and the worker itself.
+- **`SpontaneousState`** in `Models.kt`; store in `SettingsManager` under
+  `spontaneous_state_v1` (`Map<String, SpontaneousState>` keyed by persona name, NOT on
+  `Persona` — a field there could be written back stale by an open editor):
+  `getSpontaneousStates`, `spontaneousStateFor`, `recordSpontaneousSent`,
+  `deleteSpontaneousState`.
+- **`runSpontaneousTurn` now records the send**, via `settingsManager.recordSpontaneousSent`.
+  It is the *only* writer of `lastSentAt`, so the send-now button and the worker cannot
+  disagree, and silence/failure leave the counter alone.
+- **Wiring.** `addPersona` → force-arm; `updatePersona` → arm/disarm **only when
+  `spontaneousScheduleDiffers`** says the schedule changed (a prompt/temperature/artwork edit
+  must not restart the countdown or cancel a run in flight), with an explicit disarm of the
+  old name on rename; `removePersona` → disarm; `loadSettings` → `refreshAllSpontaneousSchedules`
+  as a safety net that **never replaces pending work** (see deviation 3 below).
+
+**Classification, and why it is total.** Step 4's contract is what makes the worker small:
+`runSpontaneousTurn` *throws* on transport errors and *returns normally* on silence, so
+nothing here has to guess. Preconditions (persona gone / toggle off / no longer eligible) are
+decided **before any network I/O**, and they are the only path that ends the chain — so an
+offline server can never silently switch the feature off, and a deleted persona can never be
+mistaken for one.
+
+| outcome | re-arm |
+|---|---|
+| not due (window / per-persona cap / global cap / gap) | at the exact computed instant, clamped into the window |
+| precondition gone | **no** — the chain ends (`Result.success()`, and no `cancelUniqueWork`) |
+| attempt made (sent, silent, unreachable, or threw) | one full gap from **now** |
+
+- **No `Result.retry()`**, per §2.5: WorkManager's exponential backoff would desynchronise the
+  gap. Failure and silence both re-arm one full gap from the attempt, which is also what stops
+  a dead server becoming a tight wake-up loop.
+- **No catch-up, structurally.** There is no list of missed slots to replay: exactly one run
+  exists per persona, and every re-arm derives from `max(lastAttemptAt + gap, now)`.
+- **Preflight before the expensive part.** The cheap `GET /api/tags` (4s timeouts) runs
+  *before* `AssistantService` is bound, so an offline phone costs one short request rather
+  than TTS + VAD + a pricing sync.
+
+**O10 (global daily budget) landed here.** `SpontaneousPolicy.GLOBAL_MAX_PER_DAY = 12`,
+summed across every persona's `sentTodayCount` for the local date and checked in
+`evaluateSpontaneousCycle`. Losing that race is **`NotDue`, never `Cancel`** — the budget
+refills tomorrow, so the timer has to survive to see it.
+
+**Deviations, all deliberate**
+
+1. **The worker BINDS `AssistantService`; it does not start it.** O1's constraint was "do not
+   start the FGS", and binding honours it: `bindService(BIND_AUTO_CREATE)` never runs
+   `onStartCommand`, and `startForeground` is only ever called from there. The alternative —
+   reimplementing the turn against `SettingsManager` — would have meant moving the budget
+   helpers out of the service and teaching `PersonaHistorySink` a third mode, i.e. rewriting
+   the code step 4 had just verified. Binding also means that when the app is open the turn
+   runs against the *live* service, so a spontaneous message lands in the on-screen persona's
+   conversation exactly as the send-now button does. Cost, stated plainly: when the app is not
+   open at all, the worker constructs the full service for one turn — `onCreate` builds TTS,
+   starts a periodic 30-second `checkServerHealth` sweep and calls `syncOpenRouterPricing`,
+   all of which the app already pays on every launch, and all of which `onDestroy` tears down
+   again the moment `unbindService` runs. The preflight makes sure that cost is only ever paid
+   when a message is genuinely about to be generated.
+2. **`armSpontaneousWork` must be the LAST statement of any run that calls it.**
+   `ExistingWorkPolicy.REPLACE` cancels the work that currently holds the unique name —
+   including the run making the call. That is safe only because cancellation can land at a
+   suspension point, so nothing is suspended after the call and `SpontaneousState` is already
+   written. It is an ordering contract in the KDoc, not an accident.
+3. **`loadSettings` never replaces pending work.** Unconditional re-arming on service start
+   would restart every countdown on every app open (a user opening the app hourly would never
+   see a 4-hour gap elapse) and could cancel a run mid-turn. It arms only what
+   `getWorkInfosForUniqueWork` says is not already `ENQUEUED`/`RUNNING`, which is still what
+   picks up personas that reached storage without passing through `updatePersona` — an
+   `importBackup` being the one that matters.
+4. **Ordering inside the decision is window → caps → gap, not the plan's gap → window.** Both
+   orders are correct (`NotDue` always carries an already-clamped instant, so no ordering can
+   let a message slip out of hours); they differ only in how many no-op wake-ups it takes to
+   converge. Window-first costs one extra do-nothing run when a persona's gap expires shortly
+   *after* its window opens. Kept anyway, because it mirrors the plan's step list — and the
+   cost is named in the KDoc rather than hidden.
+5. **§2.2 step 6 says "record `lastSentAt` / `sentToday`, then re-arm"; the recording happens
+   inside `runSpontaneousTurn` instead of in the worker.** One writer, both callers (worker and
+   send-now button), and structurally impossible to forget.
+
+**Verification**
+
+- **30 new JVM tests** in `SpontaneousSchedulerTest` (293 total, 0 failures): the window's
+  inclusive endpoints, one-sided bounds, the zero-width case and the **midnight wrap**;
+  zone-driven `minuteOfDay` / `today`; `nextWindowOpen` today / tomorrow / midnight;
+  `nextDailyReset` with and without a window; the no-catch-up rule (a two-day sleep collapses
+  onto *now*, and the next attempt is never in the past); re-arm-from-attempt; every
+  precondition and every schedule branch of `evaluateSpontaneousCycle`; the global cap;
+  `spontaneousScheduleDiffers` over all seven inputs plus a negative control; jitter's bound
+  and its refusal to leave the window; target parsing; failure classification.
+- **Mutation-verified** (each mutation applied alone, in `SpontaneousScheduler.kt`):
+
+  | mutation | tests that failed |
+  |---|---|
+  | `maxOf(lastAttemptAt + gap, now)` → `lastAttemptAt + gap` | `an already-elapsed gap collapses onto now…` |
+  | drop the midnight-wrap branch | `an overnight window wraps past midnight`, `the daily reset waits for midnight…` |
+  | drop the global cap | `the global budget blocks every persona at once…` |
+  | missing persona `Cancel` → `NotDue` | `a deleted persona cancels even when every schedule says go` |
+  | drop the window gate | `outside the window postpones to the opening…` |
+
+- **10 new on-device tests** in `SpontaneousWorkerInstrumentedTest`: arm / disarm / `REPLACE`
+  behaviour against the real WorkManager instance; per-persona name isolation; the worker
+  *ends* the chain for a missing persona and for a switched-off one; it *re-arms* for an
+  eligible persona outside its window — with that last case acting as the **control** proving
+  the "0 pending" assertions above are the cancel path and not a worker that never arms
+  anything; an unattributed run arms nothing; and `SpontaneousState` round-trips through
+  encrypted storage, rolls its counter on a new date, and stays independent per persona.
+- Full JVM suite, full on-device suite and `assembleDebug` re-run after every edit.
+
+### Phase 6 (step 6) — notification delivery + the deep link: DONE
+
+**Delivered**
+
+- **`SpontaneousNotifications.kt`** (new) — the ONLY place persona-initiated notifications
+  are posted, kept entirely away from the FGS status UI:
+  - `SPONTANEOUS_CHANNEL_ID = "spontaneous_messages_channel"`, `IMPORTANCE_DEFAULT` —
+    distinct from `assistant_service_channel` (`IMPORTANCE_LOW`, `setOngoing`), so muting
+    check-ins and muting the service are separate user choices (§1.2's stated consequence);
+  - per-persona IDs from `spontaneousNotificationId` (pure, base 1000) plus a group summary
+    at ID 2 — three orders of magnitude clear of the FGS `NOTIFICATION_ID = 1` it must never
+    overwrite;
+  - `BigTextStyle`, `setAutoCancel(true)`, **never** `setOngoing`, grouped so a burst
+    collapses instead of stacking banners;
+  - a **per-persona `PendingIntent` request code** — without it Android reuses the first
+    cached intent and taps open the WRONG chat, which is invisible until two personas are
+    enabled.
+- **`SpontaneousTurnOutcome`** (`Sent` / `Silent` / `Skipped`) — `runSpontaneousTurn` now
+  reports what happened, so delivery attaches to a real send and nothing else. The decided
+  split: the TURN produces and persists, the CALLER delivers. That is why the editor's
+  send-now button does not notify (its user is looking at the conversation) while the worker
+  does.
+- **Deep link** per §4.3: `android:launchMode="singleTop"` on `MainActivity`
+  (a global Activity change — see the deviation note), `onNewIntent` **and** `onCreate` both
+  read `EXTRA_TARGET_PERSONA_NAME`, and `MainScreen(service, deepLinkPersona, onDeepLinkHandled)`
+  honours it: closes settings / the picker, applies
+  `AssistantService.applySpontaneousDeepLink` (select the persona, leave room mode), and
+  consumes the request exactly once. O14: the extra names the **persona**, never a message.
+- **`cancelSpontaneousNotification` is wired**, not merely defined: both disarm paths
+  (toggle off / no longer eligible, and persona deleted or renamed) clear the chain and the
+  card together, so a cancelled chain cannot leave a notification that opens a chat which
+  then never hears again.
+
+**A real bug the deep-link test caught, in the code this phase added.** `switchPersona`
+publishes `currentPersonaName` and `_messages` but **never `_personas`** — so
+`LaunchedEffect(personaList)`, the only other thing that re-resolves the UI's `currentPersona`
+mirror, does not re-run. A deep link that only called `switchPersona` would switch the
+service while the header, theme colour and per-persona chrome kept showing the persona the
+user had just left. The picker path never showed this because it sets `currentPersona = it`
+explicitly; the deep-link path had to do the same, and now does (declared after
+`currentPersona`, since a Compose `var` cannot be referenced above its own declaration).
+An earlier revision of the test asserted a private *replica* of the effect, which by
+construction could not see this; the replica was deleted rather than kept.
+
+**Verified — and the verification is the interesting part**
+
+- **`SpontaneousDeepLinkInstrumentedTest`** (service-layer, deterministic): a tap selects the
+  named persona and returns it for the UI to mirror; a tap for a missing persona returns null
+  and moves nothing (still consumed); a tap leaves room mode, so the user lands on the
+  conversation rather than a room transcript. **Mutation-verified**: removing the
+  `switchPersona` + `leaveRoom` pair fails exactly `a tap selects the named persona` and
+  `a tap leaves room mode`, and leaves the missing-persona control green — so the tests are
+  specific, not just present.
+- **`SpontaneousDeepLinkActivityInstrumentedTest`**: `launchMode` really is `singleTop` in the
+  INSTALLED manifest, and the `PendingIntent` extra survives an Intent round-trip under the
+  same key the activity reads.
+- **298 JVM tests** and **121 on-device tests**, 0 failures, plus `assembleDebug`, on a full
+  `--rerun-tasks` build.
+
+**A test that was written, proved something, and was then deleted — with the gap named.**
+The first version of the UI coverage composed the whole `MainScreen` against the live bound
+service and asserted the rendered persona name. Standalone it passed, and it was
+mutation-verified there: deleting `currentPersona = persona` from the deep-link effect failed
+it and nothing else. Inside the full suite it could not run reliably — after the service half
+passed, the Compose host's root registry came back empty for that one test, while a sibling
+canary composing a plain `Text` in the same class passed in the same run (so the host itself
+was fine, and the failure was not a masked composition crash: the exception was unwrapped and
+reported rather than swallowed). Redirecting the assert to `assertExists`, pausing the test
+clock (the screen's `MicRing` starts an unconditional `rememberInfiniteTransition`, so a
+composed `MainScreen` is never idle), forcing the non-first-run layout, and printing the
+underlying failure were all tried; none made it deterministic in-suite.
+A test that cries wolf is worse than no test, so it was replaced rather than kept. What that
+decision leaves uncovered, stated rather than implied: **one line, `currentPersona = persona`
+in `MainScreen`'s deep-link effect**, which is the only thing standing between the service
+switching and the header/theme actually following it. Its necessity is demonstrated (the
+standalone mutation run above) but not enforced by the standing suite. Closing it properly
+means making the persona selection observable on the service (`currentPersonaName` is a plain
+field, which is *why* every mutation site must remember to update a UI mirror — the picker
+does, the deep link originally did not) rather than testing the mirror; that is a separate,
+wider change and is not attempted here.
+
+**The deep-link decision itself moved to the service** (`applySpontaneousDeepLink`) for this
+reason: selecting a persona and leaving room mode are service state, so they belong with it
+and are testable without a Compose host. The composable is left with only what it can own —
+closing its own overlays and mirroring the selection.
+
+**Deviation: `launchMode="singleTop"` is a global Activity change (O3).** It affects every
+future intent into `MainActivity`, not just notification taps. Taken knowingly: it is what
+makes a tap route to `onNewIntent` instead of stacking a second instance, and the stacking
+fallback was rejected because a second instance would bind the service again and orphan the
+deep-link state in the first. The existing `bindService` in `onCreate` survives `onNewIntent`
+untouched, which the activity test pins indirectly by asserting the installed launchMode.
+
+**O4, honoured and named.** A tap is always honoured, including while a turn is in flight on
+another persona — `switchPersona` `stopEverything()`s first, interrupting that turn, exactly
+as tapping that persona in the selector would. Documented at the effect, not left implicit.
+
+
+### §10a — arm-ordering follow-up: the re-arm landmine, removed structurally
+
+**The problem, stated without euphemism.** Step 5's `armSpontaneousWork` used a single
+unique name per persona with `ExistingWorkPolicy.REPLACE`. REPLACE cancels every
+uncompleted work under that name — including the run performing the re-arm — so the call had
+to be the run's last statement, enforced by a KDoc contract. That is exactly the kind of
+invariant that survives until someone adds an innocent `Log` line after the call six months
+later and the run starts dying mid-flight with the successor already queued.
+
+**Why not a regression test for the ordering.** It would not fail for the right reason: a
+worker driven via `TestListenableWorkerBuilder` has no WorkManager job for the cancellation
+to land on, so a test that arms and then adds a suspending statement stays green while
+production breaks. The correct fix is to make the ordering irrelevant, not to pin it.
+
+**The fix.** Two unique names per persona — `spontaneous/<name>/0|1` — alternating on every
+hand-off, with the run's own slot carried in the request (`EXTRA_SLOT`, default 0 so
+hand-built requests are still safe). A run in slot 0 always arms slot 1 and vice versa, so
+REPLACE can never see the caller's own name; `disarmSpontaneousWork` cancels both;
+`isSpontaneouslyArmed` checks both; external resets (toggle off, deletes, schedule edits)
+disarm both slots first and re-arm slot 0, which keeps the "one live chain" property the
+old single name had.
+
+**Verified against itself.** Making `alternateSpontaneousSlot` the identity fails the new
+JVM test (`a run never arms the slot name it occupies`) AND the new instrumented test
+(`a re-arm arms the other slot so it cannot cancel its own chain`, the only failure among
+13 device tests that run); restoring it returns the suite to green.
+
+**Side effect, taken deliberately.** `refreshSpontaneousSchedule(force = true)` used to
+cancel an in-flight turn as well as the pending one. It can no longer do either from the
+in-run path, and the external reset path — disarm-then-arm, ordered, because WorkManager
+processes cancels and enqueues in submission order — only ever re-arms into a free slot.
+In-flight generations now survive a settings save instead of being aborted by it, which is
+also the saner behaviour.
+
+
+
+

@@ -329,7 +329,20 @@ internal fun highlightedAnnotated(text: String, range: IntRange?, highlightColor
 }
 
 @Composable
-fun MainScreen(service: AssistantService?) {
+fun MainScreen(
+    service: AssistantService?,
+    /**
+     * Persona name carried by a spontaneous-message notification tap (`MainActivity` relays
+     * `EXTRA_TARGET_PERSONA_NAME` here). O14: this names the *persona*, never a message —
+     * the tap must open that persona's chat, and nothing in particular inside it.
+     *
+     * Defaulted so preview and test call sites are untouched; the only producer is the
+     * notification tap path.
+     */
+    deepLinkPersona: String? = null,
+    /** Called exactly once per [deepLinkPersona] value, after it has been honoured. */
+    onDeepLinkHandled: () -> Unit = {}
+) {
     val context = LocalContext.current
     val focusManager = LocalFocusManager.current
     
@@ -432,6 +445,44 @@ fun MainScreen(service: AssistantService?) {
     // recreation.
     var currentPersona by remember(service) { mutableStateOf(service?.currentPersona ?: DEFAULT_PERSONAS[0]) }
     val personaColor by animateColorAsState(targetValue = currentPersona.themeColor, animationSpec = tween(1000), label = "personaColor")
+
+    // ------------------------------------------------------------------ deep link
+    // A spontaneous-message notification tap names a *persona* (O14). Honour it exactly once
+    // per value, whatever the screens currently show:
+    //
+    //  - keyed on (service, deepLinkPersona), so a tap that lands before the bind simply
+    //    waits — the effect re-fires the moment the service arrives;
+    //  - a deleted persona still consumes the tap (there is nothing to open, and leaving the
+    //    signal pending would ambush the *next* tap's value);
+    //  - the tap is always honoured (O4), even when a turn is in flight on another persona.
+    //    switchPersona() stopEverything()s first — the same interruption a manual persona
+    //    tap produces — which is a conscious, documented choice, not an accident.
+    //
+    // `currentPersona` MUST be set here, exactly as the picker's onPersonaSelected does it.
+    // switchPersona() publishes `currentPersonaName` and `_messages` but never `_personas`,
+    // so `LaunchedEffect(personaList)` — the only other thing that re-resolves the mirror —
+    // does not re-run, and the header, theme colour and per-persona chrome would keep
+    // showing the persona the user just left while the service talked to the new one.
+    // Declared after `currentPersona` for that reason: a Compose `var` cannot be referenced
+    // above its own declaration.
+    LaunchedEffect(service, deepLinkPersona) {
+        val target = deepLinkPersona ?: return@LaunchedEffect
+        val bound = service ?: return@LaunchedEffect
+        // The notification promised a conversation, so nothing may stand in front of it:
+        // a settings screen, the picker, or an open room.
+        showSettings = false
+        showPersonaPicker = false
+        // Everything stateful about the tap — selecting the persona, leaving room mode — is on
+        // the service (`applySpontaneousDeepLink`), so it is testable without composing this
+        // screen. What is left here is the two things only the composable can do: close its
+        // own overlays, and mirror the new selection into `currentPersona`. That mirror MUST
+        // be set explicitly: `switchPersona` publishes `currentPersonaName` and `_messages`
+        // but never `_personas`, so `LaunchedEffect(personaList)` — the only other thing that
+        // re-resolves it — does not re-run, and the header, theme colour and per-persona
+        // chrome would keep showing the persona the user just left.
+        bound.applySpontaneousDeepLink(target)?.let { currentPersona = it }
+        onDeepLinkHandled()
+    }
 
     val listState = rememberLazyListState()
     val miniScrollState = rememberScrollState()
