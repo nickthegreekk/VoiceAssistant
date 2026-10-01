@@ -4,6 +4,7 @@ import androidx.compose.ui.graphics.Color
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -174,5 +175,65 @@ class RoomUiTest {
         val summary = roomCapSummary(Room(name = "R", autoReplyCap = 0))
         assertFalse("a zero cap must not print as a bare number", summary.contains("cap 0"))
         assertTrue("it must say the continuation is off, not unbounded", summary.contains("no autonomous"))
+    }
+
+    // ------------------------------------------------- Editor commit (auto-save)
+
+    private fun room(name: String = "R", cap: Int? = null, members: List<String> = listOf("A", "B")) =
+        Room(name = name, memberNames = members, autoReplyCap = cap)
+
+    @Test fun `an edited name commits`() {
+        val committed = roomEditorCommit(room(name = "Old"), "New", "")
+        assertEquals("New", committed?.name)
+        assertNull(committed?.autoReplyCap)
+    }
+
+    @Test fun `a name edit carries the cap and members it was made alongside`() {
+        // The commit is the whole room, not a name-only patch — that is what keeps a member
+        // edit and a name edit made in the same session from clobbering each other.
+        val committed = roomEditorCommit(
+            room(name = "Old", cap = 3, members = listOf("A", "B", "C")),
+            "New",
+            "5"
+        )
+        assertEquals("New", committed?.name)
+        assertEquals(5, committed?.autoReplyCap)
+        assertEquals(listOf("A", "B", "C"), committed?.memberNames)
+    }
+
+    @Test fun `an unchanged editor commits nothing`() {
+        // null is load-bearing: it is what stops the auto-save and the dispose-time flush
+        // from rewriting the room on every recomposition.
+        assertNull(roomEditorCommit(room(name = "Same"), "Same", ""))
+        assertNull(roomEditorCommit(room(name = "Same", cap = 2), "Same", "2"))
+        assertNull(roomEditorCommit(room(name = "Same"), "  Same  ", ""))
+    }
+
+    @Test fun `blank name and garbage cap are never committed`() {
+        // A half-deleted name is not a room, and an uncommittable cap is never coerced —
+        // the stored value must survive an in-progress edit untouched.
+        assertNull(roomEditorCommit(room(name = "Old"), "", ""))
+        assertNull(roomEditorCommit(room(name = "Old"), "   ", ""))
+        assertNull(roomEditorCommit(room(name = "Old", cap = 4), "New", "abc"))
+        assertNull(roomEditorCommit(room(name = "Old", cap = 4), "New", "-1"))
+    }
+
+    @Test fun `a half-deleted name does not destroy the cap`() {
+        // The specific hazard of committing the whole room: clearing the name must not also
+        // reset the cap the user set earlier in the session.
+        assertNull(roomEditorCommit(room(name = "Old", cap = 6), "  ", ""))
+    }
+
+    @Test fun `clearing the cap back to blank commits the inherit value`() {
+        // null (inherit) and 0 (initial round only) are different states; clearing the field
+        // has to move between them, not sit still.
+        val committed = roomEditorCommit(room(name = "R", cap = 6), "R", "")
+        assertNotNull("clearing an explicit cap must commit", committed)
+        assertNull(committed?.autoReplyCap)
+    }
+
+    @Test fun `zero survives a commit as zero`() {
+        val committed = roomEditorCommit(room(name = "R"), "R", "0")
+        assertEquals(0, committed?.autoReplyCap)
     }
 }

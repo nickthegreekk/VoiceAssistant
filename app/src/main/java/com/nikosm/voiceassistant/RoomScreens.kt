@@ -44,8 +44,11 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -58,6 +61,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.delay
 
 // Phase 3: the Room UI. The room SERVICE (AssistantServiceRooms.kt /
 // AssistantServiceRoomTurns.kt) is unchanged by this phase — everything here is
@@ -203,6 +207,32 @@ internal fun roomCapSummary(room: Room): String =
         if (cap == ROOM_CAP_MIN) "initial round only (no autonomous replies)"
         else "cap $cap/round"
     } ?: "cap ${RoomReplyPolicy.DEFAULT_AUTO_REPLY_CAP}/round (default)"
+
+/** Debounce for RoomEditor's field auto-save, mirroring PersonaEditor's 500ms. */
+internal const val ROOM_EDITOR_SAVE_DEBOUNCE_MS = 500L
+
+/**
+ * The room [RoomEditor]'s text fields would persist, or null when there is nothing
+ * committable to write.
+ *
+ * Both fields are LOCAL editor state (a partially-typed name is not a room), so they are
+ * committed as one unit — the same discipline PersonaEditor uses for its own fields. Kept
+ * pure and unit-tested in RoomUiTest so the commit rules (blank name, uncommittable cap,
+ * "no actual change") are verifiable without a device.
+ *
+ * Returning null is meaningful: it means "already in sync with the service", which is what
+ * stops the auto-save and the dispose-time flush from rewriting an unchanged room on every
+ * recomposition.
+ */
+internal fun roomEditorCommit(room: Room, name: String, capText: String): Room? {
+    val trimmed = name.trim()
+    // A blank name is not a room, and an uncommittable cap is never coerced — the editor
+    // keeps showing the error and the stored value stays as it was.
+    if (trimmed.isEmpty()) return null
+    if (parseAutoReplyCap(capText) == ROOM_CAP_INVALID) return null
+    val updated = room.copy(name = trimmed, autoReplyCap = autoReplyCapOverrideOrNull(capText))
+    return if (updated != room) updated else null
+}
 
 // ---------------------------------------------------------------- Bottom-sheet entry
 
@@ -420,6 +450,39 @@ fun RoomEditor(room: Room, personas: List<Persona>, onClose: () -> Unit, service
     // The delete dialog asks whether the transcript goes with the room (default: yes).
     var deleteTranscript by rememberSaveable(room.id) { mutableStateOf(true) }
 
+    // Auto-save, mirroring PersonaEditor's discipline.
+    //
+    // The name and cap fields are the editor's only LOCAL state: a half-typed name is not a
+    // room, so they can't be written straight to the service on every keystroke. But they
+    // used to be committed ONLY by the explicit "Done" button, which made every other way of
+    // leaving the editor — the back arrow, system back, the category's back arrow, or just
+    // dismissing Settings — silently DISCARD the edit. The list row kept showing the old
+    // name and the room came back unchanged after a relaunch.
+    //
+    // So: commit after a short idle debounce, and flush whatever is still pending when the
+    // editor leaves composition. `room` is the live service copy, so member edits made in
+    // the same session are already in it and ride out with the same save; committing the
+    // whole room at once (rather than a name-only patch) is what keeps the two in step.
+    val commit = roomEditorCommit(room, name, capText)
+    // The dispose flush below never re-keys, so it cannot close over a frozen `commit`: a ref
+    // re-assigned on every recomposition carries the live one into onDispose.
+    val pendingRef = remember { mutableStateOf<Room?>(null) }
+    pendingRef.value = commit
+
+    fun commitNow() {
+        pendingRef.value?.let { service.updateRoom(it) }
+    }
+
+    LaunchedEffect(commit) {
+        val target = commit ?: return@LaunchedEffect
+        delay(ROOM_EDITOR_SAVE_DEBOUNCE_MS)
+        service.updateRoom(target)
+    }
+
+    DisposableEffect(Unit) {
+        onDispose { commitNow() }
+    }
+
     Column(modifier = Modifier.heightIn(max = RoomEditorMaxHeight).verticalScroll(rememberScrollState())) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onClose) {
@@ -428,18 +491,11 @@ fun RoomEditor(room: Room, personas: List<Persona>, onClose: () -> Unit, service
             Text("Edit room", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
             TextButton(
                 onClick = {
-                    val trimmed = name.trim()
-                    if (trimmed.isNotEmpty() && trimmed != room.name) {
-                        service.updateRoom(room.copy(name = trimmed))
-                    }
-                    val cap = autoReplyCapOverrideOrNull(capText)
-                    // Commit only when committable: blank (inherit), 0 (initial round only)
-                    // and positive ints all persist; garbage keeps the current value, never
-                    // coerces. `cap != room.autoReplyCap` is a genuine change check — 0 and
-                    // null are different states, so a room already at 0 is not rewritten.
-                    if (parseAutoReplyCap(capText) != ROOM_CAP_INVALID && cap != room.autoReplyCap) {
-                        service.updateRoomCap(room.id, cap)
-                    }
+                    // Commit synchronously rather than waiting out the debounce, so the room
+                    // is already stored by the time the list row comes back. Everything the
+                    // editor changed — name, cap, and any member edits made this session —
+                    // goes out as the single updateRoom write.
+                    commitNow()
                     onClose()
                 },
                 enabled = name.trim().isNotEmpty() && parseAutoReplyCap(capText) != ROOM_CAP_INVALID
@@ -474,9 +530,9 @@ fun RoomEditor(room: Room, personas: List<Persona>, onClose: () -> Unit, service
             singleLine = true,
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done),
             keyboardActions = KeyboardActions(onDone = {
-                if (parseAutoReplyCap(capText) != ROOM_CAP_INVALID) {
-                    service.updateRoomCap(room.id, autoReplyCapOverrideOrNull(capText))
-                }
+                // Commit the WHOLE pending edit, not just the cap: pressing the keyboard's
+                // Done is a commit gesture, and a name typed before it must not be dropped.
+                commitNow()
             }),
             isError = parseAutoReplyCap(capText) == ROOM_CAP_INVALID,
             supportingText = {
@@ -590,14 +646,22 @@ private fun RoomMemberList(room: Room, personas: List<Persona>, onAddClick: () -
                     enabled = index > 0,
                     modifier = Modifier.size(28.dp)
                 ) {
-                    Icon(Icons.Default.KeyboardArrowUp, null, modifier = Modifier.size(20.dp))
+                    Icon(
+                        Icons.Default.KeyboardArrowUp,
+                        contentDescription = "Move $memberName up",
+                        modifier = Modifier.size(20.dp)
+                    )
                 }
                 IconButton(
                     onClick = { service.moveRoomMember(room.id, index, index + 1) },
                     enabled = index < room.memberNames.size - 1,
                     modifier = Modifier.size(28.dp)
                 ) {
-                    Icon(Icons.Default.KeyboardArrowDown, null, modifier = Modifier.size(20.dp))
+                    Icon(
+                        Icons.Default.KeyboardArrowDown,
+                        contentDescription = "Move $memberName down",
+                        modifier = Modifier.size(20.dp)
+                    )
                 }
                 IconButton(
                     onClick = {
@@ -605,7 +669,11 @@ private fun RoomMemberList(room: Room, personas: List<Persona>, onAddClick: () -
                     },
                     modifier = Modifier.size(28.dp)
                 ) {
-                    Icon(Icons.Default.Close, null, modifier = Modifier.size(18.dp))
+                    Icon(
+                        Icons.Default.Close,
+                        contentDescription = "Remove $memberName",
+                        modifier = Modifier.size(18.dp)
+                    )
                 }
             }
         }
