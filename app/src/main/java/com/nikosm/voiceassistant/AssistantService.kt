@@ -1855,6 +1855,47 @@ class AssistantService : Service() {
         saveSettings()
     }
 
+    /**
+     * Outcome of a manual "send me a message now" request (the persona editor's button).
+     *
+     * This entry point is deliberately a GUARD CHECK today, not a send: the delivery path
+     * (the turn pipeline + its sink) is the next increment, and this function pretends at
+     * nothing. Returning the verdict here — rather than evaluating it in the UI — means the
+     * call site is final: step 4 only changes this body, never the wiring it sits behind.
+     */
+    sealed interface SpontaneousNowOutcome {
+        /** Every guard passed: the persona could send. Delivery itself is not wired yet. */
+        data object Accepted : SpontaneousNowOutcome
+
+        /** Do not send. Shown verbatim in the editor, so it must read as UI text. */
+        data class Refused(val reason: String) : SpontaneousNowOutcome
+    }
+
+    /**
+     * The "send me a message now" entry point. Re-runs the whole guard chain against LIVE
+     * service state at request time — the persona's own `spontaneousEnabled` flag, then
+     * [`Persona.spontaneousEligibility`] against the current server lists — because the
+     * commit that enabled the flag may predate a deleted server or a changed model.
+     */
+    fun sendSpontaneousMessageNow(personaName: String): SpontaneousNowOutcome {
+        // Fail-closed, by NAME: a rename that already committed misses the lookup and the
+        // request refuses, rather than addressing the persona that now sits at the index
+        // (see setSkillEnabled's note in PersonaEditor for the same lookup's caveat).
+        val persona = personas.value.find { it.name == personaName }
+            ?: return SpontaneousNowOutcome.Refused("This persona no longer exists.")
+        // Master switch first: a persona never opted in must never send on demand.
+        if (!persona.spontaneousEnabled) {
+            return SpontaneousNowOutcome.Refused("Turn spontaneous messages on for this persona first.")
+        }
+        when (val verdict = persona.spontaneousEligibility(ollamaServerNames(), cloudProviderNames())) {
+            is RoomEligibility.Eligible -> { /* fall through */ }
+            is RoomEligibility.Blocked -> return SpontaneousNowOutcome.Refused(verdict.reason)
+        }
+        // The delivery path (step 4) will replace this log with the real turn.
+        Log.i("AssistantService", "Spontaneous 'send now' accepted for '${persona.name}' — delivery not wired yet")
+        return SpontaneousNowOutcome.Accepted
+    }
+
     fun removePersona(index: Int) {
         val current = _personas.value.toMutableList()
         if (index in current.indices) {

@@ -920,6 +920,52 @@ write path applies it, which only a bound service can show.
 **Mutation-verified:** disabling the `addPersona` + `updatePersona` sanitize fails exactly
 those 3 guard-dependent tests, leaving the 3 controls green.
 
+### Phase 3 (step 3) — the persona editor UI: DONE
+
+**Delivered**
+
+- `SpontaneousScreens.kt` (new) — the pure gate `spontaneousSectionEligibility`, the slider
+  maps (`spontaneousGapFromSlider`, `spontaneousWindowMinuteFromSlider`), the summaries, and
+  `PersonaSpontaneousSection` (master toggle, optional instruction, gap slider, an optional
+  daily window with start/end sliders, the "send me a message now" button, and the honest
+  Android-timing note). Test tags: `spontaneousMasterSwitch`, `spontaneousWindowSwitch`,
+  `spontaneousSendNow`.
+- `PersonaEditor.kt` — the four-place wiring (local state, the debounce key list, BOTH
+  `persona.copy` sites, and the section itself), plus **plan location #2** now that the
+  section exists: the commit writes `spontaneousEnabled && spontaneousAllowed`.
+- `AssistantService.sendSpontaneousMessageNow` + `SpontaneousNowOutcome` — see the stub note.
+- `Models.kt` — `SpontaneousPolicy.effectiveGapMinutes(Int)` overload so the editor reads the
+  same rule without fabricating a Persona.
+
+**The gate reads ONE decision.** `spontaneousEligibility` is computed once in the editor from
+`service.ollamaServerNames()` / `service.cloudProviderNames()` and threaded into *both* the
+render gate and the commit, so they cannot disagree. `spontaneousSectionEligibility` also
+re-derives `isCloud` from the live model text — otherwise a just-typed cloud model would be
+reported with the *gateway* reason (the verdict was right, the explanation was misleading).
+
+**Verification**
+
+- 254 JVM unit tests, 0 failures (14 new in `SpontaneousUiTest`).
+- 6 on-device write-guard tests, 0 failures (unchanged).
+- 4 on-device editor tests, 0 failures — including
+  `gate is correct on the first frame before collectors deliver`, which freezes the compose
+  clock so no `LaunchedEffect` collector has delivered and asserts the controls are in the
+  tree anyway.
+- **Mutation-verified (the important one):** re-pointing the gate at the editor's
+  async-collected snapshots makes that test fail with exactly the predicted symptom (the
+  toggle's node does not exist, because the gate rendered the refusal) — while the other
+  three still pass, because only the frozen-frame test examines the pre-delivery window.
+
+### Known deliberate stub — the "send me a message now" button
+
+The button is real, enabled, and wired to a real service entry point, but
+`sendSpontaneousMessageNow` currently performs the **full guard chain** (persona exists →
+opted in → eligible against live lists) and then returns `Accepted` *without sending*: the
+delivery path is step 4. The editor says so plainly ("This persona can send — delivery itself
+arrives with the next step.") rather than reporting a send that did not happen. Step 4 changes
+only that function body; the UI wiring behind it is final.
+
+
 
 ### Errata — two corrections to §6 above
 

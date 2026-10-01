@@ -36,6 +36,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
+import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.Translate
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.OpenInFull
@@ -169,6 +170,17 @@ fun PersonaEditor(
     // frozen at open time straight back over the toggle. Tracking it locally is what makes
     // the two paths agree; see setSkillEnabled below.
     var enabledSkillIds by remember(persona) { mutableStateOf(persona.enabledSkillIds) }
+    // Spontaneous messages. Tracked locally for exactly the reason enabledSkillIds is: BOTH
+    // the debounce and the dispose flush rebuild a WHOLE Persona from this editor's
+    // snapshot, so a field omitted here would be written back at its open-time value the
+    // moment any other field changed — or the moment the editor closed inside the debounce
+    // window. `spontaneousMaxPerDay` is deliberately NOT tracked: it has no control yet (it
+    // is reserved for the scheduler), and a `copy` that never mentions it preserves it.
+    var spontaneousEnabled by remember(persona) { mutableStateOf(persona.spontaneousEnabled) }
+    var spontaneousInstruction by remember(persona) { mutableStateOf(persona.spontaneousInstruction) }
+    var spontaneousGapMinutes by remember(persona) { mutableStateOf(persona.spontaneousGapMinutes) }
+    var spontaneousWindowStartMin by remember(persona) { mutableStateOf(persona.spontaneousWindowStartMin) }
+    var spontaneousWindowEndMin by remember(persona) { mutableStateOf(persona.spontaneousWindowEndMin) }
     var showDeleteConfirm by rememberSaveable { mutableStateOf(false) }
     var showFullscreenPrompt by rememberSaveable { mutableStateOf(false) }
 
@@ -218,6 +230,28 @@ fun PersonaEditor(
     val onSaveRef = remember { mutableStateOf(onSave) }
     onSaveRef.value = onSave
     var lastSavedPersona by remember { mutableStateOf(persona) }
+
+    // Spontaneous-messages gate — ONE decision, shared by the section below and by BOTH
+    // commit paths in this editor, so what the user is shown and what gets written can
+    // never disagree (plan locations #1 and #2).
+    //
+    // Evaluated against the SERVICE's live server lists, never this composable's collected
+    // copies: those arrive from the LaunchedEffect further down, so the FIRST composition —
+    // and every frame until it delivers — sees them EMPTY. An empty Ollama set makes a
+    // perfectly local persona (`[HomeBox] llama3`) resolve as gateway-only, i.e. Blocked,
+    // which would hide the section on the first frame and strip a valid opt-in on the first
+    // commit. The service has already loaded its lists before it can be bound at all
+    // (onServiceConnected fires only after onCreate returns), so reading it has no window.
+    val spontaneousEligibility = spontaneousSectionEligibility(
+        persona = persona,
+        model = model,
+        isTranslator = isTranslator,
+        isImageGenerator = isImageGenerator,
+        ollamaServerNames = service.ollamaServerNames(),
+        cloudProviderNames = service.cloudProviderNames()
+    )
+    val spontaneousAllowed = spontaneousEligibility is RoomEligibility.Eligible
+
     val disposeSnapshotRef = remember { mutableStateOf(persona) }
     disposeSnapshotRef.value = persona.copy(
         name = name,
@@ -245,7 +279,15 @@ fun PersonaEditor(
         voiceEngine = voiceEngine,
         kokoroVoice = kokoroVoice,
         backendUrl = backendUrl,
-        enabledSkillIds = enabledSkillIds
+        enabledSkillIds = enabledSkillIds,
+        // Gated (plan location #2): never commit an opt-in the persona could not honour.
+        // The remaining spontaneous fields ride through unchanged, so a half-finished setup
+        // is preserved rather than cleared if the model is switched back.
+        spontaneousEnabled = spontaneousEnabled && spontaneousAllowed,
+        spontaneousInstruction = spontaneousInstruction,
+        spontaneousGapMinutes = spontaneousGapMinutes,
+        spontaneousWindowStartMin = spontaneousWindowStartMin,
+        spontaneousWindowEndMin = spontaneousWindowEndMin
     )
 
     val initialConnection = remember(persona) {
@@ -290,7 +332,7 @@ fun PersonaEditor(
     }
 
     // Auto-save logic
-    LaunchedEffect(name, model, systemPrompt, themeColor, temp, topP, topK, repeatPenalty, maxTokens, numCtx, enableThinking, webSearchEnabled, ragEnabled, allowGatewayFailover, isTranslator, isImageGenerator, targetLanguage, voiceMode, voiceEngine, kokoroVoice, backendUrl, enabledSkillIds, iconImageUri, backgroundImageUri) {
+    LaunchedEffect(name, model, systemPrompt, themeColor, temp, topP, topK, repeatPenalty, maxTokens, numCtx, enableThinking, webSearchEnabled, ragEnabled, allowGatewayFailover, isTranslator, isImageGenerator, targetLanguage, voiceMode, voiceEngine, kokoroVoice, backendUrl, enabledSkillIds, iconImageUri, backgroundImageUri, spontaneousEnabled, spontaneousInstruction, spontaneousGapMinutes, spontaneousWindowStartMin, spontaneousWindowEndMin) {
         // Skip initial evaluation if needed? No, persona change will trigger it once, which is fine.
         delay(500)
         val trimmedModel = model.trim()
@@ -337,7 +379,13 @@ fun PersonaEditor(
             backendUrl = backendUrl,
             iconImageUri = iconImageUri,
             backgroundImageUri = backgroundImageUri,
-            enabledSkillIds = enabledSkillIds
+            enabledSkillIds = enabledSkillIds,
+            // Same gate as the dispose snapshot above — see the shared eligibility note.
+            spontaneousEnabled = spontaneousEnabled && spontaneousAllowed,
+            spontaneousInstruction = spontaneousInstruction,
+            spontaneousGapMinutes = spontaneousGapMinutes,
+            spontaneousWindowStartMin = spontaneousWindowStartMin,
+            spontaneousWindowEndMin = spontaneousWindowEndMin
         )
 
         if (updated != persona) {
@@ -679,6 +727,45 @@ fun PersonaEditor(
                 enabledSkillIds = enabledSkillIds,
                 onToggle = { skillId, enabled -> setSkillEnabled(skillId, enabled) },
                 service = service
+            )
+        }
+
+        // Spontaneous messages sit with the prompt-adjacent behaviour sections: like a skill,
+        // this persona may carry extra instruction text, so it is prompt configuration rather
+        // than voice or sampling. The gate (which personas may see the controls at all) shows
+        // the shared verdict computed above — this section never re-decides.
+        SettingsSectionHeader(title = "Spontaneous Messages", icon = Icons.Filled.NotificationsActive)
+        SettingsSection {
+            PersonaSpontaneousSection(
+                eligibility = spontaneousEligibility,
+                enabled = spontaneousEnabled,
+                instruction = spontaneousInstruction,
+                gapMinutes = spontaneousGapMinutes,
+                windowStartMin = spontaneousWindowStartMin,
+                windowEndMin = spontaneousWindowEndMin,
+                onEnabledChange = { spontaneousEnabled = it },
+                onInstructionChange = { spontaneousInstruction = it },
+                onGapChange = { spontaneousGapMinutes = it },
+                onWindowChange = { start, end ->
+                    spontaneousWindowStartMin = start
+                    spontaneousWindowEndMin = end
+                },
+                onSendNow = {
+                    // `persona.name` is the identity the service currently knows this persona by,
+                    // matching setSkillEnabled's lookup (see its note: after a committed rename
+                    // the lookup misses and the call no-ops). Missing is fail-closed here — the
+                    // entry point refuses an unknown name instead of sending for someone else.
+                    when (val outcome = service.sendSpontaneousMessageNow(persona.name)) {
+                        is AssistantService.SpontaneousNowOutcome.Accepted -> Toast.makeText(
+                            context,
+                            "This persona can send — delivery itself arrives with the next step.",
+                            Toast.LENGTH_LONG
+                        ).show()
+                        is AssistantService.SpontaneousNowOutcome.Refused -> Toast.makeText(
+                            context, outcome.reason, Toast.LENGTH_LONG
+                        ).show()
+                    }
+                }
             )
         }
 

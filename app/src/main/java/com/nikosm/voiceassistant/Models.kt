@@ -463,8 +463,14 @@ object SpontaneousPolicy {
     ): Boolean = persona.spontaneousEligibility(ollamaServerNames, cloudProviderNames) is RoomEligibility.Eligible
 
     /** The gap actually honoured — never below [MIN_GAP_MINUTES]. */
-    fun effectiveGapMinutes(persona: Persona): Int =
-        if (persona.spontaneousGapMinutes > 0) persona.spontaneousGapMinutes.coerceAtLeast(MIN_GAP_MINUTES)
+    fun effectiveGapMinutes(persona: Persona): Int = effectiveGapMinutes(persona.spontaneousGapMinutes)
+
+    /**
+     * [effectiveGapMinutes] for a raw stored value, for callers that hold the field rather
+     * than a whole persona (the persona editor's local slider state). Same rule, one place.
+     */
+    fun effectiveGapMinutes(storedGapMinutes: Int): Int =
+        if (storedGapMinutes > 0) storedGapMinutes.coerceAtLeast(MIN_GAP_MINUTES)
         else DEFAULT_GAP_MINUTES
 
     /** The daily cap actually honoured. */
