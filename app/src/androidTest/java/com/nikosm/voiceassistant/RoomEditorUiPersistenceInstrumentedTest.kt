@@ -11,6 +11,10 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.compose.ui.test.assertCountEquals
+import androidx.compose.ui.test.assertHasClickAction
+import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
@@ -228,6 +232,63 @@ class RoomEditorUiPersistenceInstrumentedTest {
             it.any { r -> r.id == room.id && r.name == "Renamed In UI" }
         }
         assertEquals("Renamed In UI", persisted(room.id)?.name)
+    }
+
+    /**
+     * The editor's back chevron is reachable BY LABEL and actually exits.
+     *
+     * The chevron used to carry `contentDescription = null`, which made it two kinds of
+     * invisible at once: a TalkBack user had no way to find the editor's only exit, and no
+     * test could select it by name — so the "close without Done, still persists" property
+     * above had to be exercised by flipping a state flag (`editorOpen = false`) rather than
+     * by pressing the control a real user presses. That flag path never runs the button's
+     * own `commitNow()` call.
+     *
+     * This drives the actual affordance, so both the label and the commit it performs are
+     * covered at once.
+     */
+    @Test
+    fun theBackChevronIsLabelledAndExitsTheEditorCommittingTheEdit() {
+        bind()
+        val room = seedRoom()
+        val personas = listOf(probePersona("EP1"), probePersona("EP2"), probePersona("EP3"))
+
+        var editorOpen by mutableStateOf(true)
+        composeRule.setContent {
+            androidx.compose.material3.MaterialTheme {
+                if (editorOpen) {
+                    RoomEditorInPage(
+                        room = room,
+                        personas = personas,
+                        onClose = { editorOpen = false },
+                        service = service
+                    )
+                }
+            }
+        }
+        composeRule.waitForIdle()
+
+        // Selectable by its label, and a real control rather than decoration: this alone
+        // fails if the description is null, renamed, or the icon is not clickable.
+        val back = composeRule.onNodeWithContentDescription("Back to rooms list")
+        back.assertHasClickAction()
+
+        // Type a name first, so pressing it also proves the exit does not discard the edit.
+        composeRule.onAllNodes(hasSetTextAction())[0]
+            .performScrollTo()
+            .performTextClearance()
+        composeRule.onAllNodes(hasSetTextAction())[0].performTextInput("Closed By Chevron")
+        composeRule.waitForIdle()
+
+        back.performClick()
+        composeRule.waitForIdle()
+
+        // The editor is gone...
+        composeRule.onAllNodesWithText("Edit room").assertCountEquals(0)
+        // ...and the edit it was holding reached disk anyway.
+        awaitPersist("an edit closed with the back chevron never reached disk") {
+            it.any { r -> r.id == room.id && r.name == "Closed By Chevron" }
+        }
     }
 
     /** The same edit, committed through Done — the path that was already known to work. */

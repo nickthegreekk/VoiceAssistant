@@ -30,6 +30,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.AddPhotoAlternate
 import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Dns
@@ -162,6 +163,12 @@ fun PersonaEditor(
     var voiceEngine by remember(persona) { mutableStateOf(persona.voiceEngine) }
     var kokoroVoice by remember(persona) { mutableStateOf(persona.kokoroVoice) }
     var backendUrl by remember(persona) { mutableStateOf(persona.backendUrl) }
+    // Skills are toggled through setSkillEnabledForPersona (which saves at once), but the
+    // debounce and the dispose flush BOTH rebuild the whole Persona from this editor's
+    // snapshot — and neither listed enabledSkillIds, so each would have written the value
+    // frozen at open time straight back over the toggle. Tracking it locally is what makes
+    // the two paths agree; see setSkillEnabled below.
+    var enabledSkillIds by remember(persona) { mutableStateOf(persona.enabledSkillIds) }
     var showDeleteConfirm by rememberSaveable { mutableStateOf(false) }
     var showFullscreenPrompt by rememberSaveable { mutableStateOf(false) }
 
@@ -237,7 +244,8 @@ fun PersonaEditor(
         voiceMode = voiceMode,
         voiceEngine = voiceEngine,
         kokoroVoice = kokoroVoice,
-        backendUrl = backendUrl
+        backendUrl = backendUrl,
+        enabledSkillIds = enabledSkillIds
     )
 
     val initialConnection = remember(persona) {
@@ -282,7 +290,7 @@ fun PersonaEditor(
     }
 
     // Auto-save logic
-    LaunchedEffect(name, model, systemPrompt, themeColor, temp, topP, topK, repeatPenalty, maxTokens, numCtx, enableThinking, webSearchEnabled, ragEnabled, allowGatewayFailover, isTranslator, isImageGenerator, targetLanguage, voiceMode, voiceEngine, kokoroVoice, backendUrl, iconImageUri, backgroundImageUri) {
+    LaunchedEffect(name, model, systemPrompt, themeColor, temp, topP, topK, repeatPenalty, maxTokens, numCtx, enableThinking, webSearchEnabled, ragEnabled, allowGatewayFailover, isTranslator, isImageGenerator, targetLanguage, voiceMode, voiceEngine, kokoroVoice, backendUrl, enabledSkillIds, iconImageUri, backgroundImageUri) {
         // Skip initial evaluation if needed? No, persona change will trigger it once, which is fine.
         delay(500)
         val trimmedModel = model.trim()
@@ -328,7 +336,8 @@ fun PersonaEditor(
             kokoroVoice = kokoroVoice,
             backendUrl = backendUrl,
             iconImageUri = iconImageUri,
-            backgroundImageUri = backgroundImageUri
+            backgroundImageUri = backgroundImageUri,
+            enabledSkillIds = enabledSkillIds
         )
 
         if (updated != persona) {
@@ -348,6 +357,28 @@ fun PersonaEditor(
                 onSaveRef.value(updated)
             }
         }
+    }
+
+    // Flip one skill for this persona, on BOTH paths, deliberately.
+    //
+    // The service call is the real, immediate save and the one place the whole app mutates
+    // this field. The local state update is not redundant: the debounce above and the
+    // dispose flush both commit a WHOLE Persona rebuilt from this editor's snapshot, so
+    // without it they would write the enabledSkillIds frozen at open time back over the
+    // toggle the moment any other field changed — or the moment the editor closed inside
+    // the 500ms window. It is also what makes a toggle work on a brand-new persona, which
+    // setSkillEnabledForPersona cannot help with (the persona is not in the list yet).
+    fun setSkillEnabled(skillId: String, enabled: Boolean) {
+        enabledSkillIds = if (enabled) {
+            (enabledSkillIds + skillId).distinct()
+        } else {
+            enabledSkillIds - skillId
+        }
+        // `persona.name` is the name the service currently knows this persona by. After a
+        // rename has already been committed that lookup misses and the service call no-ops
+        // — harmlessly, because the local value above still rides out with this editor's
+        // own commit.
+        service.setSkillEnabledForPersona(persona.name, skillId, enabled)
     }
 
     // Plain Column, NOT a scrollable of its own: the category page's LazyColumn is the
@@ -635,6 +666,19 @@ fun PersonaEditor(
                 onValueChange = { systemPrompt = it },
                 modifier = Modifier.fillMaxWidth().height(120.dp),
                 maxLines = 5
+            )
+        }
+
+        // Skills sit directly under the prompt: a skill is extra instruction text bolted to
+        // THIS persona's system prompt for the turns it fires on, so it is prompt
+        // configuration and belongs with the prompt rather than down with the voice or
+        // sampling settings.
+        SettingsSectionHeader(title = "Skills", icon = Icons.Default.AutoAwesome)
+        SettingsSection {
+            PersonaSkillSection(
+                enabledSkillIds = enabledSkillIds,
+                onToggle = { skillId, enabled -> setSkillEnabled(skillId, enabled) },
+                service = service
             )
         }
 

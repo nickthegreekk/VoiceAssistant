@@ -149,7 +149,10 @@ private val SETTINGS_CATEGORIES = listOf(
     SettingsCategory("Servers", Icons.Default.Dns),
     SettingsCategory("Cloud", Icons.Default.Cloud),
     SettingsCategory("Personas", Icons.Default.Person),
-    SettingsCategory("Rooms", Icons.Default.Forum)
+    SettingsCategory("Rooms", Icons.Default.Forum),
+    // After Personas, not beside them: a skill only means something once the persona that
+    // can enable it exists, so the order follows "what to configure" rather than the alphabet.
+    SettingsCategory("Skills", Icons.Default.AutoAwesome)
 )
 
 /** One entry of the flat top-level Settings list. */
@@ -292,6 +295,7 @@ fun SettingsDialog(service: AssistantService?, onDismiss: () -> Unit, personaCol
     var cloudApis by remember { mutableStateOf<List<CloudApiSetting>>(emptyList()) }
     var personas by remember { mutableStateOf<List<Persona>>(emptyList()) }
     var rooms by remember { mutableStateOf<List<Room>>(emptyList()) }
+    var skills by remember { mutableStateOf<List<Skill>>(emptyList()) }
 
     LaunchedEffect(service) {
         if (service != null) {
@@ -302,6 +306,7 @@ fun SettingsDialog(service: AssistantService?, onDismiss: () -> Unit, personaCol
             launch { service.cloudApis.collect { cloudApis = it } }
             launch { service.personas.collect { personas = it } }
             launch { service.rooms.collect { rooms = it } }
+            launch { service.skills.collect { skills = it } }
         }
     }
 
@@ -377,6 +382,15 @@ fun SettingsDialog(service: AssistantService?, onDismiss: () -> Unit, personaCol
                                 "Rooms" -> RoomSettings(
                                     service = svc,
                                     rooms = rooms,
+                                    personas = personas,
+                                    currentThemeColor = personaColor
+                                )
+                                "Skills" -> SkillSettings(
+                                    service = svc,
+                                    skills = skills,
+                                    // Personas are passed so each row can say who would
+                                    // lose it on delete — the cost of editing a shared
+                                    // entry is invisible from the edit button otherwise.
                                     personas = personas,
                                     currentThemeColor = personaColor
                                 )

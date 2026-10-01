@@ -477,7 +477,16 @@ fun RoomEditor(room: Room, personas: List<Persona>, onClose: () -> Unit, service
     Column(modifier = Modifier.fillMaxWidth().imePadding()) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onClose) {
-                Icon(Icons.Default.ChevronRight, null, modifier = Modifier.size(20.dp))
+                // Named, not null, matching SkillEditor: this chevron is the editor's only
+                // way back (there is no system-back handling inside a category page), and an
+                // unlabelled icon is invisible to TalkBack and to any UI test driving this
+                // screen. The glyph points right because the row is mirrored — same as
+                // PersonaEditor — so the label, not the shape, is what identifies it.
+                Icon(
+                    Icons.Default.ChevronRight,
+                    contentDescription = "Back to rooms list",
+                    modifier = Modifier.size(20.dp)
+                )
             }
             Text("Edit room", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
             TextButton(
