@@ -198,9 +198,8 @@ fun PersonaSettings(
         }
     }
 
-    // PersonaEditor is its own LazyColumn root, so it needs a bounded height to scroll
-    // inside. That bound belongs to the editor itself (PersonaEditorMaxHeight), not to any
-    // wrapper: a category screen caps nothing and scrolls nothing itself.
+    // PersonaEditor is a plain Column, so it adds no scrollable of its own and needs no
+    // height bound: a category screen caps nothing and scrolls nothing itself.
     if (editingPersona == null) {
         // Plain Column, not LazyColumn: the category page already scrolls, and a nested
         // lazy list inside a vertical scroll parent fights it for the drag.

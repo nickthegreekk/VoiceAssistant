@@ -24,7 +24,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.wrapContentSize
-import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -125,17 +124,6 @@ fun SettingsSection(content: @Composable () -> Unit) {
         }
     }
 }
-
-/**
- * Max height of the persona editor before it scrolls inside itself.
- *
- * PersonaEditor is a LazyColumn, so it REQUIRES a bounded height — an unbounded
- * (infinite) height inside the page LazyColumn throws "Vertically scrollable component
- * was measured with an infinity maximum height constraints". This bound is the editor's
- * own, deliberately not the section surface's: sections are uncapped and page-scrolled,
- * but the editor is a self-scrolling form, so it caps itself.
- */
-internal val PersonaEditorMaxHeight = 420.dp
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -362,555 +350,525 @@ fun PersonaEditor(
         }
     }
 
-    LazyColumn(
-        modifier = Modifier.heightIn(max = PersonaEditorMaxHeight),
+    // Plain Column, NOT a scrollable of its own: the category page's LazyColumn is the
+    // single scroller (same reasoning as the persona list in MainActivity). A nested
+    // scrollable here had to be height-capped, which left dead space below the editor and
+    // clipped the form mid-field.
+    Column(
+        modifier = Modifier.fillMaxWidth().imePadding(),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        item {
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                Text("Edit Persona", style = MaterialTheme.typography.titleMedium)
-                TextButton(onClick = onCancel) { Text("Close") }
-            }
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+            Text("Edit Persona", style = MaterialTheme.typography.titleMedium)
+            TextButton(onClick = onCancel) { Text("Close") }
         }
 
-        item {
-            OutlinedTextField(value = name, onValueChange = { name = it }, label = { Text("Persona Name") }, modifier = Modifier.fillMaxWidth())
+        OutlinedTextField(value = name, onValueChange = { name = it }, label = { Text("Persona Name") }, modifier = Modifier.fillMaxWidth())
+
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Checkbox(
+                checked = isTranslator,
+                onCheckedChange = {
+                    isTranslator = it
+                    if (it) isImageGenerator = false
+                }
+            )
+            Text("Translator Persona")
         }
 
-        item {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Checkbox(
-                    checked = isTranslator,
-                    onCheckedChange = {
-                        isTranslator = it
-                        if (it) isImageGenerator = false
-                    }
-                )
-                Text("Translator Persona")
-            }
-        }
-
-        item {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Checkbox(
-                    checked = isImageGenerator,
-                    onCheckedChange = {
-                        isImageGenerator = it
-                        if (it) isTranslator = false
-                    }
-                )
-                Text("Image Generator Persona (A1111)")
-            }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Checkbox(
+                checked = isImageGenerator,
+                onCheckedChange = {
+                    isImageGenerator = it
+                    if (it) isTranslator = false
+                }
+            )
+            Text("Image Generator Persona (A1111)")
         }
 
         if (isImageGenerator) {
-            item {
-                var imageGenBases by remember { mutableStateOf<List<ServerConfig>>(emptyList()) }
-                LaunchedEffect(service) {
-                    launch { service.imageGenBases.collect { imageGenBases = it } }
-                }
-
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    var expanded by remember { mutableStateOf(false) }
-                    val selectedName = imageGenBases.find { it.url == backendUrl }?.name ?: if (backendUrl.isNotBlank()) "Custom URL" else "Select Server"
-                    Box(modifier = Modifier.fillMaxWidth()) {
-                        OutlinedTextField(
-                            value = selectedName,
-                            onValueChange = {},
-                            readOnly = true,
-                            label = { Text("A1111 Backend") },
-                            modifier = Modifier.fillMaxWidth(),
-                            trailingIcon = { IconButton(onClick = { expanded = true }) { Icon(Icons.Default.ArrowDropDown, null) } }
-                        )
-                        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-                            imageGenBases.forEach { cfg ->
-                                DropdownMenuItem(
-                                    text = { Text(cfg.name) },
-                                    onClick = {
-                                        backendUrl = cfg.url
-                                        expanded = false
-                                    }
-                                )
-                            }
-                        }
-                    }
-                    OutlinedTextField(
-                        value = backendUrl,
-                        onValueChange = { backendUrl = it },
-                        label = { Text("Server URL") },
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                }
+            var imageGenBases by remember { mutableStateOf<List<ServerConfig>>(emptyList()) }
+            LaunchedEffect(service) {
+                launch { service.imageGenBases.collect { imageGenBases = it } }
             }
-        }
 
-        if (isTranslator) {
-            item {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 var expanded by remember { mutableStateOf(false) }
-                Box {
+                val selectedName = imageGenBases.find { it.url == backendUrl }?.name ?: if (backendUrl.isNotBlank()) "Custom URL" else "Select Server"
+                Box(modifier = Modifier.fillMaxWidth()) {
                     OutlinedTextField(
-                        value = targetLanguage,
-                        onValueChange = { },
+                        value = selectedName,
+                        onValueChange = {},
                         readOnly = true,
-                        label = { Text("Target Language") },
+                        label = { Text("A1111 Backend") },
                         modifier = Modifier.fillMaxWidth(),
                         trailingIcon = { IconButton(onClick = { expanded = true }) { Icon(Icons.Default.ArrowDropDown, null) } }
                     )
                     DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-                        TRANSLATION_LANGUAGES.forEach { lang ->
-                            DropdownMenuItem(text = { Text(lang) }, onClick = { targetLanguage = lang; expanded = false })
-                        }
-                    }
-                }
-            }
-        }
-
-        item {
-            Text("Theme Color", style = MaterialTheme.typography.labelSmall)
-            FlowRow(modifier = Modifier.fillMaxWidth(), maxItemsInEachRow = 6) {
-                PERSONA_PALETTE.forEach { color ->
-                    Box(
-                        modifier = Modifier
-                            .padding(4.dp)
-                            .size(36.dp)
-                            .clip(CircleShape)
-                            .background(color)
-                            .border(if (themeColor == color) 2.dp else 0.dp, Color.White, CircleShape)
-                            .clickable { themeColor = color }
-                    )
-                }
-            }
-        }
-
-        item {
-            SettingsSectionHeader(title = "Artwork", icon = Icons.Default.AddPhotoAlternate)
-            SettingsSection {
-                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    // Icon — previewed in the same circular crop ProviderLogo renders it
-                    // with, so what you pick is what you see on the persona list.
-                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-                        Box(
-                            modifier = Modifier
-                                .size(56.dp)
-                                .clip(CircleShape)
-                                .background(Color.White.copy(alpha = 0.08f)),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            if (iconImageUri != null) {
-                                AsyncImage(
-                                    model = File(iconImageUri!!),
-                                    contentDescription = null,
-                                    contentScale = ContentScale.Crop,
-                                    modifier = Modifier.fillMaxSize()
-                                )
-                            } else {
-                                Icon(Icons.Default.AddPhotoAlternate, null, tint = Color.White.copy(alpha = 0.4f))
-                            }
-                        }
-                        Spacer(Modifier.width(16.dp))
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text("Icon", style = MaterialTheme.typography.bodyMedium)
-                            Text("Replaces the provider badge on the persona list.",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
-                        }
-                        OutlinedButton(onClick = {
-                            iconPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
-                        }) { Text(if (iconImageUri == null) "Choose" else "Replace") }
-                    }
-                    if (iconImageUri != null) {
-                        // Clearing the field is enough: the save that follows reports the
-                        // change, and AssistantService.updatePersona deletes the now
-                        // unreferenced file.
-                        TextButton(onClick = { iconImageUri = null }) { Text("Remove icon") }
-                    }
-
-                    // Background — full-screen backdrop behind the voice screen in both
-                    // the classic and celestial layouts, cropped to fill.
-                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-                        Box(
-                            modifier = Modifier
-                                .size(56.dp)
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(Color.White.copy(alpha = 0.08f)),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            if (backgroundImageUri != null) {
-                                AsyncImage(
-                                    model = File(backgroundImageUri!!),
-                                    contentDescription = null,
-                                    contentScale = ContentScale.Crop,
-                                    modifier = Modifier.fillMaxSize()
-                                )
-                            } else {
-                                Icon(Icons.Default.Wallpaper, null, tint = Color.White.copy(alpha = 0.4f))
-                            }
-                        }
-                        Spacer(Modifier.width(16.dp))
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text("Background", style = MaterialTheme.typography.bodyMedium)
-                            Text("Full-screen backdrop behind the voice screen.",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
-                        }
-                        OutlinedButton(onClick = {
-                            backgroundPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
-                        }) { Text(if (backgroundImageUri == null) "Choose" else "Replace") }
-                    }
-                    if (backgroundImageUri != null) {
-                        TextButton(onClick = { backgroundImageUri = null }) { Text("Remove background") }
-                    }
-                }
-            }
-        }
-
-        item {
-            var expanded by remember { mutableStateOf(false) }
-            Box(modifier = Modifier.fillMaxWidth()) {
-                OutlinedTextField(
-                    value = selectedConnection,
-                    onValueChange = { },
-                    readOnly = true,
-                    label = { Text("Connection") },
-                    placeholder = { Text("Choose a server or provider") },
-                    modifier = Modifier.fillMaxWidth(),
-                    trailingIcon = {
-                        IconButton(onClick = { expanded = true }) {
-                            Icon(Icons.Default.Dns, null)
-                        }
-                    }
-                )
-                DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-                    if (allConnections.isEmpty()) {
-                        DropdownMenuItem(text = { Text("No connections configured") }, onClick = { })
-                    }
-                    allConnections.forEach { conn ->
-                        DropdownMenuItem(
-                            text = { Text(conn) },
-                            onClick = { 
-                                selectedConnection = conn
-                                model = "" // Reset model when connection changes
-                                expanded = false 
-                            }
-                        )
-                    }
-                }
-            }
-        }
-
-        item {
-            var expanded by remember { mutableStateOf(false) }
-            Box(modifier = Modifier.fillMaxWidth()) {
-                OutlinedTextField(
-                    value = model,
-                    onValueChange = { model = it },
-                    label = { Text("Model") },
-                    placeholder = { Text("Choose a model") },
-                    modifier = Modifier.fillMaxWidth(),
-                    trailingIcon = {
-                        IconButton(onClick = { expanded = true }) {
-                            Icon(Icons.Default.ArrowDropDown, null)
-                        }
-                    }
-                )
-                DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }, modifier = Modifier.fillMaxWidth(0.8f)) {
-                    if (filteredModels.isEmpty()) {
-                        DropdownMenuItem(text = { Text("No models found for this connection") }, onClick = { })
-                    }
-                    filteredModels.forEach { m ->
-                        DropdownMenuItem(
-                            text = { 
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Text(m, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-                                    IconButton(onClick = { service.toggleFavoriteModel(m) }, modifier = Modifier.size(32.dp)) {
-                                        Icon(
-                                            if (m in favorites) Icons.Default.Star else Icons.Default.StarBorder,
-                                            null,
-                                            tint = if (m in favorites) Color.Yellow else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f),
-                                            modifier = Modifier.size(18.dp)
-                                        )
-                                    }
-                                }
-                            },
-                            onClick = { model = m; expanded = false }
-                        )
-                    }
-                }
-            }
-        }
-
-        item {
-            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text("System Prompt", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f))
-                    IconButton(
-                        onClick = { showFullscreenPrompt = true },
-                        modifier = Modifier.size(32.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.OpenInFull,
-                            contentDescription = "Expand System Prompt",
-                            tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(18.dp)
-                        )
-                    }
-                }
-                OutlinedTextField(
-                    value = systemPrompt,
-                    onValueChange = { systemPrompt = it },
-                    modifier = Modifier.fillMaxWidth().height(120.dp),
-                    maxLines = 5
-                )
-            }
-        }
-
-        item {
-            var expanded by remember { mutableStateOf(false) }
-            val currentModeLabel = when (voiceMode) {
-                VoiceMode.NONE -> "None"
-                VoiceMode.SYSTEM_TTS -> "System TTS"
-                VoiceMode.BUNDLED_ESPEAK -> "Bundled eSpeak NG"
-                VoiceMode.GATEWAY -> {
-                    val gateways by service.serverBases.collectAsState()
-                    gateways.find { it.url == backendUrl }?.name ?: "Gateway (Custom URL)"
-                }
-            }
-            
-            Box(modifier = Modifier.fillMaxWidth()) {
-                OutlinedTextField(
-                    value = currentModeLabel,
-                    onValueChange = { },
-                    readOnly = true,
-                    label = { Text("Voice via") },
-                    modifier = Modifier.fillMaxWidth(),
-                    trailingIcon = {
-                        IconButton(onClick = { expanded = true }) {
-                            Icon(Icons.Default.ArrowDropDown, null)
-                        }
-                    }
-                )
-                DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }, modifier = Modifier.fillMaxWidth(0.8f)) {
-                    DropdownMenuItem(
-                        text = { Text("None") },
-                        onClick = { voiceMode = VoiceMode.NONE; expanded = false }
-                    )
-                    DropdownMenuItem(
-                        text = { 
-                            Column {
-                                Text("System TTS")
-                                Text("Built-in Android engine", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
-                            }
-                        },
-                        onClick = { voiceMode = VoiceMode.SYSTEM_TTS; expanded = false }
-                    )
-                    DropdownMenuItem(
-                        text = { 
-                            Column {
-                                Text("Bundled eSpeak NG")
-                                Text("Offline open-source engine", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
-                            }
-                        },
-                        onClick = { voiceMode = VoiceMode.BUNDLED_ESPEAK; expanded = false }
-                    )
-                    
-                    val gateways by service.serverBases.collectAsState()
-                    if (gateways.isNotEmpty()) {
-                        Text("GATEWAYS", modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
-                        gateways.forEach { gw ->
+                        imageGenBases.forEach { cfg ->
                             DropdownMenuItem(
-                                text = { 
-                                    Column {
-                                        Text(gw.name)
-                                        Text("Better voice, adds ~1-3s", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
-                                    }
-                                },
-                                onClick = { 
-                                    voiceMode = VoiceMode.GATEWAY
-                                    backendUrl = gw.url
-                                    expanded = false 
+                                text = { Text(cfg.name) },
+                                onClick = {
+                                    backendUrl = cfg.url
+                                    expanded = false
                                 }
                             )
                         }
                     }
-                    
-                    DropdownMenuItem(
-                        text = { Text("Gateway (Custom URL)") },
-                        onClick = { 
-                            voiceMode = VoiceMode.GATEWAY
-                            expanded = false 
-                        }
-                    )
                 }
-            }
-
-            Spacer(Modifier.height(8.dp))
-            Button(
-                onClick = { 
-                    service.testAudio("This is a test of the voice output.", voiceMode, backendUrl, targetLanguage, isTranslator, voiceEngine, kokoroVoice)
-                },
-                enabled = voiceMode != VoiceMode.NONE,
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(8.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = themeColor.copy(alpha = 0.8f))
-            ) {
-                Icon(Icons.AutoMirrored.Filled.VolumeUp, null)
-                Spacer(Modifier.width(8.dp))
-                Text("Test Audio")
-            }
-        }
-
-        if (voiceMode == VoiceMode.GATEWAY) {
-            item {
-                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text("Voice Engine", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
-                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            FilterChip(
-                                selected = voiceEngine == "kokoro",
-                                onClick = { voiceEngine = "kokoro" },
-                                label = { Text("Kokoro") },
-                                modifier = Modifier.weight(1f)
-                            )
-                            FilterChip(
-                                selected = voiceEngine == "sesame",
-                                onClick = { voiceEngine = "sesame" },
-                                label = { Text("Sesame") },
-                                modifier = Modifier.weight(1f)
-                            )
-                        }
-                        if (voiceEngine == "sesame") {
-                            Text(
-                                "Note: Sesame engine currently only supports English.",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = if (targetLanguage == "English") MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f) else MaterialTheme.colorScheme.error,
-                                modifier = Modifier.padding(start = 4.dp)
-                            )
-                        }
-                    }
-
-                    if (voiceEngine == "kokoro") {
-                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Text("Kokoro Voice", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
-                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                FilterChip(
-                                    selected = kokoroVoice == "af_heart",
-                                    onClick = { kokoroVoice = "af_heart" },
-                                    label = { Text("Default", style = MaterialTheme.typography.labelSmall) },
-                                    modifier = Modifier.weight(1f)
-                                )
-                                FilterChip(
-                                    selected = kokoroVoice == "af_nicole",
-                                    onClick = { kokoroVoice = "af_nicole" },
-                                    label = { Text("Nicole", style = MaterialTheme.typography.labelSmall) },
-                                    modifier = Modifier.weight(1f)
-                                )
-                                FilterChip(
-                                    selected = kokoroVoice == "am_echo",
-                                    onClick = { kokoroVoice = "am_echo" },
-                                    label = { Text("Echo", style = MaterialTheme.typography.labelSmall) },
-                                    modifier = Modifier.weight(1f)
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-            item {
                 OutlinedTextField(
                     value = backendUrl,
                     onValueChange = { backendUrl = it },
-                    label = { Text("Gateway URL") },
+                    label = { Text("Server URL") },
                     modifier = Modifier.fillMaxWidth()
                 )
             }
-            item {
-                Column {
-                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text("Allow Gateway Failover", style = MaterialTheme.typography.bodyMedium)
-                            Text("If this persona's configured gateway is unreachable, try other configured gateways instead of failing immediately.",
-                                style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
-                        }
-                        Switch(checked = allowGatewayFailover, onCheckedChange = { allowGatewayFailover = it })
+        }
+
+        if (isTranslator) {
+            var expanded by remember { mutableStateOf(false) }
+            Box {
+                OutlinedTextField(
+                    value = targetLanguage,
+                    onValueChange = { },
+                    readOnly = true,
+                    label = { Text("Target Language") },
+                    modifier = Modifier.fillMaxWidth(),
+                    trailingIcon = { IconButton(onClick = { expanded = true }) { Icon(Icons.Default.ArrowDropDown, null) } }
+                )
+                DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                    TRANSLATION_LANGUAGES.forEach { lang ->
+                        DropdownMenuItem(text = { Text(lang) }, onClick = { targetLanguage = lang; expanded = false })
                     }
                 }
             }
         }
 
-        item {
-            SettingsSectionHeader(title = "LLM Parameters", icon = Icons.Default.Tune)
-            SettingsSection {
+        Text("Theme Color", style = MaterialTheme.typography.labelSmall)
+        FlowRow(modifier = Modifier.fillMaxWidth(), maxItemsInEachRow = 6) {
+            PERSONA_PALETTE.forEach { color ->
+                Box(
+                    modifier = Modifier
+                        .padding(4.dp)
+                        .size(36.dp)
+                        .clip(CircleShape)
+                        .background(color)
+                        .border(if (themeColor == color) 2.dp else 0.dp, Color.White, CircleShape)
+                        .clickable { themeColor = color }
+                )
+            }
+        }
+
+        SettingsSectionHeader(title = "Artwork", icon = Icons.Default.AddPhotoAlternate)
+        SettingsSection {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                // Icon — previewed in the same circular crop ProviderLogo renders it
+                // with, so what you pick is what you see on the persona list.
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                    Box(
+                        modifier = Modifier
+                            .size(56.dp)
+                            .clip(CircleShape)
+                            .background(Color.White.copy(alpha = 0.08f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        if (iconImageUri != null) {
+                            AsyncImage(
+                                model = File(iconImageUri!!),
+                                contentDescription = null,
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        } else {
+                            Icon(Icons.Default.AddPhotoAlternate, null, tint = Color.White.copy(alpha = 0.4f))
+                        }
+                    }
+                    Spacer(Modifier.width(16.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Icon", style = MaterialTheme.typography.bodyMedium)
+                        Text("Replaces the provider badge on the persona list.",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
+                    }
+                    OutlinedButton(onClick = {
+                        iconPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                    }) { Text(if (iconImageUri == null) "Choose" else "Replace") }
+                }
+                if (iconImageUri != null) {
+                    // Clearing the field is enough: the save that follows reports the
+                    // change, and AssistantService.updatePersona deletes the now
+                    // unreferenced file.
+                    TextButton(onClick = { iconImageUri = null }) { Text("Remove icon") }
+                }
+
+                // Background — full-screen backdrop behind the voice screen in both
+                // the classic and celestial layouts, cropped to fill.
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                    Box(
+                        modifier = Modifier
+                            .size(56.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(Color.White.copy(alpha = 0.08f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        if (backgroundImageUri != null) {
+                            AsyncImage(
+                                model = File(backgroundImageUri!!),
+                                contentDescription = null,
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        } else {
+                            Icon(Icons.Default.Wallpaper, null, tint = Color.White.copy(alpha = 0.4f))
+                        }
+                    }
+                    Spacer(Modifier.width(16.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Background", style = MaterialTheme.typography.bodyMedium)
+                        Text("Full-screen backdrop behind the voice screen.",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
+                    }
+                    OutlinedButton(onClick = {
+                        backgroundPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                    }) { Text(if (backgroundImageUri == null) "Choose" else "Replace") }
+                }
+                if (backgroundImageUri != null) {
+                    TextButton(onClick = { backgroundImageUri = null }) { Text("Remove background") }
+                }
+            }
+        }
+
+        var connectionExpanded by remember { mutableStateOf(false) }
+        Box(modifier = Modifier.fillMaxWidth()) {
+            OutlinedTextField(
+                value = selectedConnection,
+                onValueChange = { },
+                readOnly = true,
+                label = { Text("Connection") },
+                placeholder = { Text("Choose a server or provider") },
+                modifier = Modifier.fillMaxWidth(),
+                trailingIcon = {
+                    IconButton(onClick = { connectionExpanded = true }) {
+                        Icon(Icons.Default.Dns, null)
+                    }
+                }
+            )
+            DropdownMenu(expanded = connectionExpanded, onDismissRequest = { connectionExpanded = false }) {
+                if (allConnections.isEmpty()) {
+                    DropdownMenuItem(text = { Text("No connections configured") }, onClick = { })
+                }
+                allConnections.forEach { conn ->
+                    DropdownMenuItem(
+                        text = { Text(conn) },
+                        onClick = { 
+                            selectedConnection = conn
+                            model = "" // Reset model when connection changes
+                            connectionExpanded = false 
+                        }
+                    )
+                }
+            }
+        }
+
+        var modelExpanded by remember { mutableStateOf(false) }
+        Box(modifier = Modifier.fillMaxWidth()) {
+            OutlinedTextField(
+                value = model,
+                onValueChange = { model = it },
+                label = { Text("Model") },
+                placeholder = { Text("Choose a model") },
+                modifier = Modifier.fillMaxWidth(),
+                trailingIcon = {
+                    IconButton(onClick = { modelExpanded = true }) {
+                        Icon(Icons.Default.ArrowDropDown, null)
+                    }
+                }
+            )
+            DropdownMenu(expanded = modelExpanded, onDismissRequest = { modelExpanded = false }, modifier = Modifier.fillMaxWidth(0.8f)) {
+                if (filteredModels.isEmpty()) {
+                    DropdownMenuItem(text = { Text("No models found for this connection") }, onClick = { })
+                }
+                filteredModels.forEach { m ->
+                    DropdownMenuItem(
+                        text = { 
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(m, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                                IconButton(onClick = { service.toggleFavoriteModel(m) }, modifier = Modifier.size(32.dp)) {
+                                    Icon(
+                                        if (m in favorites) Icons.Default.Star else Icons.Default.StarBorder,
+                                        null,
+                                        tint = if (m in favorites) Color.Yellow else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f),
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                            }
+                        },
+                        onClick = { model = m; modelExpanded = false }
+                    )
+                }
+            }
+        }
+
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("System Prompt", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f))
+                IconButton(
+                    onClick = { showFullscreenPrompt = true },
+                    modifier = Modifier.size(32.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.OpenInFull,
+                        contentDescription = "Expand System Prompt",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+            }
+            OutlinedTextField(
+                value = systemPrompt,
+                onValueChange = { systemPrompt = it },
+                modifier = Modifier.fillMaxWidth().height(120.dp),
+                maxLines = 5
+            )
+        }
+
+        var voiceExpanded by remember { mutableStateOf(false) }
+        val currentModeLabel = when (voiceMode) {
+            VoiceMode.NONE -> "None"
+            VoiceMode.SYSTEM_TTS -> "System TTS"
+            VoiceMode.BUNDLED_ESPEAK -> "Bundled eSpeak NG"
+            VoiceMode.GATEWAY -> {
+                val gateways by service.serverBases.collectAsState()
+                gateways.find { it.url == backendUrl }?.name ?: "Gateway (Custom URL)"
+            }
+        }
+        
+        Box(modifier = Modifier.fillMaxWidth()) {
+            OutlinedTextField(
+                value = currentModeLabel,
+                onValueChange = { },
+                readOnly = true,
+                label = { Text("Voice via") },
+                modifier = Modifier.fillMaxWidth(),
+                trailingIcon = {
+                    IconButton(onClick = { voiceExpanded = true }) {
+                        Icon(Icons.Default.ArrowDropDown, null)
+                    }
+                }
+            )
+            DropdownMenu(expanded = voiceExpanded, onDismissRequest = { voiceExpanded = false }, modifier = Modifier.fillMaxWidth(0.8f)) {
+                DropdownMenuItem(
+                    text = { Text("None") },
+                    onClick = { voiceMode = VoiceMode.NONE; voiceExpanded = false }
+                )
+                DropdownMenuItem(
+                    text = { 
+                        Column {
+                            Text("System TTS")
+                            Text("Built-in Android engine", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
+                        }
+                    },
+                    onClick = { voiceMode = VoiceMode.SYSTEM_TTS; voiceExpanded = false }
+                )
+                DropdownMenuItem(
+                    text = { 
+                        Column {
+                            Text("Bundled eSpeak NG")
+                            Text("Offline open-source engine", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
+                        }
+                    },
+                    onClick = { voiceMode = VoiceMode.BUNDLED_ESPEAK; voiceExpanded = false }
+                )
+                
+                val gateways by service.serverBases.collectAsState()
+                if (gateways.isNotEmpty()) {
+                    Text("GATEWAYS", modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                    gateways.forEach { gw ->
+                        DropdownMenuItem(
+                            text = { 
+                                Column {
+                                    Text(gw.name)
+                                    Text("Better voice, adds ~1-3s", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
+                                }
+                            },
+                            onClick = { 
+                                voiceMode = VoiceMode.GATEWAY
+                                backendUrl = gw.url
+                                voiceExpanded = false 
+                            }
+                        )
+                    }
+                }
+                
+                DropdownMenuItem(
+                    text = { Text("Gateway (Custom URL)") },
+                    onClick = { 
+                        voiceMode = VoiceMode.GATEWAY
+                        voiceExpanded = false 
+                    }
+                )
+            }
+        }
+
+        Spacer(Modifier.height(8.dp))
+        Button(
+            onClick = { 
+                service.testAudio("This is a test of the voice output.", voiceMode, backendUrl, targetLanguage, isTranslator, voiceEngine, kokoroVoice)
+            },
+            enabled = voiceMode != VoiceMode.NONE,
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(8.dp),
+            colors = ButtonDefaults.buttonColors(containerColor = themeColor.copy(alpha = 0.8f))
+        ) {
+            Icon(Icons.AutoMirrored.Filled.VolumeUp, null)
+            Spacer(Modifier.width(8.dp))
+            Text("Test Audio")
+        }
+
+        if (voiceMode == VoiceMode.GATEWAY) {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    ParameterSlider(label = "Temperature", value = temp, range = 0f..2f, onValueChange = { temp = it }, lowLabel = "More focused / predictable", highLabel = "More creative / random")
-                    ParameterSlider(label = "Top P", value = topP, range = 0f..1f, onValueChange = { topP = it }, lowLabel = "Narrower word choice", highLabel = "Wider word choice")
-                    ParameterSlider(label = "Repeat Penalty", value = repeatPenalty, range = 0.5f..2.0f, onValueChange = { repeatPenalty = it }, lowLabel = "Allows repetition", highLabel = "Avoids repetition")
-                    ParameterSlider(label = "Top K", value = topK.toFloat(), range = 1f..100f, onValueChange = { topK = it.toInt() }, format = { it.toInt().toString() }, lowLabel = "Fewer word options", highLabel = "More word options")
-                    ParameterSlider(label = "Max Response Length", value = maxTokens.toFloat(), range = 100f..8192f, onValueChange = { maxTokens = it.toInt() }, format = { it.toInt().toString() }, lowLabel = "Fast (slow CPU / low RAM)", highLabel = "Long (needs fast hardware)")
-                    // Continuous track, but state snaps to power-of-two detents so num_ctx
-                    // always lands on values Ollama operators expect (2k → 32k).
-                    ParameterSlider(label = "Context Window Size", value = numCtx.toFloat(), range = 2048f..32768f, onValueChange = { v -> numCtx = CTX_WINDOW_DETENTS.minByOrNull { kotlin.math.abs(it - v) } ?: v.toInt() }, format = { it.toInt().toString() }, lowLabel = "Smaller (less VRAM / faster)", highLabel = "Larger (more VRAM / memory-heavy)")
+                    Text("Voice Engine", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FilterChip(
+                            selected = voiceEngine == "kokoro",
+                            onClick = { voiceEngine = "kokoro" },
+                            label = { Text("Kokoro") },
+                            modifier = Modifier.weight(1f)
+                        )
+                        FilterChip(
+                            selected = voiceEngine == "sesame",
+                            onClick = { voiceEngine = "sesame" },
+                            label = { Text("Sesame") },
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                    if (voiceEngine == "sesame") {
+                        Text(
+                            "Note: Sesame engine currently only supports English.",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (targetLanguage == "English") MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f) else MaterialTheme.colorScheme.error,
+                            modifier = Modifier.padding(start = 4.dp)
+                        )
+                    }
+                }
 
-                    Spacer(Modifier.height(8.dp))
-                    Column {
-                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text("Enable Thinking Process", style = MaterialTheme.typography.bodyMedium)
-                                Text("Turn off for creative writing or simple chat — frees the full token budget for the response instead of internal reasoning.", 
-                                    style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
-                            }
-                            Switch(checked = enableThinking, onCheckedChange = { enableThinking = it })
+                if (voiceEngine == "kokoro") {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("Kokoro Voice", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            FilterChip(
+                                selected = kokoroVoice == "af_heart",
+                                onClick = { kokoroVoice = "af_heart" },
+                                label = { Text("Default", style = MaterialTheme.typography.labelSmall) },
+                                modifier = Modifier.weight(1f)
+                            )
+                            FilterChip(
+                                selected = kokoroVoice == "af_nicole",
+                                onClick = { kokoroVoice = "af_nicole" },
+                                label = { Text("Nicole", style = MaterialTheme.typography.labelSmall) },
+                                modifier = Modifier.weight(1f)
+                            )
+                            FilterChip(
+                                selected = kokoroVoice == "am_echo",
+                                onClick = { kokoroVoice = "am_echo" },
+                                label = { Text("Echo", style = MaterialTheme.typography.labelSmall) },
+                                modifier = Modifier.weight(1f)
+                            )
                         }
                     }
-
-                    Spacer(Modifier.height(8.dp))
-                    Column {
-                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text("Web Search", style = MaterialTheme.typography.bodyMedium)
-                                Text("Search the web before responding — best for factual or current-events questions.", 
-                                    style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
-                            }
-                            Switch(checked = webSearchEnabled, onCheckedChange = { webSearchEnabled = it })
-                        }
+                }
+            }
+            OutlinedTextField(
+                value = backendUrl,
+                onValueChange = { backendUrl = it },
+                label = { Text("Gateway URL") },
+                modifier = Modifier.fillMaxWidth()
+            )
+            Column {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Allow Gateway Failover", style = MaterialTheme.typography.bodyMedium)
+                        Text("If this persona's configured gateway is unreachable, try other configured gateways instead of failing immediately.",
+                            style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
                     }
+                    Switch(checked = allowGatewayFailover, onCheckedChange = { allowGatewayFailover = it })
+                }
+            }
+        }
 
-                    Spacer(Modifier.height(8.dp))
-                    Column {
-                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text("Knowledge Base", style = MaterialTheme.typography.bodyMedium)
-                                Text("Search your uploaded documents before responding.",
-                                    style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
-                            }
-                            Switch(checked = ragEnabled, onCheckedChange = { ragEnabled = it })
+        SettingsSectionHeader(title = "LLM Parameters", icon = Icons.Default.Tune)
+        SettingsSection {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                ParameterSlider(label = "Temperature", value = temp, range = 0f..2f, onValueChange = { temp = it }, lowLabel = "More focused / predictable", highLabel = "More creative / random")
+                ParameterSlider(label = "Top P", value = topP, range = 0f..1f, onValueChange = { topP = it }, lowLabel = "Narrower word choice", highLabel = "Wider word choice")
+                ParameterSlider(label = "Repeat Penalty", value = repeatPenalty, range = 0.5f..2.0f, onValueChange = { repeatPenalty = it }, lowLabel = "Allows repetition", highLabel = "Avoids repetition")
+                ParameterSlider(label = "Top K", value = topK.toFloat(), range = 1f..100f, onValueChange = { topK = it.toInt() }, format = { it.toInt().toString() }, lowLabel = "Fewer word options", highLabel = "More word options")
+                ParameterSlider(label = "Max Response Length", value = maxTokens.toFloat(), range = 100f..8192f, onValueChange = { maxTokens = it.toInt() }, format = { it.toInt().toString() }, lowLabel = "Fast (slow CPU / low RAM)", highLabel = "Long (needs fast hardware)")
+                // Continuous track, but state snaps to power-of-two detents so num_ctx
+                // always lands on values Ollama operators expect (2k → 32k).
+                ParameterSlider(label = "Context Window Size", value = numCtx.toFloat(), range = 2048f..32768f, onValueChange = { v -> numCtx = CTX_WINDOW_DETENTS.minByOrNull { kotlin.math.abs(it - v) } ?: v.toInt() }, format = { it.toInt().toString() }, lowLabel = "Smaller (less VRAM / faster)", highLabel = "Larger (more VRAM / memory-heavy)")
+
+                Spacer(Modifier.height(8.dp))
+                Column {
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Enable Thinking Process", style = MaterialTheme.typography.bodyMedium)
+                            Text("Turn off for creative writing or simple chat — frees the full token budget for the response instead of internal reasoning.", 
+                                style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
                         }
+                        Switch(checked = enableThinking, onCheckedChange = { enableThinking = it })
+                    }
+                }
+
+                Spacer(Modifier.height(8.dp))
+                Column {
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Web Search", style = MaterialTheme.typography.bodyMedium)
+                            Text("Search the web before responding — best for factual or current-events questions.", 
+                                style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
+                        }
+                        Switch(checked = webSearchEnabled, onCheckedChange = { webSearchEnabled = it })
+                    }
+                }
+
+                Spacer(Modifier.height(8.dp))
+                Column {
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Knowledge Base", style = MaterialTheme.typography.bodyMedium)
+                            Text("Search your uploaded documents before responding.",
+                                style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
+                        }
+                        Switch(checked = ragEnabled, onCheckedChange = { ragEnabled = it })
                     }
                 }
             }
         }
 
         onDelete?.let {
-            item {
-                Spacer(Modifier.height(24.dp))
-                Button(
-                    onClick = { showDeleteConfirm = true },
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(8.dp),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.errorContainer,
-                        contentColor = MaterialTheme.colorScheme.onErrorContainer
-                    )
-                ) {
-                    Icon(Icons.Default.Delete, null)
-                    Spacer(Modifier.width(8.dp))
-                    Text("Delete Persona")
-                }
-                Spacer(Modifier.height(16.dp))
+            Spacer(Modifier.height(24.dp))
+            Button(
+                onClick = { showDeleteConfirm = true },
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(8.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.errorContainer,
+                    contentColor = MaterialTheme.colorScheme.onErrorContainer
+                )
+            ) {
+                Icon(Icons.Default.Delete, null)
+                Spacer(Modifier.width(8.dp))
+                Text("Delete Persona")
             }
+            Spacer(Modifier.height(16.dp))
         }
     }
 

@@ -222,9 +222,8 @@ private fun SettingsCategoryList(
  *
  * Replaces the accordion entirely. There is no height cap and no internal scrollbox —
  * the LazyColumn here is the only thing that scrolls, exactly like the Personas/Rooms
- * list-then-editor screens already did. The editors are the one exception: PersonaEditor
- * and RoomEditor are self-scrolling by construction, so each bounds itself
- * (PersonaEditorMaxHeight / RoomEditorMaxHeight).
+ * list-then-editor screens already did. PersonaEditor and RoomEditor are plain Columns
+ * for the same reason: no nested scroller for them to cap.
  *
  * @param onBack invoked by the header arrow; the caller clears its active-category state
  *   and the flat list reappears exactly as it was left.

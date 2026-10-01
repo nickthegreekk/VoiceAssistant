@@ -16,6 +16,12 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextClearance
 import androidx.compose.ui.test.performTextInput
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.ui.Modifier
+import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -149,6 +155,30 @@ class RoomEditorUiPersistenceInstrumentedTest {
         voiceMode = VoiceMode.NONE
     )
     /**
+     * Renders [RoomEditor] inside a bounded, scrolling parent — what the category page's
+     * LazyColumn does in the real app.
+     *
+     * The editor is deliberately a plain Column now (no nested scrollable, no height cap),
+     * so a test that mounts it on its own must supply the scrolling parent itself.
+     * `performScrollTo()` in the tests below relies on this too.
+     */
+    @Composable
+    private fun RoomEditorInPage(
+        room: Room,
+        personas: List<Persona>,
+        onClose: () -> Unit,
+        service: AssistantService
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+        ) {
+            RoomEditor(room = room, personas = personas, onClose = onClose, service = service)
+        }
+    }
+
+    /**
      * THE REGRESSION THIS EXISTS FOR.
      *
      * PersonaEditor commits every field through a debounced auto-save and, crucially, a
@@ -172,7 +202,7 @@ class RoomEditorUiPersistenceInstrumentedTest {
         composeRule.setContent {
             androidx.compose.material3.MaterialTheme {
                 if (editorOpen) {
-                    RoomEditor(
+                    RoomEditorInPage(
                         room = room,
                         personas = personas,
                         onClose = { editorOpen = false },
@@ -210,7 +240,7 @@ class RoomEditorUiPersistenceInstrumentedTest {
         var closed = false
         composeRule.setContent {
             androidx.compose.material3.MaterialTheme {
-                RoomEditor(room = room, personas = personas, onClose = { closed = true }, service = service)
+                RoomEditorInPage(room = room, personas = personas, onClose = { closed = true }, service = service)
             }
         }
         composeRule.waitForIdle()
@@ -239,7 +269,7 @@ class RoomEditorUiPersistenceInstrumentedTest {
         composeRule.setContent {
             androidx.compose.material3.MaterialTheme {
                 if (editorOpen) {
-                    RoomEditor(room = room, personas = personas, onClose = { editorOpen = false }, service = service)
+                    RoomEditorInPage(room = room, personas = personas, onClose = { editorOpen = false }, service = service)
                 }
             }
         }
@@ -268,7 +298,7 @@ class RoomEditorUiPersistenceInstrumentedTest {
 
         composeRule.setContent {
             androidx.compose.material3.MaterialTheme {
-                RoomEditor(room = room, personas = personas, onClose = {}, service = service)
+                RoomEditorInPage(room = room, personas = personas, onClose = {}, service = service)
             }
         }
         composeRule.waitForIdle()

@@ -8,7 +8,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -16,11 +16,9 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
@@ -354,8 +352,8 @@ fun RoomSettings(
         editingRoomId = room.id
     }
 
-    // RoomEditor is its own verticalScroll root; like PersonaEditor it carries its own
-    // height bound (RoomEditorMaxHeight) so it still scrolls inside itself.
+    // Neither editor scrolls itself: both are plain Columns and the category page's
+    // LazyColumn is the single scroller.
     if (editingRoom == null) {
         // Back from a deleted room (deleted in the editor, or the persona-deletion
         // cascade removed it): don't hold a stale id.
@@ -430,17 +428,10 @@ fun RoomSettings(
  * member/cap edits committed through the service flow straight back in with no local
  * draft to drift. The name and cap fields are the only locals, mirroring
  * PersonaEditor's edit-then-commit discipline for text fields.
- */
-/**
- * Max height of the room editor before it scrolls inside itself.
  *
- * RoomEditor is a `verticalScroll` root, which likewise requires a bounded height —
- * unbounded inside the page LazyColumn throws "Vertically scrollable component was
- * measured with an infinity maximum height constraints". The editor owns this bound
- * itself, independently of the (now uncapped) section surface.
+ * Like PersonaEditor, the body below is a plain Column with NO scrolling of its own —
+ * the category page's LazyColumn is the single scroller.
  */
-internal val RoomEditorMaxHeight = 420.dp
-
 @Composable
 fun RoomEditor(room: Room, personas: List<Persona>, onClose: () -> Unit, service: AssistantService) {
     var name by rememberSaveable(room.id) { mutableStateOf(room.name) }
@@ -483,7 +474,7 @@ fun RoomEditor(room: Room, personas: List<Persona>, onClose: () -> Unit, service
         onDispose { commitNow() }
     }
 
-    Column(modifier = Modifier.heightIn(max = RoomEditorMaxHeight).verticalScroll(rememberScrollState())) {
+    Column(modifier = Modifier.fillMaxWidth().imePadding()) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onClose) {
                 Icon(Icons.Default.ChevronRight, null, modifier = Modifier.size(20.dp))
