@@ -373,6 +373,26 @@ class SettingsManager(context: Context) {
         } else emptyList()
     }
 
+    // ---------------------------------------------------------------- Skills
+    // Same shape as the persona list/history and room entries above: one JSON key for the
+    // shared library, corruption-tolerant reads, `emptyList()` when absent so a fresh
+    // install and any pre-Skills backup both behave as "no skills defined".
+    fun saveSkills(skills: List<Skill>) {
+        prefs.edit().putString("skills_v1", json.encodeToString(skills)).apply()
+    }
+
+    fun getSkills(): List<Skill>? {
+        val data = prefs.getString("skills_v1", null)
+        if (data != null) {
+            return runCatching { json.decodeFromString<List<Skill>>(data) }
+                .onFailure { e ->
+                    Log.w("SettingsManager", "Corrupted/unreadable JSON in skills_v1 — ignoring entry, returning null", e)
+                }
+                .getOrNull()
+        }
+        return emptyList()
+    }
+
     fun saveRoomMessages(roomId: String, messages: List<RoomMessage>) {
         val capped = if (messages.size > MAX_ROOM_MESSAGES) {
             messages.subList(messages.size - MAX_ROOM_MESSAGES, messages.size)
@@ -637,7 +657,10 @@ class SettingsManager(context: Context) {
             // Rooms + their transcripts, keyed by room UUID. Resolved once: the
             // transcript map must be built from the SAME room list the backup carries.
             rooms = exportedRooms,
-            roomMessages = exportedRooms.associate { it.id to (getRoomMessages(it.id) ?: emptyList()) }
+            roomMessages = exportedRooms.associate { it.id to (getRoomMessages(it.id) ?: emptyList()) },
+            // Skills travel whole and unpruned: the personas below carry the ids that point
+            // into this list, and the import prunes any that don't resolve.
+            skills = getSkills() ?: emptyList()
         )
         return json.encodeToString(backup)
     }
@@ -667,7 +690,18 @@ class SettingsManager(context: Context) {
             saveImageGenBases(backup.imageGenBases)
             saveCloudApis(backup.cloudApis)
             saveCustomCloudApis(backup.customCloudApis)
-            savePersonas(restoredPersonas)
+            // Skills land BEFORE the personas, because each persona's enabledSkillIds are
+            // pruned against this exact list below: a backup that carried skills but a
+            // persona referencing a skill this backup doesn't contain must not restore an
+            // enabled-but-missing skill.
+            saveSkills(backup.skills)
+            val restoredSkillIds = backup.skills.map { it.id }.toSet()
+            savePersonas(
+                restoredPersonas.map { persona ->
+                    val kept = persona.enabledSkillIds.filter { it in restoredSkillIds }
+                    if (kept.size == persona.enabledSkillIds.size) persona else persona.copy(enabledSkillIds = kept)
+                }
+            )
             saveMessages(backup.messages)
             backup.personaMessages.forEach { (name, msgs) ->
                 savePersonaMessages(name, msgs)
@@ -980,7 +1014,13 @@ data class BackupData(
     // backup written before Rooms existed still decodes (and, thanks to
     // ignoreUnknownKeys, a NEW backup still imports into an older build).
     val rooms: List<Room> = emptyList(),
-    val roomMessages: Map<String, List<RoomMessage>> = emptyMap()
+    val roomMessages: Map<String, List<RoomMessage>> = emptyMap(),
+    // The shared Skills library travels with the backup like personas and rooms do, so a
+    // restored install keeps its skills AND the personas' enabledSkillIds that point at them.
+    // Defaulted, so a backup written before Skills existed still decodes (and, thanks to
+    // ignoreUnknownKeys, a NEW backup still imports into an older build — which simply
+    // ignores the field and leaves every persona with no skills).
+    val skills: List<Skill> = emptyList()
 )
 
 // One persona's embedded artwork. Both slots are optional: a persona may have only an

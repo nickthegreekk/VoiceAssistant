@@ -102,6 +102,17 @@ data class Persona(
     val enableThinking: Boolean = true,
     val webSearchEnabled: Boolean = false,
     val ragEnabled: Boolean = false,
+    /**
+     * Ids of the enabled [Skill]s, from the shared library. Reference-by-id, never a copy
+     * of the instruction text — the same relationship a persona's `backendUrl` has to the
+     * server list. Editing a skill therefore updates every persona that enabled it at once,
+     * with no fan-out write.
+     *
+     * Defaulted, so personas persisted before Skills existed decode unchanged. Ids that no
+     * longer resolve (a skill was deleted) are dropped by `AssistantService.removeSkill` and
+     * again by the backup restore, so the UI never has to render an enabled-but-missing skill.
+     */
+    val enabledSkillIds: List<String> = emptyList(),
     // Custom persona artwork. These hold INTERNAL paths inside the app's own
     // filesDir (filesDir/persona_images/...), never raw photo-picker URIs: the
     // picked image is copied + downsampled into app storage at selection time,
@@ -150,6 +161,37 @@ data class ServerConfig(
  * (history storage, rename migration, backup), and is kept in sync by
  * `AssistantService.updatePersona`/`removePersona`.
  */
+/**
+ * One entry of the shared Skills library: instruction text plus the trigger phrases that
+ * activate it.
+ *
+ * A skill is defined ONCE and referenced by any number of personas
+ * ([Persona.enabledSkillIds]) — the same "defined once, attached to many" relationship the
+ * server lists already have to personas, and never duplicated per persona. Editing a skill
+ * therefore changes it for every persona that enabled it.
+ *
+ * When a user's message matches one of this skill's [triggerPhrases] and the speaking persona
+ * has the skill enabled, [instructions] is appended to the system prompt for THAT ONE TURN
+ * only: it is never persisted into history and never reappears when earlier turns are replayed.
+ *
+ * [id] is a UUID (not the name) for the same reason [Room]'s is — see its KDoc: a skill must
+ * stay freely renameable, and a deleted-then-recreated skill must never inherit the references
+ * of the one it replaced.
+ */
+@Serializable
+data class Skill(
+    val id: String = java.util.UUID.randomUUID().toString(),
+    val name: String,
+    /**
+     * Zero or more. Matched case-insensitively as a PREFIX of the trimmed user message,
+     * mirroring `isImageGenerationRequest`. A skill with none can still be enabled, but never
+     * fires — the UI should say so rather than silently accept a dead skill.
+     */
+    val triggerPhrases: List<String> = emptyList(),
+    /** The text injected into the system prompt on a matching turn. */
+    val instructions: String = ""
+)
+
 @Serializable
 data class Room(
     val id: String = java.util.UUID.randomUUID().toString(),

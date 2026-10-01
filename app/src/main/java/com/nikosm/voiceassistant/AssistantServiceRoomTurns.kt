@@ -50,6 +50,21 @@ internal fun formatRoomTranscriptLine(msg: RoomMessage): String =
     "${roomTranscriptLabel(msg.speakerName)}: ${msg.text}"
 
 /**
+ * The user's own most recent message in a room transcript — the text skill triggers are
+ * matched against for a room turn — or null when the transcript holds no user message.
+ *
+ * Searched over the WHOLE transcript rather than "the last entry": a round's later turns
+ * follow other members' replies, so the last entry is usually a persona, and taking the last
+ * user turn is what keeps a skill fired by the user's question applying to every member
+ * that answers it (rather than only the member whose turn happened to be first).
+ *
+ * Blank text is skipped for the same reason [roomHistoryAsChatMessages] skips it: a
+ * streaming placeholder is not something the user said.
+ */
+internal fun latestUserTurnText(messages: List<RoomMessage>): String? =
+    messages.lastOrNull { it.isUser && it.text.isNotBlank() }?.text
+
+/**
  * Build the context history one member sees: the whole room transcript, labeled by
  * speaker. [speakingPersonaName] is accepted to make the intent explicit at the call
  * site — the label set is deliberately identical for every participant, so no persona
@@ -298,11 +313,22 @@ internal suspend fun AssistantService.runRoomTurn(
 ) {
     // Snapshot the transcript as it stands NOW: the user's message (or the previous
     // member's reply) is what this member must react to.
+    val transcript = _roomMessages.value
     val turnContext = TurnContext(
-        history = roomHistoryAsChatMessages(_roomMessages.value, persona.name),
+        history = roomHistoryAsChatMessages(transcript, persona.name),
+        // Skills (Q1/Q7): the SAME injection point single-chat and voice use — rooms are
+        // simply another way of talking TO a persona, so a persona must not behave
+        // differently here (Q7). Matched against the user's OWN last message in the
+        // transcript, never against roomTurnInstruction: that is a fixed internal
+        // instruction issued to every member of every round, so matching against it would
+        // make every skill with a common-word trigger fire on every turn in every room.
+        // The user's message still reads naturally to a human, so the text flow and the
+        // room flow fire on the same words.
         systemPromptSuffix = roomSystemPromptSuffix(room, persona),
         sink = RoomTurnSink(this, room.id, persona.name)
-    )
+    ).let { base ->
+        latestUserTurnText(transcript)?.let { base.withSkills(it, persona, _skills.value) } ?: base
+    }
     val startTime = System.currentTimeMillis()
 
     if (cloud) {

@@ -493,6 +493,15 @@ class AssistantService : Service() {
     private val _personas = MutableStateFlow<List<Persona>>(emptyList())
     val personas = _personas.asStateFlow()
 
+    // ---------------------------------------------------------------- Skills
+    // The shared, persona-independent instruction library. Deliberately ONE list every
+    // persona references by id (Persona.enabledSkillIds), exactly like _serverBases is
+    // referenced by a persona's backendUrl — a skill is authored once and edited once, and
+    // every persona that enabled it sees the change at the next turn. Nothing is copied per
+    // persona, so there is no fan-out write to keep in step.
+    internal val _skills = MutableStateFlow<List<Skill>>(emptyList())
+    val skills = _skills.asStateFlow()
+
     // ---------------------------------------------------------------- Rooms
     // Room state is deliberately PARALLEL to, never merged into, the single-chat state
     // above: a room has its own identity, its own transcript, and its own round state,
@@ -1310,6 +1319,12 @@ class AssistantService : Service() {
         
         val loadedPersonas = settingsManager.getPersonas() ?: emptyList()
         _personas.value = loadedPersonas
+
+        // Skills load before the personas are used for anything, because a persona's
+        // enabledSkillIds are resolved against this list. A persona referencing a skill that
+        // no longer exists is not repaired here — enabledSkillsFor() simply drops the id, so
+        // a stale reference can never inject anything or throw.
+        _skills.value = settingsManager.getSkills() ?: emptyList()
         
         // If we have personas, initialize the first one as current if not already set
         if (currentPersonaName == null && loadedPersonas.isNotEmpty()) {
@@ -1361,6 +1376,10 @@ class AssistantService : Service() {
         settingsManager.saveCloudApis(_cloudApis.value)
         settingsManager.saveCustomCloudApis(_customCloudApis.value)
         settingsManager.savePersonas(_personas.value)
+        // The shared skill library rides the same debounced save. Written before the persona
+        // list so a restore/export snapshot always sees skills and referencing personas in a
+        // consistent pair, never a persona pointing at a library entry that wasn't saved.
+        settingsManager.saveSkills(_skills.value)
         // Rooms ride the same debounced save as everything else. Their transcripts do
         // NOT — those go through saveRoomHistory(), because a room transcript belongs to
         // no persona and must never be keyed off the single-chat owner bookkeeping below.
@@ -1718,6 +1737,96 @@ class AssistantService : Service() {
             }
             saveSettings()
         }
+    }
+
+    // ---------------------------------------------------------------- Skills
+    // Library edits follow the same mutate-then-saveSettings() shape as the server lists
+    // (addServerBase/updateCloudApi/...): the flow is the single source of truth for the UI,
+    // and persistence is the existing debounced save, not a bespoke one.
+    fun addSkill(skill: Skill) {
+        _skills.value = _skills.value + skill
+        saveSettings()
+    }
+
+    fun updateSkill(index: Int, skill: Skill) {
+        val current = _skills.value.toMutableList()
+        if (index !in current.indices) return
+        // The id is the reference every persona holds, so it is NOT editable: keep the
+        // existing one even if the caller passes a different value, exactly as updateCloudApi
+        // keeps a stable identity.
+        current[index] = skill.copy(id = current[index].id)
+        _skills.value = current
+        saveSettings()
+    }
+
+    /**
+     * Delete a skill AND drop its id from every persona that enabled it.
+     *
+     * Pruning here (rather than only at read time) keeps the persisted data honest: without
+     * it a deleted skill leaves permanent dangling ids that every export would carry, and the
+     * persona UI would have to render an enabled-but-missing entry forever. This is the same
+     * obligation removePersona has toward Room.memberNames.
+     */
+    fun removeSkill(skill: Skill) {
+        _skills.value = _skills.value - skill
+        val referencing = _personas.value.filter { skill.id in it.enabledSkillIds }
+        if (referencing.isNotEmpty()) {
+            _personas.value = _personas.value.map { persona ->
+                if (skill.id !in persona.enabledSkillIds) persona
+                else persona.copy(enabledSkillIds = persona.enabledSkillIds - skill.id)
+            }
+        }
+        saveSettings()
+    }
+
+    fun moveSkillUp(skill: Skill) {
+        val list = _skills.value.toMutableList()
+        val idx = list.indexOf(skill)
+        if (idx > 0) {
+            val temp = list[idx]
+            list[idx] = list[idx - 1]
+            list[idx - 1] = temp
+            _skills.value = list
+            saveSettings()
+        }
+    }
+
+    fun moveSkillDown(skill: Skill) {
+        val list = _skills.value.toMutableList()
+        val idx = list.indexOf(skill)
+        if (idx != -1 && idx < list.size - 1) {
+            val temp = list[idx]
+            list[idx] = list[idx + 1]
+            list[idx + 1] = temp
+            _skills.value = list
+            saveSettings()
+        }
+    }
+
+    /**
+     * Turn a skill on/off for one persona.
+     *
+     * A separate entry point from [updatePersona] so the whole app mutates this field through
+     * one place: it rebuilds the persona in place (preserving list order, which the persona
+     * selector, deletion fallback and reorder all depend on) and saves immediately, rather
+     * than leaving a caller to remember.
+     */
+    fun setSkillEnabledForPersona(personaName: String, skillId: String, enabled: Boolean) {
+        val current = _personas.value
+        val idx = current.indexOfFirst { it.name == personaName }
+        if (idx == -1) return
+        val persona = current[idx]
+        val ids = persona.enabledSkillIds
+        val updated = when {
+            enabled && skillId !in ids -> ids + skillId
+            !enabled && skillId in ids -> ids - skillId
+            else -> return
+        }
+        // Rebuild rather than mutate in place: _personas.value hands out an immutable List.
+        // Replacing only this index keeps every other persona's identity — and the list ORDER
+        // the selector, reorder controls and deletion fallback depend on — untouched.
+        _personas.value = current.toMutableList().also { it[idx] = persona.copy(enabledSkillIds = updated) }
+        saveSettings()
     }
 
     fun removePersona(index: Int) {

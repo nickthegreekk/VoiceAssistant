@@ -268,7 +268,15 @@ internal fun AssistantService.sendAudioToServer(file: File, currentPersona: Pers
                     // _messages, so buildCloudRequest drops exactly that entry from the
                     // history slice and re-appends it as the current turn — it reaches
                     // the model once, and the prior turns stay intact.
-                    performCloudChat(transcribedText, currentPersona, useDeviceVoice, startTime, currentTurnInHistory = true, generation = generation)
+                    //
+                    // Skills (Q1/Q7): voice is a first-class participant — the same
+                    // injection point the text flow uses, matched against the TRANSCRIPTION
+                    // (the user's actual words, which only exist after this point) and
+                    // forwarded as a turnContext, exactly as the text flow does. Before this
+                    // the voice path passed no turnContext at all, so a spoken turn silently
+                    // ignored every skill. Resolved here rather than at the top of
+                    // sendAudioToServer because the trigger text does not exist yet.
+                    performCloudChat(transcribedText, currentPersona, useDeviceVoice, startTime, currentTurnInHistory = true, generation = generation, turnContext = turnContextWithSkills(transcribedText, currentPersona))
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
@@ -340,7 +348,11 @@ internal fun AssistantService.sendAudioToServer(file: File, currentPersona: Pers
                          }
 
                          // 2. Chat with Ollama
-                         val directRes = performDirectOllamaChat(ollamaBase, actualModel, transcribedText, currentPersona, currentTurnInHistory = false, generation = generation)
+                         // Skills (Q1/Q7): same injection point as the text flow, matched
+                         // against the transcription and forwarded as a turnContext. This call
+                         // previously omitted turnContext entirely, so a spoken turn to a
+                         // direct-Ollama persona ignored every skill.
+                         val directRes = performDirectOllamaChat(ollamaBase, actualModel, transcribedText, currentPersona, currentTurnInHistory = false, generation = generation, turnContext = turnContextWithSkills(transcribedText, currentPersona))
                          // Fix #5 (voice-flow follow-up): clean markdown for TTS on IO —
                          // the cleaned variant feeds the on-device engines (5th element);
                          // the chat bubble/history keep the original markdown. This branch
@@ -657,6 +669,14 @@ internal fun AssistantService.sendTextMessageToServer(inputText: String, current
     if (inputText.isBlank() && attachments.isEmpty() && imageUri == null) return
     val startTime = System.currentTimeMillis()
     _voiceDuration.value = 0
+
+    // Skills (Q1/Q7): resolve this turn's matched skill instructions ONCE, before the launch,
+    // and fold them into the turn's systemPromptSuffix. The user's own message stays
+    // byte-for-byte unchanged — trigger matching never rewrites what they typed (Q4). The
+    // suffix is a one-turn construct: it is never appended to _messages, so it cannot reach
+    // the transcript or the next turn (Q2). Resolving before the launch also means a turn
+    // that is superseded before it starts never produces skill text at all.
+    val turnContext = turnContextWithSkills(inputText, currentPersona, turnContext)
 
     serviceScope.launch {
         val imagePath = imageUri?.let { saveMessageImage(it) }

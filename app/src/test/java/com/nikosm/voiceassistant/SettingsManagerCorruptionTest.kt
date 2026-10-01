@@ -183,6 +183,12 @@ class SettingsManagerCorruptionTest {
         assertNull(manager.getRooms())
     }
 
+    @Test fun `corrupted skills_v1 returns null instead of crashing`() {
+        val (manager, prefs) = newManagerWithPlainPrefs()
+        prefs.edit().put("skills_v1", GARBAGE)
+        assertNull(manager.getSkills())
+    }
+
     @Test fun `corrupted favorite_models_v2 returns null instead of crashing`() {
         val (manager, prefs) = newManagerWithPlainPrefs()
         prefs.edit().put("favorite_models_v2", GARBAGE)
@@ -394,5 +400,94 @@ class SettingsManagerCorruptionTest {
         val (manager2, _) = newManagerWithPlainPrefs()
         assertTrue("an old backup must still import", manager2.importBackup(legacy))
         assertEquals(emptyList<Room>(), manager2.getRooms())
+    }
+
+    // ---- Skills: the shared library is persona-INDEPENDENT, so a persona holds only ids.
+    // ---- These pin that relationship surviving a full backup/restore onto another device.
+
+    private val skillLibrary = listOf(
+        Skill(id = "s-poem", name = "Poet", triggerPhrases = listOf("write a poem"), instructions = "Answer in verse."),
+        Skill(id = "s-joke", name = "Joker", triggerPhrases = listOf("tell me a joke"), instructions = "Be funny.")
+    )
+
+    @Test fun `skills round-trip unchanged through their own key`() {
+        val (manager, prefs) = newManagerWithPlainPrefs()
+        manager.saveSkills(skillLibrary)
+        val stored = prefs.getString("skills_v1", null)
+        assertTrue("expected raw JSON in fallback store, got: $stored", stored!!.contains("\"s-poem\""))
+        assertEquals(skillLibrary, manager.getSkills())
+    }
+
+    @Test fun `an absent skills key reads as no skills rather than null`() {
+        val (manager, _) = newManagerWithPlainPrefs()
+        // A fresh install and every pre-Skills backup must mean "no skills", not "unknown".
+        assertEquals(emptyList<Skill>(), manager.getSkills())
+    }
+
+    @Test fun `a persona's enabled skills survive a backup and restore`() {
+        val (manager, _) = newManagerWithPlainPrefs()
+        manager.saveSkills(skillLibrary)
+        manager.savePersonas(
+            listOf(
+                Persona(
+                    name = "A",
+                    themeColor = androidx.compose.ui.graphics.Color(0xFF4ADE80),
+                    model = "[S] m",
+                    systemPrompt = "sys",
+                    enabledSkillIds = listOf("s-joke", "s-poem")
+                )
+            )
+        )
+        val export = manager.exportBackup()
+
+        // Restore onto a different (empty) device, as a reinstall or a new phone would.
+        val (manager2, _) = newManagerWithPlainPrefs()
+        assertTrue(manager2.importBackup(export))
+        assertEquals(skillLibrary, manager2.getSkills())
+        assertEquals(listOf("s-joke", "s-poem"), manager2.getPersonas()!!.single().enabledSkillIds)
+    }
+
+    @Test fun `restoring prunes enabled skills the backup does not carry`() {
+        val (manager, _) = newManagerWithPlainPrefs()
+        // The persona's store references the joker, but the library does not contain it —
+        // the state a restore faces when a backup was hand-edited, or written by a build
+        // whose library had already dropped the skill. Written straight to the store so the
+        // two lists genuinely disagree: going through removeSkill would (correctly) prune the
+        // persona too, leaving nothing here to test.
+        manager.saveSkills(listOf(skillLibrary[0]))
+        manager.savePersonas(
+            listOf(
+                Persona(
+                    name = "A",
+                    themeColor = androidx.compose.ui.graphics.Color(0xFF4ADE80),
+                    model = "[S] m",
+                    systemPrompt = "sys",
+                    enabledSkillIds = listOf("s-joke")
+                )
+            )
+        )
+        val export = manager.exportBackup()
+        val (manager2, _) = newManagerWithPlainPrefs()
+        assertTrue("backup must import", manager2.importBackup(export))
+        assertEquals(
+            "the dangling id must be pruned on restore",
+            emptyList<String>(),
+            manager2.getPersonas()!!.single().enabledSkillIds
+        )
+        // The persona that survives is otherwise untouched, and the real skill is kept.
+        assertEquals(listOf("s-poem"), manager2.getSkills()!!.map { it.id })
+        assertEquals("A", manager2.getPersonas()!!.single().name)
+    }
+
+    @Test fun `a backup written before skills existed still imports`() {
+        val (manager, _) = newManagerWithPlainPrefs()
+        manager.saveServerBases(listOf(ServerConfig("S1", "http://10.0.0.2:11434")))
+        val export = manager.exportBackup()
+        // Strip the skills field entirely, as an older build would have written it.
+        val legacy = export.replace(Regex(",\"skills\":\\[.*?\\]"), "")
+        assertTrue("old backup must still import", !legacy.contains("\"skills\""))
+        val (manager2, _) = newManagerWithPlainPrefs()
+        assertTrue(manager2.importBackup(legacy))
+        assertEquals(emptyList<Skill>(), manager2.getSkills())
     }
 }

@@ -118,7 +118,17 @@ internal fun AssistantService.getCurrentDateTimeString(): String {
     return SimpleDateFormat("EEEE, MMMM d, yyyy, HH:mm", Locale.getDefault()).format(Date())
 }
 
-internal fun AssistantService.isImageGenerationRequest(text: String): Boolean {
+internal fun AssistantService.isImageGenerationRequest(text: String): Boolean =
+    isImageGenerationRequestText(text)
+
+/**
+ * Whether [text] asks for a picture — the PURE form, so callers that only need the answer
+ * (like the skills injection guard) do not have to be handed a whole service.
+ *
+ * The single definition of the trigger list; [isImageGenerationRequest] delegates here so
+ * the two can never disagree about what counts as an image request.
+ */
+internal fun isImageGenerationRequestText(text: String): Boolean {
     val trimmed = text.trim()
     val triggers = listOf("create an image of", "generate an image of", "draw me", "make an image of")
     return triggers.any { trimmed.startsWith(it, ignoreCase = true) }
@@ -133,6 +143,162 @@ internal fun AssistantService.extractImageGenerationPrompt(text: String): String
         }
     }
     return trimmed
+}
+
+/**
+ * Every skill in [skills] whose trigger phrases fire on [text], in the order given.
+ *
+ * The same deterministic prefix match as `isImageGenerationRequest` — `startsWith`,
+ * case-insensitive, on the trimmed message. No LLM is consulted: whether a skill fires is a
+ * pure function of the text, so it is reproducible, testable on the JVM, and cannot be
+ * talked into firing by a model's whim.
+ *
+ * Returns a LIST rather than a Boolean on purpose. A message can legitimately match more than
+ * one enabled skill, and that is a real design decision the caller has to see (all of them
+ * are injected, in library order, and the caller logs when more than one fires) — not a
+ * detail to lose inside an `any { }`.
+ *
+ * A skill is skipped when its instruction text is blank or its trigger list yields no usable
+ * (non-blank) phrase, so a half-finished skill in the library can never inject nothing while
+ * still counting as "matched".
+ */
+internal fun matchedSkills(text: String, skills: List<Skill>): List<Skill> {
+    val trimmed = text.trim()
+    if (trimmed.isEmpty()) return emptyList()
+    return skills.filter { skill ->
+        skill.instructions.isNotBlank() &&
+            skill.triggerPhrases.any { trigger -> trigger.isNotBlank() && trimmed.startsWith(trigger.trim(), ignoreCase = true) }
+    }
+}
+
+/**
+ * The skills [persona] has enabled, in library order, with dangling ids already dropped.
+ *
+ * Resolved against the live library so a persona can never inject a skill that was deleted
+ * while it was still referenced. Shared by every call site that needs "what this persona can
+ * inject" so the filtering rule exists exactly once.
+ */
+internal fun enabledSkillsFor(persona: Persona, skills: List<Skill>): List<Skill> {
+    if (persona.enabledSkillIds.isEmpty()) return emptyList()
+    val enabled = persona.enabledSkillIds
+    // Iterated by the LIBRARY, not by `enabledSkillIds`. Iterating the id set instead would
+    // order the result by whatever order the ids happen to be stored in — and since that is a
+    // Set, that order is not even a contract. Multi-match injection (Q1) concatenates this
+    // list verbatim, so its order is user-visible: the same two skills would otherwise be
+    // injected in an arbitrary (and, after a re-save, possibly changed) order.
+    return skills.filter { it.id in enabled }
+}
+
+/**
+ * THE skill injection point for every turn in the app — single-chat, voice and Rooms alike.
+ *
+ * Single-chat, voice and Rooms all resolve their skill text through this one function, so a
+ * persona behaves identically no matter which of those it is being talked to (Q7); the rule
+ * duplicated per call site would drift. It returns a NEW [TurnContext] and leaves [base]
+ * untouched, so a room turn's existing preamble survives.
+ *
+ * Matched against the USER'S OWN WORDS ([userText]) — never the synthesized turn instruction
+ * a room uses to ask a persona to speak, and never the persona's system prompt.
+ *
+ * Returns "" rather than throwing when nothing fires, and contributes nothing to the suffix
+ * in that case: an empty contribution must leave a room's preamble byte-for-byte intact.
+ */
+internal fun skillSuffixForTurn(
+    userText: String,
+    persona: Persona,
+    skills: List<Skill>
+): String {
+    val matched = matchedSkills(userText, enabledSkillsFor(persona, skills))
+    if (matched.isEmpty()) return ""
+    if (matched.size > 1) {
+        // Skill NAMES only, never instruction text: this is not DEBUG-gated, so it must stay
+        // safe to log in a release build.
+        android.util.Log.w(
+            "AssistantService",
+            "Skills: ${matched.size} enabled skills matched one message " +
+                "(${matched.joinToString { it.name }}); injecting all of them in library order"
+        )
+    }
+    return matched.joinToString("\n\n") { it.instructions.trim() }
+}
+
+/**
+ * Whether this turn is a CONVERSATIONAL one, and therefore the only kind that may carry
+ * injected skill text (Q6).
+ *
+ * Two flows are deliberately excluded, and both exclusions are stated rules rather than
+ * accidents of routing:
+ *
+ *  - **Image generation.** `sendTextMessageToServer` short-circuits to
+ *    `performImageGeneration` before any conversational routing, and that function takes no
+ *    `TurnContext` at all — there is no system prompt for a skill to ride in, and the user's
+ *    text is rewritten into an image prompt anyway. Excluded explicitly here so the decision
+ *    does not depend on that short-circuit staying where it is: the injection point runs
+ *    BEFORE it, so a future move that read the context first would otherwise start leaking
+ *    skill text into image turns silently.
+ *  - **Translators.** The request builders replace the system prompt and the whole history
+ *    with one "translate this" message, so a skill's instructions would displace the
+ *    translation instruction. Excluded for the same reason.
+ *
+ * A pure function, so the exclusion is testable on the JVM without a service.
+ */
+internal fun shouldInjectSkills(persona: Persona, text: String): Boolean =
+    !persona.isImageGenerator &&
+        !persona.isTranslator &&
+        !isImageGenerationRequestText(text)
+
+/**
+ * [base] with this turn's matched skill instructions appended to whatever
+ * `systemPromptSuffix` it already carried.
+ *
+ * A room turn arrives with a room preamble in its suffix; the skill text rides after it in
+ * the same slot rather than replacing it, so neither can clobber the other and both are
+ * counted by the budget math that runs later (both request builders append the suffix to the
+ * system prompt BEFORE resolveHistoryBudget).
+ *
+ * A fresh copy rather than mutation: [TurnContext] is shared with the caller's own value, and
+ * the skill text must never survive into a later turn (Q2).
+ */
+internal fun AssistantService.turnContextWithSkills(
+    userText: String,
+    persona: Persona,
+    base: TurnContext = TurnContext.Default
+): TurnContext {
+    if (!shouldInjectSkills(persona, userText)) return base
+    val skillText = skillSuffixForTurn(userText, persona, _skills.value)
+    if (skillText.isBlank()) return base
+    return base.copy(
+        systemPromptSuffix = listOf(base.systemPromptSuffix, skillText)
+            .filter { it.isNotBlank() }
+            .joinToString("\n\n")
+    )
+}
+
+/**
+ * [this] with the skills matched by [userText] appended, for the caller that already holds a
+ * [TurnContext] (a room turn, which builds its context from a transcript snapshot) instead of
+ * one reaching the service.
+ *
+ * The same injection point as [turnContextWithSkills], and it resolves against the same live
+ * library — so a room member and a single-chat turn can never disagree about which skills
+ * apply to the same words.
+ */
+internal fun TurnContext.withSkills(
+    userText: String,
+    persona: Persona,
+    skills: List<Skill>
+): TurnContext {
+    // Same exclusion rule as turnContextWithSkills, deliberately: this is the second entry
+    // point into the injection, and an unguarded one would be a latent leak into image and
+    // translator turns the moment a room is allowed to hold such a persona.
+    if (!shouldInjectSkills(persona, userText)) return this
+    val skillText = skillSuffixForTurn(userText, persona, skills)
+    if (skillText.isBlank()) return this
+    return copy(
+        systemPromptSuffix = listOf(systemPromptSuffix, skillText)
+            .filter { it.isNotBlank() }
+            .joinToString("\n\n")
+    )
 }
 
 internal fun parseRawSuggestedReplies(rawOutput: String): List<String> {
