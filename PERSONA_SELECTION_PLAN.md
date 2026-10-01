@@ -498,4 +498,63 @@ arrived; the edit test now waits on the content it actually asserts.
 read/write semantics; the only additions are a derived flow nothing consumes yet and the
 delegated join. Step B (the UI deriving instead of mirroring) has not been started.
 
+### Step B — DONE and verified (the UI derives; no local mirror remains)
+
+**Delivered** — `MainVoiceScreen.kt` only, plus three new tests.
+
+- `currentPersona` is now a `val`, derived:
+  `personaSource = service?.currentPersonaFlow ?: emptyFlow()` →
+  `collectAsState(initial = null).value ?: DEFAULT_PERSONAS[0]`. The fallback is display-only
+  and covers the two states that never render (no binder yet, no selection).
+- **All eight assignment sites deleted**, per §3.3: the `remember(service)` seed; the deep
+  link's `?.let { currentPersona = it }`; both halves of `LaunchedEffect(personaList)`
+  (deleted outright); the translator button's two; the language bar's local `copy(...)`; the
+  picker's.
+- The old `LaunchedEffect(service)` tail that seeded the service from the UI mirror is gone;
+  its job is now the **reconciliation effect**, which is the single write left and writes
+  nothing local: `if (personaList.isEmpty()) return; if (bound.currentPersona != null) return;
+  bound.switchPersona(personaList.first())`. It also fixes a latent bug — the old seed used
+  `DEFAULT_PERSONAS[0]`, which could name a persona that is not in the list.
+- `personaColor` and everything else derived from `currentPersona` is unchanged.
+
+**Per-call-site verification — each one specifically, not "the app still runs"**
+
+| # | site | how it is verified |
+|---|---|---|
+| 1 | seed (was `remember(service)`) | **on-device**: forced a config change (`wm density` and back) → Activity recreated → header still `Translator`, language bar still `Target: French`. The derived value re-resolves from the service, which is what the old seed existed for. |
+| 2 | deep link | **on-device end-to-end**: `am start --es spontaneousTargetPersona Friend` on the running app → header `Assistant` → **`Friend`**; the "intent delivered to running instance" warning independently confirms `singleTop`/`onNewIntent`. Second tap moved it to another persona; a tap for a nonexistent name moved nothing. Service layer: `a deep link moves the flow`, `a deep link for a missing persona moves nothing`. |
+| 3 | `LaunchedEffect(personaList)` mirror | **deleted**; its only job was following a rename, and `the flow follows a rename of the active persona` pins that the service publishes the new name. |
+| 4 | fallback `personaList[0]` | replaced by the reconciliation effect; its predicate state is pinned by `a selection naming a persona that is not in the list does not resolve`. |
+| 5 | translator button, existing translator | **on-device**: header menu → Translator → header stayed `Translator` and the bar kept `Target: French`. |
+| 6 | translator button, missing translator | `the translator add-and-select sequence resolves to a real persona` — the Q7 case, pinned: the added persona is stored and resolution returns **the stored instance**, not the constant. Not exercised destructively on the device (it would delete the user's translators). |
+| 7 | language bar | **on-device end-to-end**: `Target: Greek` → tapped the bar → `French` → bar shows `Target: French`, and it survived a later re-selection and a recreation (so the value really reached the service, not a local copy). Service layer: `the language bar call reaches the flow with no local copy`. |
+| 8 | picker | **on-device end-to-end**: header `Assistant (Voice)` → tapped → picker → `Eva` → header **`Eva`**. Service layer: `the flow follows a switch`. |
+
+**The invariant is now compiler-enforced, and that was checked rather than assumed.** The
+mutation that reproduces the old bug — adding `currentPersona = DEFAULT_PERSONAS[0]` back
+next to the declaration — fails to compile: `'val' cannot be reassigned`. So "forgetting to
+update the screen" is not a reachable state, which is the whole reason the flaky composition
+test is not needed.
+
+**Suites** (all on `--rerun-tasks`, after the mutation was reverted)
+
+| check | result |
+|---|---|
+| JVM | **305 tests**, 0 failures |
+| device | **134 tests** (131 + 3 new), 0 failures, 0 errors, 0 skipped |
+| `assembleDebug` | builds |
+| app on device | cold-launched, service up, **zero** `FATAL EXCEPTION` across every interaction above |
+
+**Two things this step does NOT cover, stated rather than implied.** The reconciliation
+effect's *action* (switch to the first persona) is not covered by an automated test — its
+predicate state is, and the effect is three lines. And `MainScreen` still has no composition
+test, so "the header is passed the derived value" rests on the code being one expression
+rather than on a test; the on-device dumps above are the evidence that it renders and follows
+a switch.
+
+**Also observed on the device, unrelated to this change:** the persona picker lists
+**two** entries named `Translator`, which is the duplicate-name case Q7 flagged — `addPersona`
+has no uniqueness check. Worth a separate look; it is not caused by, and not fixed by, this
+work.
+
 

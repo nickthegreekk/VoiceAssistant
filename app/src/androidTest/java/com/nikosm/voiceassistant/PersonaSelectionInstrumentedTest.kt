@@ -237,6 +237,90 @@ class PersonaSelectionInstrumentedTest {
         assertSame(before, service.currentPersonaFlow.value)
     }
 
+    // ---- the four call sites that had to change, pinned individually ----------------------
+    //
+    // Each test below drives the EXACT service call the corresponding MainScreen call site now
+    // makes — nothing more — and asserts the selection the screen will derive. They are the
+    // per-site proof that removing the local assignment did not remove the behaviour.
+
+    @Test fun `the translator add-and-select sequence resolves to a real persona`() {
+        // Site 6, MainScreen's `onTranslatorClick` else-branch: no translator exists yet, so it
+        // adds the default one and selects it. This is the case Q7 traced: the assignment used
+        // to happen BEFORE addPersona, which was safe only because both completed in the same
+        // synchronous lambda. Deriving, it is safe unconditionally — and this pins why.
+        onMain {
+            service.personas.value.filter { it.isTranslator }
+                .forEach { service.removePersona(service.personas.value.indexOf(it)) }
+        }
+        assertTrue("precondition: no translator may remain", service.personas.value.none { it.isTranslator })
+
+        onMain {
+            service.addPersona(TRANSLATOR_PERSONA)
+            service.switchPersona(TRANSLATOR_PERSONA)
+        }
+
+        val resolved = awaitSelection(TRANSLATOR_PERSONA.name)
+        assertTrue("the added translator must be a real, stored persona", resolved != null)
+        assertTrue("and it must be the translator, not a namesake", resolved!!.isTranslator)
+        assertTrue(
+            "resolution must hand back the STORED instance, not the constant",
+            service.personas.value.any { it === resolved }
+        )
+    }
+
+    @Test fun `the language bar call reaches the flow with no local copy`() {
+        // Site 7. The bar used to ALSO assign a local `currentPersona.copy(...)`. The only
+        // write left is `updatePersona(idx, copy)`, so this pins everything the screen now
+        // depends on: the same call updates the stored persona, and the selection resolves to
+        // it carrying the new language.
+        val translator = selectATranslator()
+        val idx = service.personas.value.indexOfFirst { it.name == translator.name }
+        assertTrue("precondition: the selected translator must be findable", idx >= 0)
+
+        onMain {
+            service.updatePersona(idx, service.personas.value[idx].copy(targetLanguage = "French"))
+        }
+
+        assertTrue(
+            "the language edit must reach the selection's flow",
+            waitFor { service.currentPersonaFlow.value?.targetLanguage == "French" }
+        )
+        assertEquals(translator.name, service.currentPersonaFlow.value?.name)
+        assertTrue(
+            "and it must be the stored instance, not a local copy",
+            service.personas.value.any { it === service.currentPersonaFlow.value }
+        )
+    }
+
+    @Test fun `a selection naming a persona that is not in the list does not resolve`() {
+        // The state MainScreen's reconciliation effect exists for: the list is non-empty, but
+        // the stored name matches nothing. The screen then asks the service to select the first
+        // persona. Without that the derived value would render DEFAULT_PERSONAS[0] while the
+        // service had no persona to send with — the exact screen/sender divergence this whole
+        // change is about.
+        assertTrue("precondition: the list must be non-empty", service.personas.value.isNotEmpty())
+        onMain { service.currentPersonaName = GHOST }
+
+        assertNull("the synchronous getter must not invent a persona", service.currentPersona)
+        assertTrue(
+            "nor may the flow, which is what the screen reads",
+            waitFor { service.currentPersonaFlow.value == null }
+        )
+    }
+
+    /** Find-or-add the default translator and select it — the two translator call sites. */
+    private fun selectATranslator(): Persona {
+        onMain {
+            service.personas.value.filter { it.isTranslator }
+                .forEach { service.removePersona(service.personas.value.indexOf(it)) }
+            service.addPersona(TRANSLATOR_PERSONA)
+            service.switchPersona(TRANSLATOR_PERSONA)
+        }
+        val resolved = awaitSelection(TRANSLATOR_PERSONA.name)
+        assertTrue("precondition: a translator must be selected", resolved != null)
+        return resolved!!
+    }
+
     @Test fun `the flow follows the name before the history owner catches up`() {
         // The join derives from the NAME, so the selection is the selection — never the
         // transcript. switchPersona moves the name synchronously and loads the incoming

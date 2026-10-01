@@ -73,6 +73,8 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
 import com.nikosm.voiceassistant.ui.theme.VoiceAssistantTheme
 import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.emptyFlow
 import androidx.compose.material3.TabRowDefaults.tabIndicatorOffset
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.ui.geometry.Offset
@@ -437,13 +439,23 @@ fun MainScreen(
         }
     }
 
-    // Seeded from the service's actual selection the moment the binder arrives
-    // (keyed on service: re-seeds synchronously on (re)bind). The service outlives
-    // the Activity, so after rotation its current persona IS the user's active one
-    // — a plain remember of DEFAULT_PERSONAS[0] used to reset the selection (and,
-    // via the old unconditional switchPersona below, the service's too) on every
-    // recreation.
-    var currentPersona by remember(service) { mutableStateOf(service?.currentPersona ?: DEFAULT_PERSONAS[0]) }
+    // ---------------------------------------------------------------- the active persona
+    // DERIVED from the service — never mirrored. That is the whole point of this shape:
+    // `currentPersona` used to be a local `var`, seeded once and then reassigned by hand at
+    // eight call sites (the picker, the translator button twice, the language bar, the deep
+    // link, and a `LaunchedEffect(personaList)` that re-resolved it). Every site had to
+    // remember, and one that did not — the deep link — silently left the screen showing the
+    // previous persona while the service had already moved on. There is now no local
+    // assignment anywhere in this file, and `val` makes one a compile error: the class of bug
+    // is removed rather than patched.
+    //
+    // The `DEFAULT_PERSONAS[0]` fallback covers two states that never render (MainScreen
+    // returns early while `service == null`, and a real selection follows within a frame of
+    // the bind): the service not yet bound, and no persona selected at all. It is a display
+    // fallback only — the reconciliation effect below is what makes the service agree.
+    val personaSource: Flow<Persona?> = service?.currentPersonaFlow ?: emptyFlow()
+    val currentPersona: Persona =
+        personaSource.collectAsState(initial = null).value ?: DEFAULT_PERSONAS[0]
     val personaColor by animateColorAsState(targetValue = currentPersona.themeColor, animationSpec = tween(1000), label = "personaColor")
 
     // ------------------------------------------------------------------ deep link
@@ -458,13 +470,10 @@ fun MainScreen(
     //    switchPersona() stopEverything()s first — the same interruption a manual persona
     //    tap produces — which is a conscious, documented choice, not an accident.
     //
-    // `currentPersona` MUST be set here, exactly as the picker's onPersonaSelected does it.
-    // switchPersona() publishes `currentPersonaName` and `_messages` but never `_personas`,
-    // so `LaunchedEffect(personaList)` — the only other thing that re-resolves the mirror —
-    // does not re-run, and the header, theme colour and per-persona chrome would keep
-    // showing the persona the user just left while the service talked to the new one.
-    // Declared after `currentPersona` for that reason: a Compose `var` cannot be referenced
-    // above its own declaration.
+    // Note what this effect does NOT do: update the screen's persona. It only closes the
+    // overlays and asks the service to select. The displayed persona follows from
+    // `applySpontaneousDeepLink` publishing the selection, which is precisely the line the
+    // old mirror-based version had to remember and this one cannot forget.
     LaunchedEffect(service, deepLinkPersona) {
         val target = deepLinkPersona ?: return@LaunchedEffect
         val bound = service ?: return@LaunchedEffect
@@ -474,13 +483,8 @@ fun MainScreen(
         showPersonaPicker = false
         // Everything stateful about the tap — selecting the persona, leaving room mode — is on
         // the service (`applySpontaneousDeepLink`), so it is testable without composing this
-        // screen. What is left here is the two things only the composable can do: close its
-        // own overlays, and mirror the new selection into `currentPersona`. That mirror MUST
-        // be set explicitly: `switchPersona` publishes `currentPersonaName` and `_messages`
-        // but never `_personas`, so `LaunchedEffect(personaList)` — the only other thing that
-        // re-resolves it — does not re-run, and the header, theme colour and per-persona
-        // chrome would keep showing the persona the user just left.
-        bound.applySpontaneousDeepLink(target)?.let { currentPersona = it }
+        // screen.
+        bound.applySpontaneousDeepLink(target)
         onDeepLinkHandled()
     }
 
@@ -537,34 +541,29 @@ fun MainScreen(
             }
             service.saveSettings()
             service.fetchModels()
-            // Only seed the service when it has no selection of its own (fresh
-            // service, first launch). On rebind after rotation the service already
-            // holds the user's active persona — currentPersona was seeded from it
-            // above — so an unconditional switch here silently reset the selection
-            // (and swapped the visible history) on every recreation.
-            if (service.currentPersona == null) {
-                service.switchPersona(currentPersona)
-            }
         }
     }
 
-    LaunchedEffect(personaList) {
-        if (personaList.isNotEmpty()) {
-            // Resolve the persona to mirror via the service's own selection where
-            // possible: the service re-points currentPersonaName when the active
-            // persona is renamed, so a rename no longer misses the name lookup and
-            // falls through to the personaList[0] fallback below (which silently
-            // switched the user off the persona they were using). The fallback now
-            // only fires when the active persona was genuinely deleted.
-            val lookupName = service?.currentPersona?.name ?: currentPersona.name
-            val updated = personaList.find { it.name == lookupName }
-            if (updated != null) {
-                currentPersona = updated
-            } else {
-                currentPersona = personaList[0]
-                service?.switchPersona(personaList[0])
-            }
-        }
+    // ------------------------------------------------------- selection reconciliation
+    // The only write this screen still makes to the selection, and it writes nothing local.
+    // If the service's selection does not resolve — a persona deleted by a path that is not
+    // `removePersona`, a restored backup, any future writer — fall back to the first persona.
+    // Without it the derived value above would display `DEFAULT_PERSONAS[0]` while the
+    // service had no persona at all, i.e. the screen and the sender would disagree.
+    //
+    // Keyed on `service` and `personaList` because that is what makes it a no-op in every
+    // settled state: the service seeds itself in `loadSettings`, a rename re-points the name
+    // (`updatePersona`), and a deletion re-points it explicitly (`removePersona`), so the
+    // predicate is false and nothing happens. It replaced the old mirroring effect, whose
+    // larger job — keeping a local copy in sync — no longer exists.
+    //
+    // `personaList.first()` rather than the old `DEFAULT_PERSONAS[0]`: the fallback must be a
+    // persona that is really in the list, or the name would resolve to nothing again.
+    LaunchedEffect(service, personaList) {
+        val bound = service ?: return@LaunchedEffect
+        if (personaList.isEmpty()) return@LaunchedEffect
+        if (bound.currentPersona != null) return@LaunchedEffect
+        bound.switchPersona(personaList.first())
     }
 
     LaunchedEffect(messages.size, state, voiceDuration, streamingText, ttsPlaybackFraction, revealRestartRequest) {
@@ -825,13 +824,16 @@ fun MainScreen(
                         isEarpieceMode = isEarpieceMode,
                         onSettingsClick = { showSettings = true },
                         onTranslatorClick = {
+                            // No local assignment: the button only ASKS the service to select.
+                            // The screen's persona follows from `switchPersona` publishing the
+                            // selection, so the "add the translator if it is missing" branch
+                            // cannot leave the display and the service out of step (the added
+                            // persona is in `_personas` synchronously, before the switch).
                             val t = personaList.find { it.isTranslator }
                             if (t != null) {
-                                currentPersona = t
                                 service?.switchPersona(t)
                                 service?.clearMessages()
                             } else {
-                                currentPersona = TRANSLATOR_PERSONA
                                 service?.addPersona(TRANSLATOR_PERSONA)
                                 service?.switchPersona(TRANSLATOR_PERSONA)
                                 service?.clearMessages()
@@ -912,11 +914,14 @@ fun MainScreen(
                         LanguageBar(
                             currentLanguage = currentPersona.targetLanguage,
                             onLanguageSelected = { lang ->
+                                // Only the service is updated; the bar's language follows from
+                                // `updatePersona` republishing the list, so the screen can no
+                                // longer show a language the service never saved (the old
+                                // local `copy(...)` did exactly that when the index missed).
                                 val idx = personaList.indexOfFirst { it.name == currentPersona.name }
                                 if (idx != -1) {
                                     service?.updatePersona(idx, currentPersona.copy(targetLanguage = lang))
                                 }
-                                currentPersona = currentPersona.copy(targetLanguage = lang)
                             },
                             personaColor = personaColor
                         )
@@ -1062,7 +1067,10 @@ fun MainScreen(
             personaList = personaList,
             currentPersona = currentPersona,
             onPersonaSelected = {
-                currentPersona = it
+                // No local assignment — `switchPersona` publishes the selection and the screen
+                // derives from it. This is also the site whose omission caused the deep-link
+                // bug: the mirror was set here by hand, and any path that forgot to was
+                // silently wrong.
                 showPersonaPicker = false
                 service?.switchPersona(it)
                 if (it.isTranslator) {
