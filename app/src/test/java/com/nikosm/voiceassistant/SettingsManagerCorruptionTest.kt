@@ -490,4 +490,178 @@ class SettingsManagerCorruptionTest {
         assertTrue(manager2.importBackup(legacy))
         assertEquals(emptyList<Skill>(), manager2.getSkills())
     }
+
+    // ---- Spontaneous messages: the six per-persona fields travel WITH the persona, the
+    // ---- delivery state deliberately does NOT, and a pre-feature backup still imports.
+    // ---- Same shape as the Rooms/Skills blocks above: export from one manager, import into
+    // ---- a second one that has never seen the data, assert on what came out.
+
+    private fun spontaneousPersona(
+        name: String,
+        enabled: Boolean = false,
+        instruction: String = "",
+        gapMinutes: Int = 0,
+        windowStart: Int? = null,
+        windowEnd: Int? = null,
+        maxPerDay: Int = 0
+    ) = Persona(
+        name = name,
+        themeColor = androidx.compose.ui.graphics.Color(0xFF4ADE80),
+        model = "[S] m",
+        systemPrompt = "sys",
+        spontaneousEnabled = enabled,
+        spontaneousInstruction = instruction,
+        spontaneousGapMinutes = gapMinutes,
+        spontaneousWindowStartMin = windowStart,
+        spontaneousWindowEndMin = windowEnd,
+        spontaneousMaxPerDay = maxPerDay
+    )
+
+    @Test fun `the spontaneous fields survive a backup and restore, set and defaulted`() {
+        val (manager, _) = newManagerWithPlainPrefs()
+        // The opt-in only survives a write for an ELIGIBLE persona (a local model on a
+        // configured server), so the probe has to be one — otherwise savePersonas strips the
+        // flag first and the test would be asserting a strip rather than a round-trip.
+        manager.saveOllamaBases(listOf(ServerConfig("S", "http://10.0.0.2:11434")))
+        manager.savePersonas(
+            listOf(
+                spontaneousPersona(
+                    name = "Set",
+                    enabled = true,
+                    instruction = "only ask about the garden",
+                    gapMinutes = 90,
+                    windowStart = 9 * 60,
+                    windowEnd = 21 * 60,
+                    maxPerDay = 3
+                ),
+                // The other half of the contract, and the half a "set everything" test misses:
+                // a persona the user never touched must come back DEFAULTED, not as some other
+                // persona's values and not as an explicitly-off copy.
+                spontaneousPersona(name = "Defaults")
+            )
+        )
+        val export = manager.exportBackup()
+        // Non-vacuity: the values really are in the payload, spelled the way a hand-written
+        // backup would spell them (encodeDefaults=true is what puts the keys on the persona
+        // that was left alone, too).
+        assertTrue(export.contains("\"spontaneousEnabled\":true"))
+        assertTrue(export.contains("\"spontaneousInstruction\":\"only ask about the garden\""))
+        assertTrue(export.contains("\"spontaneousGapMinutes\":90"))
+        assertTrue(export.contains("\"spontaneousWindowStartMin\":540"))
+        assertTrue(export.contains("\"spontaneousWindowEndMin\":1260"))
+        assertTrue(export.contains("\"spontaneousMaxPerDay\":3"))
+
+        // Restore onto a different (empty) device, as a reinstall or a new phone would.
+        val (manager2, _) = newManagerWithPlainPrefs()
+        assertTrue(manager2.importBackup(export))
+
+        val restored = manager2.getPersonas()!!.associateBy { it.name }
+        val set = restored.getValue("Set")
+        assertTrue("the opt-in must survive", set.spontaneousEnabled)
+        assertEquals("only ask about the garden", set.spontaneousInstruction)
+        assertEquals(90, set.spontaneousGapMinutes)
+        assertEquals(9 * 60, set.spontaneousWindowStartMin)
+        assertEquals(21 * 60, set.spontaneousWindowEndMin)
+        assertEquals(3, set.spontaneousMaxPerDay)
+
+        val defaults = restored.getValue("Defaults")
+        assertFalse(defaults.spontaneousEnabled)
+        assertEquals("", defaults.spontaneousInstruction)
+        assertEquals(0, defaults.spontaneousGapMinutes)
+        assertNull(defaults.spontaneousWindowStartMin)
+        assertNull(defaults.spontaneousWindowEndMin)
+        assertEquals(0, defaults.spontaneousMaxPerDay)
+    }
+
+    @Test fun `delivery state is not backed up and restores as never sent`() {
+        val (manager, _) = newManagerWithPlainPrefs()
+        manager.savePersonas(listOf(spontaneousPersona("Set", enabled = true, gapMinutes = 60)))
+        manager.recordSpontaneousSent("Set", at = 1_700_000_000_000L, todayDate = "2026-01-01")
+        assertEquals(
+            "the probe must really have state to lose",
+            1,
+            manager.spontaneousStateFor("Set").sentTodayCount
+        )
+
+        val export = manager.exportBackup()
+        // Deliberately NOT in the backup. Asserted on the PAYLOAD, so the exclusion is a fact
+        // about the format rather than a claim about the code: the delivery counters are
+        // runtime bookkeeping (when this persona last spoke, how often today), not settings.
+        // Carrying them across a restore would hand the new device another device's history —
+        // "already sent 3 today" would silently suppress messages for the rest of the day.
+        assertFalse("the state entry must not travel", export.contains("spontaneous_state_v1"))
+        assertFalse("lastSentAt must not travel", export.contains("lastSentAt"))
+        assertFalse("sentTodayCount must not travel", export.contains("sentTodayCount"))
+
+        val (manager2, _) = newManagerWithPlainPrefs()
+        assertTrue(manager2.importBackup(export))
+        // Absent entry → the never-sent default. Not null, not a throw. Pacing after a restore
+        // comes from the ARMING path, which measures the gap from arm time (now + gap), so a
+        // restored persona does not fire the moment the app opens — see
+        // SpontaneousSchedulerTest's "re-arming from a fresh attempt schedules one full gap
+        // ahead". "Never sent" is therefore the safe fallback, not merely a harmless one.
+        assertEquals(SpontaneousState(), manager2.spontaneousStateFor("Set"))
+        assertEquals(0L, manager2.spontaneousStateFor("Set").lastSentAt)
+        assertEquals(emptyMap<String, SpontaneousState>(), manager2.getSpontaneousStates())
+    }
+
+    @Test fun `a corrupt spontaneous state entry degrades to never sent`() {
+        val (manager, prefs) = newManagerWithPlainPrefs()
+        prefs.edit().put("spontaneous_state_v1", GARBAGE)
+        // Same contract as every other stored-format read in SettingsManager: the getter
+        // swallows the bad entry (these reads run inside AssistantService.onCreate, where a
+        // throw is a permanent startup crash loop) and the scheduler sees "never sent" rather
+        // than dying on the way to its first decision.
+        assertEquals(emptyMap<String, SpontaneousState>(), manager.getSpontaneousStates())
+        assertEquals(SpontaneousState(), manager.spontaneousStateFor("Anyone"))
+    }
+
+    @Test fun `a backup written before spontaneous messages existed still imports`() {
+        val (manager, _) = newManagerWithPlainPrefs()
+        // Eligible, so the export genuinely carries a live opt-in and non-default settings —
+        // the strip below then removes something real rather than a block the guard had
+        // already flattened.
+        manager.saveOllamaBases(listOf(ServerConfig("S", "http://10.0.0.2:11434")))
+        manager.savePersonas(
+            listOf(
+                spontaneousPersona(
+                    name = "Set",
+                    enabled = true,
+                    instruction = "say something",
+                    gapMinutes = 90,
+                    windowStart = 9 * 60,
+                    windowEnd = 21 * 60,
+                    maxPerDay = 3
+                )
+            )
+        )
+        val export = manager.exportBackup()
+        // Non-vacuity: the export really did carry the live opt-in, so the strip below removes
+        // a real setting rather than a block the guard had already flattened.
+        assertTrue(export.contains("\"spontaneousEnabled\":true"))
+        // Strip the six fields from every persona, exactly as a pre-feature build's backup
+        // would have written them. They serialize as one contiguous trailing run (Persona
+        // declares them last), so the comma in front of the run goes with it and the persona
+        // objects stay valid JSON.
+        val legacy = export.replace(
+            Regex(",\"spontaneousEnabled\":.*?,\"spontaneousMaxPerDay\":[0-9]+"),
+            ""
+        )
+        assertTrue("the strip must actually have happened", !legacy.contains("spontaneous"))
+
+        val (manager2, _) = newManagerWithPlainPrefs()
+        assertTrue("an old backup must still import", manager2.importBackup(legacy))
+
+        // Absent keys → the field defaults, through the same ignoreUnknownKeys /
+        // defaulted-field contract every other post-hoc field relies on (Rooms, Skills,
+        // artwork). No migration, and the persona itself is otherwise intact.
+        val restored = manager2.getPersonas()!!.single()
+        assertEquals("Set", restored.name)
+        assertFalse(restored.spontaneousEnabled)
+        assertEquals("", restored.spontaneousInstruction)
+        assertEquals(0, restored.spontaneousGapMinutes)
+        assertNull(restored.spontaneousWindowStartMin)
+        assertNull(restored.spontaneousWindowEndMin)
+        assertEquals(0, restored.spontaneousMaxPerDay)
+    }
 }

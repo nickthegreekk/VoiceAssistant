@@ -1294,5 +1294,69 @@ In-flight generations now survive a settings save instead of being aborted by it
 also the saner behaviour.
 
 
+### Phase 7 (step 7) — backup round-trip: DONE
+
+**Scope (§8 item 7).** Prove — with tests, not the general pattern — that everything this
+feature added survives a real export/import, that a pre-feature backup still imports, and that
+the cloud guard holds on the import path specifically.
+
+**What travels, and what deliberately does not.** The six new `Persona` fields ride inside
+`BackupData.personas` for free — no `BackupData` change, no migration (§3), because they are
+defaulted `Persona` properties and `BackupData.personas: List<Persona>` was already the whole
+object. `SpontaneousState` is the opposite case and **is not backed up**: it lives under
+`spontaneous_state_v1`, never appears in `BackupData`, and the export is asserted *on the
+payload* to carry neither the key nor `lastSentAt`/`sentTodayCount`. That is correct, and it is
+a decision rather than an omission — the counters are runtime bookkeeping (when this persona
+last spoke, how often today), not settings. Carrying them across a restore would hand the new
+device another device's history: "already sent 3 today" would silently suppress messages for
+the rest of that day. The safe fallback is **never sent**, and it is genuinely safe because
+pacing after a restore comes from the ARMING path, which measures the next attempt as
+`now + gap` — so a restored persona does not fire the moment the app opens
+(`SpontaneousSchedulerTest`, "re-arming from a fresh attempt schedules one full gap ahead").
+
+**Tests added (5, JVM — the step is pure storage, so no device test was warranted).**
+`SettingsManagerCorruptionTest` (34 → 38), same export-here/import-there shape as the Rooms
+and Skills blocks already in that file:
+
+1. `the spontaneous fields survive a backup and restore, set and defaulted` — a persona with
+   all six explicitly set AND a second left at defaults; both halves asserted, because a
+   "set everything" test alone cannot catch a field that decays to the wrong default. The
+   payload is checked for the literal keys first, so the round-trip cannot pass vacuously.
+2. `delivery state is not backed up and restores as never sent` — seeds real delivery state,
+   asserts it is absent from the payload, then asserts a fresh manager imports and reads
+   `SpontaneousState()` (never-sent) rather than erroring.
+3. `a corrupt spontaneous state entry degrades to never sent` — the one-bad-entry contract
+   every stored-format read in `SettingsManager` honours, since these reads run inside
+   `AssistantService.onCreate` where a throw is a permanent startup crash loop.
+4. `a backup written before spontaneous messages existed still imports` — the export with the
+   six-field run stripped out, then imported; absent keys fall to the defaults.
+5. `SpontaneousGuardTest` → `a hand-crafted backup cannot smuggle an enabled cloud persona
+   past import` (24 → 25) — the import-path cloud guard, made literal: a crafted payload
+   whose cloud persona spells out `spontaneousEnabled = true` plus the other five fields must
+   come out with **exactly the opt-in stripped** and the rest intact. The older
+   `importBackup cannot smuggle…` test proved the strip; this one proves it is not over-broad.
+
+**A non-vacuity trap caught while writing these.** The opt-in only survives `savePersonas` for
+an *eligible* persona (local model on a configured server), so an ineligible probe gets the
+flag stripped at write time — and a naive round-trip test would then be quietly asserting a
+strip rather than a round-trip, and would pass even if export/import dropped the fields
+entirely. Tests 1 and 4 therefore configure the Ollama server *before* saving the persona, and
+assert the payload really carries `"spontaneousEnabled":true` before the import half runs.
+
+**Verification.** Full JVM suite **310 tests, 0 failures** (baseline 305; +5 = the tests above).
+Full on-device suite **134 tests, 0 failures** (unchanged from baseline, as expected — no device
+test added). `assembleDebug` builds.
+
+**Pre-existing flake observed, unrelated and left alone.**
+`RoomModelTest.room survives a round trip through kotlinx serialization` failed once during this
+step's runs, then passed in isolation and on re-run. Root cause, pinned with a throwaway probe:
+that test round-trips through the *default* `Json` (`encodeDefaults = false`), which omits
+`Room.createdAt` whenever its value equals the freshly-evaluated `System.currentTimeMillis()`
+default (~99% of encodes), and an absent field re-derives "now" at decode — so the test passes
+only when encode and decode land in the same millisecond. It has nothing to do with this
+feature (no file this step touched is involved) and is not fixed here; recorded so the next
+reader does not chase it.
+
+
 
 

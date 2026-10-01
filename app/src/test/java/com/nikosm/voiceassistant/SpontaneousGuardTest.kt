@@ -361,5 +361,50 @@ class SpontaneousGuardTest {
         assertFalse("imported cloud persona must be stripped", stored["C"]!!.spontaneousEnabled)
         assertTrue("imported local persona must keep its opt-in", stored["L"]!!.spontaneousEnabled)
     }
+
+    @Test fun `a hand-crafted backup cannot smuggle an enabled cloud persona past import`() {
+        // Same path as the test above, one step more literal: a backup carrying a cloud
+        // persona whose flag is spelled out explicitly, alongside the other five spontaneous
+        // fields. The guard must strip EXACTLY the opt-in and leave the rest of the persona's
+        // configuration intact — clearing the whole block, or rejecting the import outright,
+        // would be a different bug wearing the same green test.
+        val manager = newManager()
+        val smuggled = persona("C", model = "[OpenAI] gpt-4o", cloud = true).copy(
+            spontaneousEnabled = true,
+            spontaneousInstruction = "wake me up",
+            spontaneousGapMinutes = 45,
+            spontaneousWindowStartMin = 8 * 60,
+            spontaneousWindowEndMin = 22 * 60,
+            spontaneousMaxPerDay = 5
+        )
+        val json = Json.encodeToString(
+            BackupData.serializer(),
+            BackupData(
+                serverBases = emptyList(),
+                ollamaBases = listOf(ServerConfig("HomeBox", "http://10.0.0.2:11434")),
+                cloudApis = listOf(cloudApi("OpenAI")),
+                personas = listOf(smuggled),
+                messages = emptyList(),
+                totalCost = 0.0,
+                favoriteModels = emptyList(),
+                trustedCerts = emptyMap()
+            )
+        )
+        // Non-vacuity: the payload really does try to smuggle the flag.
+        assertTrue(
+            "the crafted backup must carry the flag",
+            json.contains("\"spontaneousEnabled\":true")
+        )
+
+        assertTrue("import should succeed", manager.importBackup(json))
+
+        val restored = manager.getPersonas()!!.single()
+        assertFalse("the opt-in must be stripped on the way in", restored.spontaneousEnabled)
+        assertEquals("wake me up", restored.spontaneousInstruction)
+        assertEquals(45, restored.spontaneousGapMinutes)
+        assertEquals(8 * 60, restored.spontaneousWindowStartMin)
+        assertEquals(22 * 60, restored.spontaneousWindowEndMin)
+        assertEquals(5, restored.spontaneousMaxPerDay)
+    }
 }
 
