@@ -902,6 +902,25 @@ Built and verified. No scheduling, no worker, no UI yet.
 `SpontaneousGuardTest`); the guard is mutation-verified (disabling the `savePersonas`
 sanitize fails exactly the 4 persistence tests and no others).
 
+### Phase 2 (step 2) — write-guard verification at the service level: DONE
+
+The guard code itself shipped in phase 1; what phase 2 adds is proof that the **in-memory**
+write path applies it, which only a bound service can show.
+`SpontaneousWriteGuardInstrumentedTest` (6 tests, on-device, Redmi Note 9 Pro / API 33):
+
+- the probe provider is genuinely cloud-registered (non-vacuity guard, so a cloud test cannot
+  pass as gateway-only);
+- `addPersona` strips an enabled cloud persona and keeps an enabled local one;
+- `updatePersona` strips the flag when a **local persona's model is switched to a cloud
+  provider** — the realistic sequence, since `isCloud` is derived from the model string;
+- `updatePersona` keeps the flag on an unrelated edit (a guard that stripped everything would
+  pass the above);
+- a persona pointed at an unconfigured server cannot keep the flag.
+
+**Mutation-verified:** disabling the `addPersona` + `updatePersona` sanitize fails exactly
+those 3 guard-dependent tests, leaving the 3 controls green.
+
+
 ### Errata — two corrections to §6 above
 
 1. **`AssistantService.updatePersona` does NOT catch backup import.** §6 originally claimed
