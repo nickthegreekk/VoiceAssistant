@@ -111,12 +111,26 @@ internal class RoomTurnSink(
     private val speakerName: String
 ) : TurnSink {
 
-    private fun toRoomMessage(message: ChatMessage) = RoomMessage(
+    private fun toRoomMessage(message: ChatMessage, existing: RoomMessage? = null) = RoomMessage(
+        // An in-place update must keep the ORIGINAL identity and creation time.
+        //
+        // The room transcript's LazyColumn keys its items on `id`, so minting a fresh UUID
+        // per streaming chunk would make every chunk read as remove+insert: the bubble is
+        // destroyed and rebuilt on each token, which throws away its scroll anchoring and
+        // is a large part of why following a live round felt broken. `timestamp` is held for
+        // the same reason — it is when the message was written, not when its last chunk
+        // arrived. `existing` is null only on append, which is genuinely a new message.
+        //
+        // This is the mirror of what `toChatMessage` documents just below: the sink's
+        // contract is about text/reasoning/error/timing, and an in-place edit must not
+        // re-stamp identity in EITHER direction.
+        id = existing?.id ?: java.util.UUID.randomUUID().toString(),
         speakerName = speakerName,
         text = message.text,
         reasoning = message.reasoning,
         isError = message.isError,
-        responseTimeMs = message.responseTimeMs
+        responseTimeMs = message.responseTimeMs,
+        timestamp = existing?.timestamp ?: System.currentTimeMillis()
     )
 
     override fun size(): Int = if (isAttached()) service._roomMessages.value.size else 0
@@ -146,7 +160,10 @@ internal class RoomTurnSink(
         if (!isAttached()) return false
         val current = service._roomMessages.value.toMutableList()
         if (index !in current.indices) return false
-        val updated = current[index].let { toRoomMessage(transform(toChatMessage(it))) }
+        // `existing` carries the identity/timestamp forward — see toRoomMessage.
+        val updated = current[index].let {
+            toRoomMessage(transform(toChatMessage(it)), existing = it)
+        }
         current[index] = updated
         service._roomMessages.value = current
         return true

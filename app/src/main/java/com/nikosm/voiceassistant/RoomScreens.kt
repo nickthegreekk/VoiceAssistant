@@ -2,6 +2,7 @@ package com.nikosm.voiceassistant
 
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -809,6 +810,37 @@ fun RoomChatArea(
     listState: LazyListState,
     modifier: Modifier = Modifier
 ) {
+    // ---- Auto-scroll: follow the newest message, exactly as single chat does ----------
+    //
+    // The room transcript had NO scroll handling at all, so opening a room that already had
+    // a conversation started at the TOP and needed a manual scroll to the bottom, and a
+    // live round grew downward off-screen. Single chat solves both in MainVoiceScreen with
+    // a LaunchedEffect that scrolls to the last item whenever content arrives; this is the
+    // same effect over the room's own list.
+    //
+    // Keyed on the LAST MESSAGE'S TEXT LENGTH, not just `messages.size`: a streaming reply
+    // updates an existing bubble in place, so the item count does not change while the
+    // content grows — keying on size alone would scroll once when the bubble appeared and
+    // then never again, leaving the rest of the reply below the fold.
+    //
+    // `room.id` is in the keys so entering a different room re-runs the effect even when the
+    // new transcript happens to hold the same number of messages.
+    val lastMessageLength = messages.lastOrNull()?.text?.length ?: 0
+    LaunchedEffect(room.id, messages.size, lastMessageLength) {
+        if (messages.isEmpty()) return@LaunchedEffect
+        val lastIndex = messages.size - 1
+        listState.scrollToItem(lastIndex)
+        // Refine, as single chat does, so the BOTTOM of a tall final bubble is visible:
+        // scrollToItem only guarantees the item's TOP is on screen.
+        listState.layoutInfo.visibleItemsInfo.find { it.index == lastIndex }?.let { lastItem ->
+            val viewportBottom = listState.layoutInfo.viewportEndOffset - listState.layoutInfo.afterContentPadding
+            val itemBottom = lastItem.offset + lastItem.size
+            if (itemBottom > viewportBottom) {
+                listState.scrollBy((itemBottom - viewportBottom).toFloat())
+            }
+        }
+    }
+
     Column(modifier = modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
         RoomRoundStatusLine(roundState = roundState, memberNames = room.memberNames, onStop = onStop)
 

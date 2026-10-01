@@ -367,7 +367,12 @@ fun MainScreen(service: AssistantService?) {
     var roomMessages by remember { mutableStateOf<List<RoomMessage>>(emptyList()) }
     var roomRound by remember { mutableStateOf<RoomRoundState?>(null) }
     var roomTextInput by rememberSaveable { mutableStateOf("") }
-    val roomListState = rememberLazyListState()
+    // Keyed by the active room. rememberLazyListState() on its own would hand the SAME
+    // scroll position to every room, so switching rooms restored the previous room's index
+    // (mid-history, or past the end) into a transcript of a completely different length.
+    // A fresh state per room starts at the top, and the RoomChatArea auto-scroll then takes
+    // it to the newest message.
+    val roomListState = remember(activeRoomId) { LazyListState() }
     var voiceDuration by remember { mutableIntStateOf(0) }
     var personaList by remember { mutableStateOf<List<Persona>>(emptyList()) }
     var sessionUsage by remember { mutableStateOf(UsageInfo()) }
