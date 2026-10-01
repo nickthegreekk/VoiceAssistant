@@ -758,7 +758,9 @@ fun PersonaEditor(
                     when (val outcome = service.sendSpontaneousMessageNow(persona.name)) {
                         is AssistantService.SpontaneousNowOutcome.Accepted -> Toast.makeText(
                             context,
-                            "This persona can send — delivery itself arrives with the next step.",
+                            // Honest about silence: the model may legitimately have nothing to
+                            // add, and the turn writes nothing in that case.
+                            "${persona.name} is writing — a message will appear in their chat if they have something to say.",
                             Toast.LENGTH_LONG
                         ).show()
                         is AssistantService.SpontaneousNowOutcome.Refused -> Toast.makeText(

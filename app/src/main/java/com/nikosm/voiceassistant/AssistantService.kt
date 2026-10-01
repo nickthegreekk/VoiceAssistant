@@ -1858,13 +1858,13 @@ class AssistantService : Service() {
     /**
      * Outcome of a manual "send me a message now" request (the persona editor's button).
      *
-     * This entry point is deliberately a GUARD CHECK today, not a send: the delivery path
-     * (the turn pipeline + its sink) is the next increment, and this function pretends at
-     * nothing. Returning the verdict here — rather than evaluating it in the UI — means the
-     * call site is final: step 4 only changes this body, never the wiring it sits behind.
+     * This reports whether the request was ACCEPTED, not whether a message was produced: the
+     * turn itself runs off the main thread afterwards, and may legitimately end in silence or
+     * in a logged failure (see `runSpontaneousTurn`). Accepted means every guard passed and
+     * the turn was dispatched — the same contract the scheduled path will have.
      */
     sealed interface SpontaneousNowOutcome {
-        /** Every guard passed: the persona could send. Delivery itself is not wired yet. */
+        /** Every guard passed and the turn is running. */
         data object Accepted : SpontaneousNowOutcome
 
         /** Do not send. Shown verbatim in the editor, so it must read as UI text. */
@@ -1876,6 +1876,10 @@ class AssistantService : Service() {
      * service state at request time — the persona's own `spontaneousEnabled` flag, then
      * [`Persona.spontaneousEligibility`] against the current server lists — because the
      * commit that enabled the flag may predate a deleted server or a changed model.
+     *
+     * The guards are evaluated synchronously (they are in-memory reads, and the caller is a
+     * UI click that needs an immediate answer); the turn itself is dispatched onto
+     * [serviceScope], so the network round-trip never blocks the caller.
      */
     fun sendSpontaneousMessageNow(personaName: String): SpontaneousNowOutcome {
         // Fail-closed, by NAME: a rename that already committed misses the lookup and the
@@ -1891,8 +1895,20 @@ class AssistantService : Service() {
             is RoomEligibility.Eligible -> { /* fall through */ }
             is RoomEligibility.Blocked -> return SpontaneousNowOutcome.Refused(verdict.reason)
         }
-        // The delivery path (step 4) will replace this log with the real turn.
-        Log.i("AssistantService", "Spontaneous 'send now' accepted for '${persona.name}' — delivery not wired yet")
+        serviceScope.launch {
+            try {
+                // A turn for THIS persona only. Deliberately not routed through the chat
+                // pipeline — see the isolation note at the top of AssistantServiceSpontaneous.kt.
+                runSpontaneousTurn(persona)
+            } catch (e: CancellationException) {
+                // Service teardown / scope cancel: cooperative, nothing to report.
+                throw e
+            } catch (e: Exception) {
+                // Silent by design: a background message that could not be produced must not
+                // surface as an error bubble in a conversation the user never asked about.
+                Log.e("AssistantService", "Spontaneous turn for '${persona.name}' failed: ${e.message}")
+            }
+        }
         return SpontaneousNowOutcome.Accepted
     }
 

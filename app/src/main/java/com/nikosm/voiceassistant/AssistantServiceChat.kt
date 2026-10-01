@@ -1399,29 +1399,22 @@ internal suspend fun AssistantService.performDirectOllamaChat(baseUrl: String, m
         msgsArray.put(JSONObject().put("role", "user").put("content", "Translate the following text to ${persona.targetLanguage}: $modelText"))
     } else {
         // Context injection
-        val currentDateTime = getCurrentDateTimeString()
-        var finalSystemPrompt = "Current date and time: $currentDateTime\n\n${persona.systemPrompt}"
-
-        val searchContext = if (isNewsRequest(text)) {
-            fetchNewsContext()
-        } else if (persona.webSearchEnabled) {
-            fetchWebSearchContext(text)
-        } else ""
-
-        // Step 3 — RAG retrieval: prepend uploaded-document matches alongside
-        // any web search context. Graceful: "" when unconfigured or on failure.
-        val ragContext = if (persona.ragEnabled) fetchRagContext(text) else ""
-
-        val contextPrefix = listOf(searchContext, ragContext).filter { it.isNotEmpty() }.joinToString("\n\n")
-        if (contextPrefix.isNotEmpty()) {
-            finalSystemPrompt = "$contextPrefix\n\n$finalSystemPrompt"
-        }
-        // Phase 0: room preamble (if any) rides at the END of the persona's own
-        // system prompt — the persona's prompt keeps governing its response — and
-        // is appended BEFORE the budget math so resolveHistoryBudget accounts for it.
-        if (turnContext.systemPromptSuffix.isNotBlank()) {
-            finalSystemPrompt = "$finalSystemPrompt\n\n${turnContext.systemPromptSuffix}"
-        }
+        val finalSystemPrompt = composeSystemPrompt(
+            persona = persona,
+            currentDateTime = getCurrentDateTimeString(),
+            searchContext = if (isNewsRequest(text)) {
+                fetchNewsContext()
+            } else if (persona.webSearchEnabled) {
+                fetchWebSearchContext(text)
+            } else "",
+            // Step 3 — RAG retrieval: prepend uploaded-document matches alongside
+            // any web search context. Graceful: "" when unconfigured or on failure.
+            ragContext = if (persona.ragEnabled) fetchRagContext(text) else "",
+            // Phase 0: room preamble (if any) rides at the END of the persona's own
+            // system prompt — the persona's prompt keeps governing its response — and
+            // is appended BEFORE the budget math so resolveHistoryBudget accounts for it.
+            suffix = turnContext.systemPromptSuffix
+        )
 
         // Add system prompt first
         // S4: contains the full system prompt (plus injected search/news context) — debug only.
@@ -1443,17 +1436,9 @@ internal suspend fun AssistantService.performDirectOllamaChat(baseUrl: String, m
         val allNonError = (turnContext.history ?: _messages.value).filter { !it.isError }
         val historySource = if (currentTurnInHistory && allNonError.isNotEmpty()) allNonError.dropLast(1) else allNonError
 
-        var usedTokens = 0
-        val history = mutableListOf<ChatMessage>()
-        for (i in historySource.indices.reversed()) {
-            val msg = historySource[i]
-            val tokens = estimateTokens(msg.text)
-            if (usedTokens + tokens > budget) break
-            history.add(0, msg)
-            usedTokens += tokens
-        }
+        val history = budgetedHistory(historySource, budget)
 
-        android.util.Log.d("AssistantService", "Ollama Budget: history=${history.size}, used=$usedTokens, budget=$budget")
+        android.util.Log.d("AssistantService", "Ollama Budget: history=${history.size}, budget=$budget")
         history.forEachIndexed { i, msg -> android.util.Log.d("AssistantService", "DEBUG history[$i] role=${msg.role} preview=${msg.text.take(100)}") }
 
         history.forEach { msg ->
@@ -1675,29 +1660,22 @@ private suspend fun AssistantService.buildCloudRequest(api: CloudApiSetting, per
     val mediaType = "application/json; charset=utf-8".toMediaType()
     val json = JSONObject()
     
-    val currentDateTime = getCurrentDateTimeString()
-    var finalSystemPrompt = "Current date and time: $currentDateTime\n\n${persona.systemPrompt}"
-
-    val searchContext = if (isNewsRequest(text)) {
-        fetchNewsContext()
-    } else if (persona.webSearchEnabled) {
-        fetchWebSearchContext(text)
-    } else ""
-
-    // Step 3 — RAG retrieval: prepend uploaded-document matches alongside
-    // any web search context. Graceful: "" when unconfigured or on failure.
-    val ragContext = if (persona.ragEnabled) fetchRagContext(text) else ""
-
-    val contextPrefix = listOf(searchContext, ragContext).filter { it.isNotEmpty() }.joinToString("\n\n")
-    if (contextPrefix.isNotEmpty()) {
-        finalSystemPrompt = "$contextPrefix\n\n$finalSystemPrompt"
-    }
-    // Phase 0: same room-preamble placement as the direct-Ollama path — appended to
-    // the persona's own prompt and applied BEFORE resolveHistoryBudget below, so the
-    // budget math and the overflow refusal see the real system prompt.
-    if (turnContext.systemPromptSuffix.isNotBlank()) {
-        finalSystemPrompt = "$finalSystemPrompt\n\n${turnContext.systemPromptSuffix}"
-    }
+    val finalSystemPrompt = composeSystemPrompt(
+        persona = persona,
+        currentDateTime = getCurrentDateTimeString(),
+        searchContext = if (isNewsRequest(text)) {
+            fetchNewsContext()
+        } else if (persona.webSearchEnabled) {
+            fetchWebSearchContext(text)
+        } else "",
+        // Step 3 — RAG retrieval: prepend uploaded-document matches alongside
+        // any web search context. Graceful: "" when unconfigured or on failure.
+        ragContext = if (persona.ragEnabled) fetchRagContext(text) else "",
+        // Phase 0: same room-preamble placement as the direct-Ollama path — appended to
+        // the persona's own prompt and applied BEFORE resolveHistoryBudget below, so the
+        // budget math and the overflow refusal see the real system prompt.
+        suffix = turnContext.systemPromptSuffix
+    )
 
     // A-attachments: the model-facing prompt includes extracted file content. The
     // original `text` is still used for search/news above.
@@ -1716,18 +1694,9 @@ private suspend fun AssistantService.buildCloudRequest(api: CloudApiSetting, per
     // text-content matching is used to decide what to drop.
     val allNonError = (turnContext.history ?: _messages.value).filter { !it.isError }
     val historySource = if (currentTurnInHistory && allNonError.isNotEmpty()) allNonError.dropLast(1) else allNonError
+    val history = budgetedHistory(historySource, budget)
 
-    var usedTokens = 0
-    val history = mutableListOf<ChatMessage>()
-    for (i in historySource.indices.reversed()) {
-        val msg = historySource[i]
-        val tokens = estimateTokens(msg.text)
-        if (usedTokens + tokens > budget) break
-        history.add(0, msg)
-        usedTokens += tokens
-    }
-    
-    android.util.Log.d("AssistantService", "Cloud Budget: history=${history.size}, used=$usedTokens, budget=$budget")
+    android.util.Log.d("AssistantService", "Cloud Budget: history=${history.size}, budget=$budget")
 
     val actualModel = persona.model.substringAfter("] ")
     val baseUrl = api.baseUrl.trim().removeSuffix("/")
@@ -2518,7 +2487,7 @@ Do you want a summary?
 // distinguished — a long system prompt, a long message, a large attachment or any
 // combination of them are one and the same problem here, and take the same fix — which is
 // why the check lives in this single shared helper rather than at each call site.
-private fun AssistantService.resolveHistoryBudget(contextWindow: Int, reservedOutput: Int, systemPrompt: String, modelText: String): Int {
+internal fun AssistantService.resolveHistoryBudget(contextWindow: Int, reservedOutput: Int, systemPrompt: String, modelText: String): Int {
     val systemPromptTokens = estimateTokens(systemPrompt)
     val modelTextTokens = estimateTokens(modelText)
     val promptTokens = systemPromptTokens + modelTextTokens
@@ -2534,4 +2503,60 @@ private fun AssistantService.resolveHistoryBudget(contextWindow: Int, reservedOu
     return rawBudget
 }
 
-private fun AssistantService.estimateTokens(text: String): Int = (text.length / 4.0).toInt().coerceAtLeast(1)
+internal fun AssistantService.estimateTokens(text: String): Int = (text.length / 4.0).toInt().coerceAtLeast(1)
+
+// ---------------------------------------------------------------------------
+// Shared request assembly (extracted for the spontaneous-message path).
+//
+// These two are the parts of request assembly that were duplicated verbatim between
+// performDirectOllamaChat and buildCloudRequest. Hoisting them is what lets the
+// spontaneous turn assemble a request the same way WITHOUT going anywhere near the
+// streaming pipeline: it shares the RULES (prompt composition order, budget trimming,
+// the overflow refusal) and none of the H3 placeholder / chat-generation machinery.
+// ---------------------------------------------------------------------------
+
+/**
+ * The system prompt one budgeted request will send: date and time, then the persona's own
+ * prompt, then any web-search/news and RAG context, then the turn's one-shot suffix.
+ *
+ * **The order is load-bearing and must not be rearranged.** The suffix is appended LAST and
+ * *before* the budget math at the call site, which is exactly what makes injected text
+ * (a skill, a room preamble, or the spontaneous framing) count toward the token window
+ * instead of silently overrunning it.
+ *
+ * Pure: the caller fetches the search/RAG context, because those are suspend calls and this
+ * has to stay callable from anywhere.
+ */
+internal fun composeSystemPrompt(
+    persona: Persona,
+    currentDateTime: String,
+    searchContext: String,
+    ragContext: String,
+    suffix: String
+): String {
+    val contextPrefix = listOf(searchContext, ragContext).filter { it.isNotEmpty() }.joinToString("\n\n")
+    val withContext = if (contextPrefix.isNotEmpty()) "$contextPrefix\n\n" else ""
+    val suffixPart = if (suffix.isNotBlank()) "\n\n$suffix" else ""
+    return "$withContext" + "Current date and time: $currentDateTime\n\n${persona.systemPrompt}" + suffixPart
+}
+
+/**
+ * The tail of [source] that fits [budget], walked from the NEWEST message backwards so the
+ * most recent turns always win.
+ *
+ * Extracted from the two request builders so the trimming rule exists once: a message keeps
+ * its place only if adding it does not push the running estimate past the budget, and the
+ * walk stops at the first that would (it does not skip it and continue).
+ */
+internal fun AssistantService.budgetedHistory(source: List<ChatMessage>, budget: Int): List<ChatMessage> {
+    var usedTokens = 0
+    val kept = mutableListOf<ChatMessage>()
+    for (i in source.indices.reversed()) {
+        val msg = source[i]
+        val tokens = estimateTokens(msg.text)
+        if (usedTokens + tokens > budget) break
+        kept.add(0, msg)
+        usedTokens += tokens
+    }
+    return kept
+}

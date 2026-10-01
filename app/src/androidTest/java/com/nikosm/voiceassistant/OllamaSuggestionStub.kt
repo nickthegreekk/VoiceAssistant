@@ -23,7 +23,15 @@ internal const val SUGGEST_LOOPBACK_PREFIX = "http://127.0.0.1:"
  * needed. Anything else gets a 401 — if the app routes here without the
  * header, the failure is loud, not silent.
  */
-internal class OllamaSuggestionStub : AutoCloseable {
+internal class OllamaSuggestionStub(
+    /**
+     * The `message.content` answered for an authorized POST /api/chat. Plain ASCII only —
+     * the value is spliced into a JSON string literal verbatim. Defaults to the multi-line
+     * payload the suggested-replies tests were written against; callers exercising other
+     * paths pass their own.
+     */
+    val chatContent: String = "Yes, quiz me on Paris\\nWhat else is nearby?\\nThanks, that's clear"
+) : AutoCloseable {
     private val socket = ServerSocket(0, 16, InetAddress.getByName("127.0.0.1"))
 
     val url: String = "http://127.0.0.1:${socket.localPort}"
@@ -83,7 +91,7 @@ internal class OllamaSuggestionStub : AutoCloseable {
                 val payload = if (path.startsWith("/api/chat")) {
                     if (authorized) {
                         200 to "{\"message\":{\"role\":\"assistant\",\"content\":" +
-                            "\"Yes, quiz me on Paris\\nWhat else is nearby?\\nThanks, that's clear\"}}"
+                            "\"$chatContent\"}}"
                     } else {
                         401 to "{\"error\":\"unauthorized\"}"
                     }

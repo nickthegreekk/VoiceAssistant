@@ -966,6 +966,52 @@ arrives with the next step.") rather than reporting a send that did not happen. 
 only that function body; the UI wiring behind it is final.
 
 
+### Phase 4 (step 4) — the turn pipeline: DONE
+
+**Delivered**
+
+- `AssistantServiceSpontaneous.kt` (new) — `PersonaHistorySink` (dual-mode by
+  `messagesOwnerName`, fail-closed when the persona is gone), the framing
+  (`spontaneousTurnInstruction`, `spontaneousSystemPromptSuffix`, `spontaneousContextLine`),
+  the silence parser (`parseSpontaneousReply`), the non-streaming completion
+  (`performSpontaneousOllamaCall`), and `runSpontaneousTurn`.
+- Shared assembly: `composeSystemPrompt` + `AssistantService.budgetedHistory`, now used by
+  BOTH existing budgeted builders (`performDirectOllamaChat`, `buildCloudRequest`) as well as
+  the new turn; `resolveHistoryBudget` / `estimateTokens` widened `private` → `internal`.
+- `sendSpontaneousMessageNow` dispatches on `serviceScope` and catches with silence-by-design.
+
+**The turn may end in silence or log-only failure.** Both write nothing — a background message
+that could not be produced must not leave an error bubble in a conversation the user never
+asked about. `runSpontaneousTurn` lets transport errors *propagate* (the caller classifies);
+the dispatch site catches silently, as the future worker will re-arm without retrying.
+
+**Two bugs found by the tests, both fixed.** The sentinel was stated in the instruction turn
+but not in the system prompt — the wire test asserted the prompt carried it and failed, which
+is exactly the failure mode a model obeying the prompt and ignoring the turn would produce.
+And `parseSpontaneousReply`'s "is only the sentinel ⇒ send nothing" rule is a documented
+*compromise*, not a settled answer: it is deliberately lenient about output that merely
+mentions the sentinel, so a friendly check-in mentioning silence is never swallowed. That
+tradeoff is named in the KDoc and pinned by a test; it is NOT mutation-verified, because
+mutation-verifying a lenient rule means proving the lenient branch fires, which it does by
+construction.
+
+**Verification**
+
+- 263 JVM unit tests, 0 failures (9 new in `SpontaneousTurnTest`, incl. a byte-for-byte
+  regression anchor on the extraction's prompt order).
+- 4 on-device turn tests, 0 failures (`SpontaneousTurnInstrumentedTest`: lands in that
+  persona's history only, silence writes nothing, wire is non-streaming with the persona's
+  framing, unreachable server raises-but-writes-nothing).
+- All prior verdicts re-checked: 254 other unit tests, 6 write-guard + 4 editor-gate
+  on-device tests still green; `assembleDebug` builds.
+
+### Still a stub — what step 4 deliberately left for step 5
+
+`runSpontaneousTurn` is only reachable through the manual "send now" button. There is no
+scheduler, no `SpontaneousState` store, no notification. The button's toast is now accurate
+("is writing — a message will appear in their chat", plus the silence caveat).
+
+
 
 ### Errata — two corrections to §6 above
 
