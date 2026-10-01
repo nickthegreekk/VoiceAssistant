@@ -1332,6 +1332,16 @@ class AssistantService : Service() {
         }
 
         _ollamaBaseUrls.value = settingsManager.getOllamaBases() ?: emptyList()
+        // Spontaneous cloud guard, load-time (supplementary). savePersonas already prevents
+        // an enabled cloud persona from ever being WRITTEN, and add/updatePersona prevent
+        // one being held in memory — this closes the remaining gap for a personas_v2 entry
+        // authored outside the app (root/adb, or a hand-restored prefs blob). Runs here
+        // because it needs both name sets, which is the first point they are all loaded.
+        // Idempotent and equality-conflated, so a clean list re-assigns an equal list and
+        // emits nothing.
+        _personas.value = _personas.value.map {
+            SpontaneousPolicy.sanitize(it, ollamaServerNames(), cloudProviderNames())
+        }
         _imageGenBases.value = settingsManager.getImageGenBases()?.takeIf { it.isNotEmpty() } ?: listOf(ServerConfig("Local A1111", "http://0.0.0.0:7860"))
         // Rooms load AFTER the Ollama/cloud server lists, because eligibility is judged
         // against them: a member whose backing server has since been deleted, or which is
@@ -1375,6 +1385,13 @@ class AssistantService : Service() {
         settingsManager.saveServerBases(_serverBases.value)
         settingsManager.saveCloudApis(_cloudApis.value)
         settingsManager.saveCustomCloudApis(_customCloudApis.value)
+        // Ollama bases are written BEFORE the personas, deliberately: savePersonas reads
+        // the server lists back out of this same store to evaluate the spontaneous cloud
+        // guard, so the lists must already reflect this save. (Cloud lists are likewise
+        // ahead of it; only ollama needed moving — it previously sat at the end.) Without
+        // this, a server added and a persona saved inside one debounce window would be
+        // judged against the previous ollama list and could silently strip a valid flag.
+        settingsManager.saveOllamaBases(_ollamaBaseUrls.value)
         settingsManager.savePersonas(_personas.value)
         // The shared skill library rides the same debounced save. Written before the persona
         // list so a restore/export snapshot always sees skills and referencing personas in a
@@ -1394,7 +1411,6 @@ class AssistantService : Service() {
         (messagesOwnerName ?: currentPersonaName)?.let { name ->
             settingsManager.savePersonaMessages(name, _messages.value)
         }
-        settingsManager.saveOllamaBases(_ollamaBaseUrls.value)
         settingsManager.saveImageGenBases(_imageGenBases.value)
         settingsManager.saveTotalCost(_totalCost.value)
         settingsManager.saveFavoriteModels(_favoriteModels.value)
@@ -1671,7 +1687,11 @@ class AssistantService : Service() {
     }
 
     fun addPersona(persona: Persona) {
-        _personas.value = _personas.value + persona
+        // Spontaneous cloud guard (plan §6, location 3): in-memory chokepoint. Together
+        // with SettingsManager.savePersonas (which persistSettings reaches below) this
+        // means an ineligible persona can be neither observed nor stored as enabled.
+        val guarded = SpontaneousPolicy.sanitize(persona, ollamaServerNames(), cloudProviderNames())
+        _personas.value = _personas.value + guarded
         saveSettings()
     }
 
@@ -1719,7 +1739,13 @@ class AssistantService : Service() {
                 // the persona belonged to and the loss would become permanent.
                 renameRoomMemberEverywhere(oldName, persona.name)
             }
-            current[index] = persona
+            // Spontaneous cloud guard (plan §6, location 3): the editor is not the only
+            // writer — this is. Sanitized at the moment of storage, so every downstream
+            // consumer (persistSettings, the UI's personas flow, the worker's eventual
+            // preflight) sees a persona that could actually send. Sanitizing only flips
+            // spontaneousEnabled, so the rename/artwork handling above and below is
+            // unaffected — those compare name and image paths, never this flag.
+            current[index] = SpontaneousPolicy.sanitize(persona, ollamaServerNames(), cloudProviderNames())
             _personas.value = current
             // Artwork lifecycle: a save that REPLACED a slot points the persona at a
             // new file, and a save that CLEARED one points it at null — either way the

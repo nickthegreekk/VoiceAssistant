@@ -119,7 +119,46 @@ data class Persona(
     // so it survives the user deleting/moving the original photo and needs no
     // persistent URI permission grant. Both are optional/nullable.
     val iconImageUri: String? = null,        // square-ish avatar shown in ProviderLogo
-    val backgroundImageUri: String? = null   // full-screen backdrop behind the UI
+    val backgroundImageUri: String? = null,  // full-screen backdrop behind the UI
+
+    // -------------------------------------------------------- Spontaneous messages
+    // A persona-initiated turn: no user message precedes it, and it arrives on a
+    // configured delivery window + minimum gap (see SPONTANEOUS_MESSAGES_PLAN.md).
+    //
+    // LOCAL (OLLAMA) PERSONAS ONLY — cloud personas can never hold spontaneousEnabled,
+    // enforced at every write path by SpontaneousPolicy.sanitize (and re-checked at
+    // generation time), mirroring the Rooms cloud exclusion
+    // (RoomReplyPolicy.participatesInAutonomousRounds). This is the same cloud-cost
+    // caution: a spontaneous turn is a paid turn nobody asked for.
+    //
+    // Every field below is DEFAULTED, so personas persisted before this feature decode
+    // unchanged — the same contract enabledSkillIds documents above. No migration.
+    //
+    /** Master opt-in. Default OFF: an existing persona never starts messaging anyone. */
+    val spontaneousEnabled: Boolean = false,
+    /**
+     * Extra instruction appended to this turn's system-prompt suffix only; "" ⇒ the
+     * app's built-in framing (SpontaneousPolicy). Never written into history — one-turn,
+     * exactly like a Skill's instructions. The persona's own system prompt always
+     * governs; this is appended after it, never substituted for it.
+     */
+    val spontaneousInstruction: String = "",
+    /**
+     * MINIMUM minutes between two spontaneous messages — a floor, never "every N
+     * minutes exactly". 0 ⇒ SpontaneousPolicy.DEFAULT_GAP_MINUTES (a real "use the
+     * default" value, NOT "no gap" — the unset/zero collision is the trap that broke
+     * Room.autoReplyCap, fixed in c755070). Clamped to MIN_GAP_MINUTES on read.
+     */
+    val spontaneousGapMinutes: Int = 0,
+    /**
+     * Delivery window as minutes-of-day [0, 1440). null ⇒ no bound on that side (a real
+     * value, not an "inherit" marker — there is no global default to inherit). A start
+     * greater than the end wraps past midnight.
+     */
+    val spontaneousWindowStartMin: Int? = null,
+    val spontaneousWindowEndMin: Int? = null,
+    /** Max spontaneous messages per day; 0 ⇒ SpontaneousPolicy.DEFAULT_MAX_PER_DAY. */
+    val spontaneousMaxPerDay: Int = 0
 )
 
 @Serializable
@@ -314,6 +353,39 @@ sealed class RoomEligibility {
 }
 
 /**
+ * Can [persona] send a SPONTANEOUS message at all — i.e. is it a local persona whose
+ * request the router can serve with its real history?
+ *
+ * Deliberately **delegates** to [roomEligibility] rather than re-deciding: that function
+ * already mirrors the real routing branches exactly (image-generator, translator, blank
+ * model, gateway-only, cloud), so reusing it means the two rules can never drift apart,
+ * and any future routing change is picked up here automatically. The one tightening is
+ * that a CLOUD-routed persona is refused outright — the same cloud-cost caution Rooms
+ * applies to autonomous continuation ([RoomReplyPolicy.participatesInAutonomousRounds]):
+ * a self-initiated turn is a paid turn nobody asked for, and here the user does not even
+ * see it happen first.
+ *
+ * The two early returns below re-state only the *wording* for image/translator personas,
+ * so the persona editor shows text that is true of a chat rather than of a Room. The
+ * DECISION is unchanged — [roomEligibility] blocks those two as well — so there is no
+ * second rule to keep in sync, only a clearer message.
+ *
+ * This is plan location #5: the single predicate every other guard reads from.
+ */
+fun Persona.spontaneousEligibility(
+    ollamaServerNames: Set<String>,
+    cloudProviderNames: Set<String>
+): RoomEligibility {
+    if (isImageGenerator) return RoomEligibility.Blocked(SpontaneousPolicy.IMAGE_BLOCK_REASON)
+    if (isTranslator) return RoomEligibility.Blocked(SpontaneousPolicy.TRANSLATOR_BLOCK_REASON)
+    return when (val e = roomEligibility(ollamaServerNames, cloudProviderNames)) {
+        is RoomEligibility.Eligible ->
+            if (e.cloud) RoomEligibility.Blocked(SpontaneousPolicy.CLOUD_BLOCK_REASON) else e
+        is RoomEligibility.Blocked -> e
+    }
+}
+
+/**
  * How far a Room round may run on its own.
  *
  * The cap counts TOTAL autonomous messages across ALL participants (not rounds, not
@@ -347,6 +419,84 @@ object RoomReplyPolicy {
      * exactly one message per user turn, and never consume autonomous budget.
      */
     fun participatesInAutonomousRounds(cloud: Boolean): Boolean = !cloud
+}
+
+/**
+ * How spontaneous (persona-initiated) messaging is bounded, and the ONE guard function
+ * every write path funnels through.
+ *
+ * Structurally mirrors [RoomReplyPolicy] on purpose. Rooms already solved "a persona
+ * decides to spend tokens with nobody watching", and the answers carry over directly: a
+ * tight default cap, cloud excluded outright, and the rule expressed exactly once so it
+ * can be unit-tested rather than re-derived — and quietly diverge — at each call site.
+ *
+ * This is plan locations #6 (constants/policy) and #3/#5 (the guard), all in one place.
+ */
+object SpontaneousPolicy {
+    /**
+     * WorkManager will not run periodic work more often than every 15 minutes, so a
+     * smaller gap is simply unrepresentable on this platform. Enforced on READ
+     * ([effectiveGapMinutes]) and not only in the editor, so a value that reaches storage
+     * by any route still cannot ask for something Android would silently stretch anyway.
+     */
+    const val MIN_GAP_MINUTES = 15
+
+    /** Gap used when [Persona.spontaneousGapMinutes] is 0 — "default", never "no gap". */
+    const val DEFAULT_GAP_MINUTES = 240 // 4 hours
+
+    /** Daily cap used when [Persona.spontaneousMaxPerDay] is 0. */
+    const val DEFAULT_MAX_PER_DAY = 6
+
+    // Reasons are constants rather than inline strings so the editor's gate and this
+    // policy cannot show different wording for the same decision.
+    const val CLOUD_BLOCK_REASON =
+        "Local (Ollama) personas only. This model routes to a cloud provider, which would be a paid turn nobody asked for."
+    const val IMAGE_BLOCK_REASON = "Image generators can't start a conversation."
+    const val TRANSLATOR_BLOCK_REASON =
+        "Translators replace the conversation with a single translation request."
+
+    /** Is this persona allowed spontaneous messages at all? */
+    fun isEligible(
+        persona: Persona,
+        ollamaServerNames: Set<String>,
+        cloudProviderNames: Set<String>
+    ): Boolean = persona.spontaneousEligibility(ollamaServerNames, cloudProviderNames) is RoomEligibility.Eligible
+
+    /** The gap actually honoured — never below [MIN_GAP_MINUTES]. */
+    fun effectiveGapMinutes(persona: Persona): Int =
+        if (persona.spontaneousGapMinutes > 0) persona.spontaneousGapMinutes.coerceAtLeast(MIN_GAP_MINUTES)
+        else DEFAULT_GAP_MINUTES
+
+    /** The daily cap actually honoured. */
+    fun effectiveMaxPerDay(persona: Persona): Int =
+        if (persona.spontaneousMaxPerDay > 0) persona.spontaneousMaxPerDay else DEFAULT_MAX_PER_DAY
+
+    /**
+     * THE guard. Returns [persona] with [Persona.spontaneousEnabled] forced to `false`
+     * whenever it could not actually send, and returns it untouched otherwise.
+     *
+     * Pure, cheap and idempotent, so it is safe to call from every write path rather than
+     * trying to nominate a single "canonical" one:
+     *
+     *  - `SettingsManager.savePersonas` — the ONLY writer of the `personas_v2` key, and so
+     *    the one chokepoint every persisted write reaches, **including `importBackup`**,
+     *    which calls it directly and never passes through `AssistantService.updatePersona`;
+     *  - `AssistantService.addPersona` / `updatePersona` — in-memory state, so the UI can
+     *    never observe an ineligible persona as enabled;
+     *  - the persona editor's commit, which reaches both of the above via `onSave`.
+     *
+     * Because the rule lives here and nowhere else, the layers cannot disagree (plan #5).
+     */
+    fun sanitize(
+        persona: Persona,
+        ollamaServerNames: Set<String>,
+        cloudProviderNames: Set<String>
+    ): Persona =
+        if (persona.spontaneousEnabled && !isEligible(persona, ollamaServerNames, cloudProviderNames)) {
+            persona.copy(spontaneousEnabled = false)
+        } else {
+            persona
+        }
 }
 
 /** Current phase of a Room round, for UI + the turn loop. */

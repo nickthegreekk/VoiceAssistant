@@ -249,7 +249,29 @@ class SettingsManager(context: Context) {
     }
 
     fun savePersonas(personas: List<Persona>) {
-        prefs.edit().putString("personas_v2", json.encodeToString(personas)).apply()
+        // Spontaneous cloud guard (plan §6). This is the ONLY writer of personas_v2, so
+        // it is the chokepoint every persisted write reaches — AssistantService.persistSettings
+        // (editor commits, add/update, every other persona mutation) AND importBackup below.
+        // Guarding here rather than only in AssistantService.updatePersona is what closes the
+        // import path: importBackup calls savePersonas directly and never reaches updatePersona,
+        // so an imported backup carrying spontaneousEnabled=true on a cloud persona would
+        // otherwise persist untouched.
+        //
+        // The server lists are read from this same store, so a backup is judged against the
+        // server lists IT carried — importBackup persists those before reaching this call —
+        // rather than against whatever happened to be configured on the device beforehand.
+        //
+        // The `none` check short-circuits the three extra reads on the overwhelmingly common
+        // path (nobody has this enabled). It is exact, not an optimisation that trades
+        // correctness: sanitize only ever changes a persona that is enabled yet ineligible.
+        val toStore = if (personas.none { it.spontaneousEnabled }) {
+            personas
+        } else {
+            val ollamaNames = getOllamaBases().orEmpty().map { it.name }.toSet()
+            val cloudNames = (getCloudApis().orEmpty() + getCustomCloudApis().orEmpty()).map { it.name }.toSet()
+            personas.map { SpontaneousPolicy.sanitize(it, ollamaNames, cloudNames) }
+        }
+        prefs.edit().putString("personas_v2", json.encodeToString(toStore)).apply()
     }
 
     fun getPersonas(): List<Persona>? {
