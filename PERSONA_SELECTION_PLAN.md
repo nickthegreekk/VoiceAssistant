@@ -1,7 +1,7 @@
 # Persona selection as a single source of truth — plan (research + design)
 
-**Status:** Q7 resolved; **step A built and verified** (service-side only, behaviour-preserving);
-**step B not started**. See §9 for the status log.
+**Status:** Q7 resolved; **steps A, B and C all landed and verified**; the plan is **complete**.
+See §9 for the status log.
 
 **Why this exists.** The spontaneous-messages work (step 6) shipped a deep-link path that
 switched the service's active persona but left the UI showing the previous one. The fix was
@@ -556,5 +556,86 @@ a switch.
 **two** entries named `Translator`, which is the duplicate-name case Q7 flagged — `addPersona`
 has no uniqueness check. Worth a separate look; it is not caused by, and not fixed by, this
 work.
+
+### Step C — DONE (cleanup; nothing in scope was skipped, and nothing was invented)
+
+**What §7 scoped for step C:** (1) dedupe the remaining `currentPersona` readers, (2) revisit
+the header/body parameter plumbing, (3) consider the §3.4 projection.
+
+**Outcome of each, with evidence**
+
+1. **Dedupe readers — nothing left to do.** The join exists once (`resolveCurrentPersona`, used
+   by the getter, the VAD path and `currentPersonaFlow`). The 38 `currentPersona` occurrences in
+   `MainVoiceScreen` are field reads on the single derived `val`, and the
+   `indexOfFirst { it.name == currentPersona.name }` lookup appears exactly once (the language
+   bar). There is no duplicate left to collapse.
+2. **Header/body plumbing — declined, because the parameter is live.** `ControlBar` takes both
+   `personaName` and `currentPersona`, which looks redundant, but `personaName` is genuinely read
+   at `:1635` and `:1723` as part of the message-id/reveal keys. Replacing it with
+   `currentPersona.name` inside the composable would be a cosmetic reshuffle touching two
+   animation keys for no benefit. **Recorded as a near-miss:** my first scan reported it unused
+   because the scan window stopped short of those two uses — worth stating, since "clean up the
+   redundant parameter" would have been a live change.
+3. **The §3.4 projection — declined, which is the plan's own gate.** §3.4 recommends it "later,
+   if measurement shows it matters", and its analysis already concluded the derived value is no
+   worse than the old mirror (which recomposed per keystroke on the active persona anyway). No
+   measurement shows it matters, and the projection would split "what to display" from "what to
+   send" — a design change, not cleanup.
+
+**What step C actually changed — both items purely internal, zero behavioural surface**
+
+- **25 dead imports removed** from `MainVoiceScreen.kt`, all pre-existing leftovers from when
+  this file was split out of `MainActivity`: `ClipData`, `ClipboardManager`, `Context`,
+  `RecognizerIntent`, `WindowManager`, `ComponentActivity`, `setContent`, `enableEdgeToEdge`,
+  `FlowRow`, `LazyColumn`, `LazyRow`, `items`, `itemsIndexed`, `BasicTextField`,
+  `KeyboardOptions`, `KeyboardActions`, `mutableLongStateOf`, `scale`, `ImageVector`, `ImeAction`,
+  `Dp`, `sp`, `DialogProperties`, `VoiceAssistantTheme`, `tabIndicatorOffset`. Each was confirmed
+  unused by a word-boundary scan of the file body (after a first, sloppier scan gave a false
+  positive for extension usages like `14.sp`), and most are additionally covered by a star
+  import, so removal could not break a resolution.
+- **`_currentPersonaName` moved above its facade** in `AssistantService.kt`, so the accessors can
+  never read a not-yet-initialised field (properties initialise in declaration order). Two lines
+  moved; the field now initialises earlier, which is strictly safer.
+
+**Verification**
+
+| check | result |
+|---|---|
+| JVM | **305 tests**, 0 failures — identical to the step-B baseline |
+| device | **134 tests**, 0 failures, 0 errors, 0 skipped — identical to the step-B baseline |
+| `assembleDebug` | builds |
+
+**No extra on-device interaction pass, stated as a judgement rather than an omission.** Step C
+has no UI or user-visible surface: removing imports cannot change behaviour, and the declaration
+reorder's only conceivable runtime effect is at service construction — which the 134 instrumented
+tests already exercise on-device, binding the real `AssistantService` repeatedly and driving
+switch, rename, delete and the deep link through it. A manual tap-through here would be theatre;
+the device evidence for this step is the suite, unlike steps A and B where the derived value had
+a rendering surface that only the device could show.
+
+---
+
+## 10. Plan complete
+
+The original problem — `currentPersona` was a manually-mirrored local `var`, so every path that
+changed the active persona had to remember to update the screen, and the deep link silently did
+not — is closed at the root:
+
+- the selection is owned by the service (`_currentPersonaName` behind the existing `var`, so all
+  five writers publish without modification);
+- it is derived through one join (`resolveCurrentPersona`) and observed through one flow
+  (`currentPersonaFlow`);
+- the screen reads it as a single `val` via `collectAsState`, with **no local assignment
+  anywhere** — reintroducing one is a compile error, which was verified by attempting it;
+- the one write the screen still makes is reconciliation, not mirroring.
+
+**Known, explicitly accepted gaps** (all previously stated in place): the reconciliation effect's
+action has no automated test (its predicate state does); `MainScreen` has no composition test, so
+the header receiving the derived value rests on it being one expression, with the step-B device
+dumps as evidence; and the §3.4 projection remains a deferred, measurement-gated follow-up.
+
+**Unrelated follow-up worth its own look:** persona names are not unique (`addPersona` has no
+uniqueness check, unlike server configs), which the device showed as two `Translator` entries in
+the picker.
 
 

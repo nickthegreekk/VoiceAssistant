@@ -344,10 +344,13 @@ class AssistantService : Service() {
     // existing writer — switchPersona, the rename path, the delete fallback, the cold-start
     // seed — and every test that stages a scenario by assigning it keep working unchanged,
     // and each write now PUBLISHES automatically instead of having to remember to.
+    // The backing flow is declared BEFORE the facade so the accessors can never touch a field
+    // that has not been initialised yet: properties initialise in declaration order, and a
+    // getter reading a later-declared field would read null (or throw) during construction.
+    private val _currentPersonaName = MutableStateFlow<String?>(null)
     internal var currentPersonaName: String?
         get() = _currentPersonaName.value
         set(value) { _currentPersonaName.value = value }
-    private val _currentPersonaName = MutableStateFlow<String?>(null)
 
     // L5: persona history lives in SharedPreferences as one JSON blob per persona, and both
     // switchPersona and clearMessages used to read/write it ON THE MAIN THREAD — a persona tap
