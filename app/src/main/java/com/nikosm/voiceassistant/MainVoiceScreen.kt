@@ -804,7 +804,10 @@ fun MainScreen(
                             // selection, so the "add the translator if it is missing" branch
                             // cannot leave the display and the service out of step (the added
                             // persona is in `_personas` synchronously, before the switch).
-                            val t = personaList.find { it.isTranslator }
+                            // Name OR flag: a persona the user named "Translator" without the
+                            // flag is still this button's translator, and the old flag-only
+                            // lookup added a second one beside it — the reported duplicate.
+                            val t = existingTranslatorPersona(personaList)
                             if (t != null) {
                                 service?.switchPersona(t)
                                 service?.clearMessages()

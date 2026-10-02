@@ -704,6 +704,23 @@ val TRANSLATOR_PERSONA = Persona(
     isTranslator = true
 )
 
+/**
+ * The translator the header button means by "give me the translator": an existing one, or
+ * `null` when there is none yet.
+ *
+ * **Name OR flag, deliberately.** The button used to look for `isTranslator` alone, which
+ * missed the common real case: a persona the user named "Translator" (or renamed from
+ * something else) whose flag was never set — the editor derives that flag from a template, it
+ * is not something a rename sets. The lookup then concluded "no translator exists" and added
+ * [TRANSLATOR_PERSONA] beside it, so the picker showed TWO personas named "Translator" —
+ * and since the name is the identity everywhere else (see `AssistantService.addPersona`),
+ * that is a duplicate name, not a cosmetic one.
+ *
+ * Flag first so a properly flagged translator always wins over a same-named impostor.
+ */
+internal fun existingTranslatorPersona(personas: List<Persona>): Persona? =
+    personas.firstOrNull { it.isTranslator } ?: personas.firstOrNull { it.name == TRANSLATOR_PERSONA.name }
+
 val DEFAULT_CLOUD_APIS = listOf(
     CloudApiSetting("Anthropic", "https://api.anthropic.com", "", "A", Color(0xFFD97755)),
     CloudApiSetting("OpenAI", "https://api.openai.com/v1", "", "O", Color(0xFF10A37F)),

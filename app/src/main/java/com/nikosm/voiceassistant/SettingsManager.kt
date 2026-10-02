@@ -271,7 +271,29 @@ class SettingsManager(context: Context) {
             val cloudNames = (getCloudApis().orEmpty() + getCustomCloudApis().orEmpty()).map { it.name }.toSet()
             personas.map { SpontaneousPolicy.sanitize(it, ollamaNames, cloudNames) }
         }
-        prefs.edit().putString("personas_v2", json.encodeToString(toStore)).apply()
+        // Name uniqueness, persistence chokepoint — the same two-location shape as the cloud
+        // guard above, and the reason `importBackup` cannot reintroduce a duplicate either:
+        // it calls savePersonas directly and never reaches AssistantService.addPersona. A
+        // backup written by a build with the flag-only translator lookup (or hand-edited)
+        // can legitimately carry two personas named "Translator", and persisting that is what
+        // makes the damage real: both would then load back and share one history key.
+        //
+        // First occurrence wins, deterministically, and the drop is logged rather than
+        // swallowed. Refusing the whole save is not an option here — this writer is reached
+        // by ordinary edits too, and silently discarding them would be worse than the
+        // duplicate. In-memory the service refuses such a write outright; storage only has
+        // to make sure nothing duplicate ever reaches disk.
+        val seen = HashSet<String>(toStore.size)
+        val unique = toStore.filter { seen.add(it.name) }
+        if (unique.size != toStore.size) {
+            val kept = unique.mapTo(HashSet()) { it.name }
+            Log.w(
+                "SettingsManager",
+                "savePersonas dropped duplicate-named personas: " +
+                    toStore.map { it.name }.filterNot { it in kept }
+            )
+        }
+        prefs.edit().putString("personas_v2", json.encodeToString(unique)).apply()
     }
 
     fun getPersonas(): List<Persona>? {

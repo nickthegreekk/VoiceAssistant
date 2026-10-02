@@ -1746,6 +1746,32 @@ class AssistantService : Service() {
     }
 
     fun addPersona(persona: Persona) {
+        // Name uniqueness, in-memory chokepoint. Together with SettingsManager.savePersonas
+        // (which persistSettings reaches below) this means a duplicate name can be neither
+        // observed nor stored — not by the persona editor, not by the header button's
+        // "add the translator if it's missing", not by the defaults migration, not by a
+        // future path that never touches this screen.
+        //
+        // WHY a hard refusal rather than a cosmetic dedupe or an auto-renamed copy: the
+        // name is the persona's identity in every key the app holds, not a label. History is
+        // `persona_messages_<name>`, room membership is `memberNames: List<String>`, the
+        // spontaneous state map is name-keyed, and the scheduler's WorkManager chain is named
+        // after it. Two personas sharing one name would therefore share one history file
+        // (each saving over the other's), make room membership ambiguous (removing "X" takes
+        // both), and fight over one scheduler chain and one notification id. None of that is
+        // repairable by showing the user a friendlier list, so the write is refused at the
+        // door and named in the message, exactly like addOllamaBase's duplicate-URL refusal.
+        //
+        // Exact match, like every other name comparison here (the defaults migration, room
+        // membership, the history keys): "Bob" and "Bob " are different keys, so pretending
+        // they collide would refuse writes the storage layer would have kept apart.
+        val clash = _personas.value.firstOrNull { it.name == persona.name }
+        if (clash != null) {
+            val message = "'${persona.name}' already exists — persona not added"
+            Log.w("AssistantService", "addPersona refused: $message")
+            Toast.makeText(applicationContext, message, Toast.LENGTH_SHORT).show()
+            return
+        }
         // Spontaneous cloud guard (plan §6, location 3): in-memory chokepoint. Together
         // with SettingsManager.savePersonas (which persistSettings reaches below) this
         // means an ineligible persona can be neither observed nor stored as enabled.
@@ -1763,6 +1789,22 @@ class AssistantService : Service() {
             val previous = current[index]
             val oldName = previous.name
             if (persona.name != oldName) {
+                // A rename ONTO an existing name is the same collision as a duplicate add,
+                // and strictly worse: `migratePersonaHistory` below would move this
+                // persona's history onto the other one's name key — destroying the victim's
+                // chat — and `renameRoomMemberEverywhere` would merge their memberships. So
+                // the rename is refused before either runs.
+                //
+                // The whole save is refused rather than just the name: this is the editor's
+                // single commit (it debounces every field into one call), so storing the new
+                // fields under the old name is not an option either.
+                val takenBy = current.withIndex().firstOrNull { (i, p) -> i != index && p.name == persona.name }
+                if (takenBy != null) {
+                    val message = "'${persona.name}' already exists — rename refused"
+                    Log.w("AssistantService", "updatePersona refused: $message")
+                    Toast.makeText(applicationContext, message, Toast.LENGTH_SHORT).show()
+                    return
+                }
                 // Rename: move the persona's history to the new name-keyed storage
                 // entry (it would otherwise be orphaned on disk forever), and when
                 // the renamed persona is the active one, keep the selection pointing
