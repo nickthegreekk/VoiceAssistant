@@ -1768,6 +1768,10 @@ class AssistantService : Service() {
                 // the renamed persona is the active one, keep the selection pointing
                 // at it — same in-memory conversation, just a new identity, so no
                 // reload and no visible switch.
+                // F1: migratePersonaHistory is the SHARED rename surface, so the persona's
+                // spontaneous delivery state moves in this same call — lastSentAt and
+                // sentTodayCount are PRESERVED under the new name, never reset, or a
+                // freshly renamed persona could immediately re-message after its rename.
                 settingsManager.migratePersonaHistory(oldName, persona.name)
                 // L5: the migration itself stays synchronous — anything that saves right after
                 // this rename (persistSettings below) must already see the new key. But a
@@ -2028,11 +2032,14 @@ class AssistantService : Service() {
             // which point the guard would end it anyway — this just makes it immediate.
             removeSpontaneousSchedule(removedName)
             // Followup to Fix #4: the removal must also drop the persona's persisted
-
             // history — a genuine deletion leaves no persona_messages_<name> entry
             // behind on disk. (Rename is handled by migratePersonaHistory in
             // updatePersona and MIGRATES rather than deletes, so this only ever fires
             // on true removal. Removing a name with no saved entry is a no-op.)
+            // F1: deletePersonaHistory is the SHARED deletion surface, so the persona's
+            // spontaneous delivery state dies in this same lane call — a leftover state
+            // entry would keep counting toward the global daily cap, suppressing the
+            // surviving personas' messages for the rest of the day.
             // L5: the delete runs in the persona-history IO lane (joining the swap/clear above
             // first), because the swap it just started — and the persistSettings() a few lines
             // below, which still keys off the removed persona's recorded owner — may write that
@@ -2130,8 +2137,16 @@ class AssistantService : Service() {
     suspend fun saveMessageImage(uri: Uri): String? =
         withContext(Dispatchers.IO) { settingsManager.saveMessageImage(uri) }
     fun importBackup(json: String): Boolean {
+        // F2: the persona names that could currently be holding an armed spontaneous chain.
+        // Snapshotted BEFORE the import because the restore rewrites the stored list and
+        // loadSettings republishes it — after either, the vanished names are unrecoverable,
+        // and they are exactly what the post-import reconciliation has to disarm.
+        val preImportNames = personas.value.map { it.name }.toSet()
         val success = settingsManager.importBackup(json)
-        if (success) loadSettings()
+        if (success) {
+            loadSettings()
+            reconcileSpontaneousSchedulesAfterImport(preImportNames)
+        }
         return success
     }
 

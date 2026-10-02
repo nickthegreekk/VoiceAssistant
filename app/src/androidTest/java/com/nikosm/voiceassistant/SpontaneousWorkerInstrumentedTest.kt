@@ -1,6 +1,10 @@
 package com.nikosm.voiceassistant
 
+import android.content.ComponentName
 import android.content.Context
+import android.content.Intent
+import android.content.ServiceConnection
+import android.os.IBinder
 import androidx.compose.ui.graphics.Color
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -9,6 +13,9 @@ import androidx.work.WorkManager
 import androidx.work.testing.TestListenableWorkerBuilder
 import androidx.work.workDataOf
 import java.time.ZoneId
+import java.util.UUID
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -46,7 +53,10 @@ class SpontaneousWorkerInstrumentedTest {
         const val ENABLED = "ProbeWorkerEnabled"
         const val DISABLED = "ProbeWorkerDisabled"
         const val GHOST = "ProbeWorkerGhost"
-        val PROBES = listOf(ENABLED, DISABLED, GHOST)
+        const val DELETE = "ProbeWorkerDelete"
+        const val RENAME_OLD = "ProbeWorkerRenameOld"
+        const val RENAME_NEW = "ProbeWorkerRenameNew"
+        val PROBES = listOf(ENABLED, DISABLED, GHOST, DELETE, RENAME_OLD, RENAME_NEW)
         const val HOUR_MS = 60 * 60 * 1000L
     }
 
@@ -93,8 +103,8 @@ class SpontaneousWorkerInstrumentedTest {
         return start to (start + 60) % 1440
     }
 
-    private fun saveProbe(name: String, enabled: Boolean, window: Pair<Int, Int>? = null) {
-        val persona = Persona(
+    private fun probePersona(name: String, enabled: Boolean, window: Pair<Int, Int>? = null): Persona =
+        Persona(
             name = name,
             themeColor = Color(0xFF4ADE80),
             model = "[$SERVER] llama3",
@@ -105,6 +115,9 @@ class SpontaneousWorkerInstrumentedTest {
             spontaneousWindowStartMin = window?.first,
             spontaneousWindowEndMin = window?.second
         )
+
+    private fun saveProbe(name: String, enabled: Boolean, window: Pair<Int, Int>? = null) {
+        val persona = probePersona(name, enabled, window)
         settings.savePersonas(
             settings.getPersonas().orEmpty().filterNot { it.name == name } + persona
         )
@@ -162,6 +175,58 @@ class SpontaneousWorkerInstrumentedTest {
         }
         return condition()
     }
+
+    // ------------------------------------------------- service-level lifecycle helpers (F1/F2)
+
+    private var serviceConnection: ServiceConnection? = null
+
+    /**
+     * Bind the REAL AssistantService, the same way production binds it. The cases that use
+     * this drive the service's own lifecycle methods (removePersona, updatePersona,
+     * importBackup) rather than the SettingsManager/WorkManager primitives, because what
+     * they pin is wiring: that the service paths route the persona's spontaneous residue
+     * through the shared cleanup surfaces.
+     */
+    private fun bindAssistantService(): AssistantService {
+        val bound = CountDownLatch(1)
+        var boundService: AssistantService? = null
+        val conn = object : ServiceConnection {
+            override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
+                boundService = (binder as AssistantService.AssistantBinder).getService()
+                bound.countDown()
+            }
+            override fun onServiceDisconnected(name: ComponentName?) { /* not expected */ }
+        }
+        assertTrue(
+            "bindService() refused to connect to AssistantService",
+            context.bindService(Intent(context, AssistantService::class.java), conn, Context.BIND_AUTO_CREATE)
+        )
+        assertTrue("AssistantService did not bind within 30s", bound.await(30, TimeUnit.SECONDS))
+        serviceConnection = conn
+        return boundService!!
+    }
+
+    private fun unbindAssistantService() {
+        serviceConnection?.let { runCatching { context.unbindService(it) } }
+        serviceConnection = null
+    }
+
+    /** Run [block] on the main thread and hand its result back (the service's StateFlow writes
+     *  and lifecycle methods are main-thread affairs, same as the sibling test classes). */
+    private fun <T> onMain(block: () -> T): T {
+        val result = arrayOfNulls<Any?>(1)
+        InstrumentationRegistry.getInstrumentation().runOnMainSync { result[0] = block() }
+        @Suppress("UNCHECKED_CAST")
+        return result[0] as T
+    }
+
+    /** The ids of [name]'s pending (enqueued or running) requests — a chain's identity. */
+    private fun pendingWorkIds(name: String): Set<UUID> =
+        spontaneousWorkNames(name).flatMap { workName ->
+            WorkManager.getInstance(context).getWorkInfosForUniqueWork(workName).get()
+        }.filter { it.state == WorkInfo.State.ENQUEUED || it.state == WorkInfo.State.RUNNING }
+            .map { it.id }
+            .toSet()
 
     // ---------------------------------------------------------------- arm / disarm
 
@@ -324,6 +389,195 @@ class SpontaneousWorkerInstrumentedTest {
         assertEquals("deleting one entry must leave the map intact",
             6_000L, settings.spontaneousStateFor(DISABLED).lastSentAt)
         assertEquals(SpontaneousState(), settings.spontaneousStateFor(ENABLED))
+    }
+
+    // -------------------------------------------------- F1: the service-level lifecycle wiring
+    // The JVM cases in SettingsManagerCorruptionTest prove the shared cleanup surfaces
+    // themselves; what only a device can add is that AssistantService's own persona
+    // lifecycle methods really route through them.
+
+    @Test fun `a deletion through the real removePersona drops the spontaneous state with it`() {
+        val service = bindAssistantService()
+        try {
+            // Arm the probe explicitly (armSpontaneousWork, the primitive the rest of this
+            // class uses) rather than relying on addPersona's internal arm, which races the
+            // debounced settings persist — a pre-existing quirk outside F1's scope. What is
+            // under test is the teardown, not how the chain came to exist.
+            onMain { service.addPersona(probePersona(DELETE, enabled = true, window = windowFarFromNow())) }
+            armSpontaneousWork(context, DELETE, slot = 0, delayMillis = HOUR_MS)
+            assertTrue("precondition: the probe must hold a live chain", pendingChainCount(DELETE) == 1)
+            settings.recordSpontaneousSent(DELETE, at = 9_000L, todayDate = "2026-01-01")
+            assertEquals("precondition: the probe really carries state",
+                9_000L, settings.spontaneousStateFor(DELETE).lastSentAt)
+
+            val index = service.personas.value.indexOfFirst { it.name == DELETE }
+            assertTrue("the added probe must be in the service's list", index >= 0)
+            onMain { service.removePersona(index) }
+
+            assertTrue(
+                "the deleted persona's state entry must die with it (removePersona → deletePersonaHistory)",
+                waitFor { settings.spontaneousStateFor(DELETE) == SpontaneousState() }
+            )
+            assertFalse("the state map must not carry the deleted persona", DELETE in settings.getSpontaneousStates())
+            assertTrue("and its chain must be torn down with it",
+                waitFor { pendingChainCount(DELETE) == 0 })
+        } finally {
+            unbindAssistantService()
+        }
+    }
+
+    @Test fun `a rename through the real updatePersona carries the spontaneous state to the new name`() {
+        val service = bindAssistantService()
+        try {
+            onMain { service.addPersona(probePersona(RENAME_OLD, enabled = true, window = windowFarFromNow())) }
+            armSpontaneousWork(context, RENAME_OLD, slot = 0, delayMillis = HOUR_MS)
+            assertTrue("precondition: the probe must hold a live chain", pendingChainCount(RENAME_OLD) == 1)
+            settings.recordSpontaneousSent(RENAME_OLD, at = 5_000L, todayDate = "2026-03-03")
+            settings.recordSpontaneousSent(RENAME_OLD, at = 6_000L, todayDate = "2026-03-03")
+            val before = settings.spontaneousStateFor(RENAME_OLD)
+            assertEquals("precondition: the probe really has pacing to lose", 2, before.sentTodayCount)
+
+            val index = service.personas.value.indexOfFirst { it.name == RENAME_OLD }
+            assertTrue("the added probe must be in the service's list", index >= 0)
+            onMain {
+                service.updatePersona(index, service.personas.value[index].copy(name = RENAME_NEW))
+            }
+
+            // The migration itself is synchronous inside updatePersona's rename branch, so
+            // these are direct reads, not waits: lastSentAt and sentTodayCount must ARRIVE
+            // under the new name, never reset to "never sent".
+            val moved = settings.spontaneousStateFor(RENAME_NEW)
+            assertEquals("lastSentAt must survive the rename", before.lastSentAt, moved.lastSentAt)
+            assertEquals("and the daily counter", before.sentTodayCount, moved.sentTodayCount)
+            assertEquals("and the date that counter belongs to", before.sentTodayDate, moved.sentTodayDate)
+            assertEquals("the old key must be gone",
+                SpontaneousState(), settings.spontaneousStateFor(RENAME_OLD))
+            assertTrue("the old name's chain must be disarmed",
+                waitFor { pendingChainCount(RENAME_OLD) == 0 })
+        } finally {
+            unbindAssistantService()
+        }
+    }
+
+    // -------------------------------------------------- F2: the import reconciliation
+    // importBackup on the REAL service: loadSettings' safety net only ever arms the
+    // un-armed, so without the post-import reconciliation WorkManager keeps holding the
+    // PRE-import schedule. These cases pin both halves of the fix on the app's real
+    // WorkManager instance.
+
+    @Test fun `an import that changes the gap re-arms the chain fresh rather than on the old schedule`() {
+        saveProbe(ENABLED, enabled = true, window = windowFarFromNow())
+        // Capture the backup BEFORE touching the service (see the comment at the probe
+        // publish below for why the order matters).
+        val export = settings.exportBackup()
+        val service = bindAssistantService()
+        try {
+            // An earlier class's MainActivity leaves the service STARTED for the whole
+            // instrumentation process, so this bind can attach to an instance whose
+            // in-memory lists predate this class's setUp. The reconciliation needs the
+            // probe in the service's OWN persona list (that snapshot is what it compares
+            // the restored set against) and the probe's server in its OWN ollama list (that
+            // is what eligibility is judged against), so publish both here — addOllamaBase
+            // is URL-guarded, so this is a no-op when the view is already fresh.
+            // Order note: publishing the probe can strip its opt-in on the way in, because
+            // the service's server list may only gain the probe server a moment later —
+            // which is exactly why `export` was taken BEFORE this, and why the import
+            // (which overwrites the stored persona list from the captured payload) is the
+            // thing that decides the restored state.
+            if (service.personas.value.none { it.name == ENABLED }) {
+                onMain { service.addPersona(probePersona(ENABLED, enabled = true, window = windowFarFromNow())) }
+            }
+            onMain { service.addOllamaBase(SERVER, "http://10.0.0.9:11434") }
+            // The armed precondition, established through the scheduling primitive: what is
+            // under test is what the import does to an ALREADY armed chain, and arming
+            // directly keeps the precondition independent of the eligibility-aware paths'
+            // timing. (A REPLACE from the publishes above is harmless — it lands before the
+            // ids below are captured, and anything landing after can only leave a fresh id
+            // pending, which the assertions below accept.)
+            armSpontaneousWork(context, ENABLED, slot = 0, delayMillis = HOUR_MS)
+            assertTrue("precondition: the probe must hold a live chain before the import",
+                waitFor { pendingChainCount(ENABLED) == 1 })
+            val armedByLoad = pendingWorkIds(ENABLED)
+            assertEquals(1, armedByLoad.size)
+
+            // Hand-craft the imported backup from the export captured above: this device's
+            // own payload, with only the probe's gap changed (15 → 45) — the scenario of
+            // restoring an edited backup over a live install. Anchored on the probe's own
+            // object so nothing else moves.
+            assertTrue("precondition: the probe must carry the gap being edited",
+                Regex("\"name\":\"$ENABLED\".*?\"spontaneousGapMinutes\":15").containsMatchIn(export))
+            // Transform-based replacement rather than a "$1 45" backreference string: a
+            // digit directly after the group reference would be read as part of the group
+            // number, and a separating space would leak whitespace into the JSON. The
+            // probe's name occurs exactly once in the export, so replace == replaceFirst.
+            val modified = Regex("(\"name\":\"$ENABLED\".*?\"spontaneousGapMinutes\":)15")
+                .replace(export) { it.groupValues[1] + "45" }
+            assertTrue(onMain { service.importBackup(modified) })
+            // Non-vacuity on the import side: the restore really landed the new gap.
+            assertEquals("the restored probe must carry the imported gap", 45,
+                settings.getPersonas()!!.first { it.name == ENABLED }.spontaneousGapMinutes)
+
+            // The reconciliation is async (service coroutines + WorkManager), so poll.
+            // The identity assertions are the point: the OLD request — the one carrying the
+            // pre-import schedule — must no longer be pending, and a NEW request (the forced
+            // now + gap arm) must be pending in its place. WorkInfo exposes no delay, so
+            // the fresh timing itself is pinned at the JVM layer (SpontaneousSchedulerTest's
+            // nextSpontaneousAttempt cases); what only the device can show is that the
+            // stale request was actually dropped instead of running out. (REPLACE cancels
+            // AND DELETES the pending request it replaces, so unlike the disarm-only case
+            // the old id may be gone from the unique-work history entirely — "no longer
+            // pending" is the contract, not "queryable as CANCELLED".)
+            assertTrue("the old schedule must be dropped, not left to finish its stale cycle",
+                waitFor { pendingChainCount(ENABLED) == 1 && armedByLoad.none { it in pendingWorkIds(ENABLED) } })
+            val reArmed = pendingWorkIds(ENABLED)
+            assertEquals(1, reArmed.size)
+            assertTrue("the re-arm must be a NEW request, not the old one",
+                armedByLoad.none { it in reArmed })
+        } finally {
+            unbindAssistantService()
+        }
+    }
+
+    @Test fun `an import that disables a persona disarms its chain immediately`() {
+        saveProbe(ENABLED, enabled = true, window = windowFarFromNow())
+        val export = settings.exportBackup()
+        val service = bindAssistantService()
+        try {
+            // Same live-service-safe publishes as the case above (probe into the service's
+            // own persona list, probe server into its own ollama list, export captured
+            // before either) — this case's whole point is that an armed persona the import
+            // switches off must be disarmed, so the chain really has to exist first and
+            // the persona really has to be one the reconciliation is tracking.
+            if (service.personas.value.none { it.name == ENABLED }) {
+                onMain { service.addPersona(probePersona(ENABLED, enabled = true, window = windowFarFromNow())) }
+            }
+            onMain { service.addOllamaBase(SERVER, "http://10.0.0.9:11434") }
+            armSpontaneousWork(context, ENABLED, slot = 0, delayMillis = HOUR_MS)
+            assertTrue("precondition: the probe must be armed before the import",
+                waitFor { pendingChainCount(ENABLED) == 1 })
+            val armedBeforeImport = pendingWorkIds(ENABLED)
+            assertEquals(1, armedBeforeImport.size)
+
+            assertTrue("precondition: the probe must carry the toggle being flipped",
+                Regex("\"name\":\"$ENABLED\".*?\"spontaneousEnabled\":true").containsMatchIn(export))
+            val modified = Regex("(\"name\":\"$ENABLED\".*?\"spontaneousEnabled\":)true")
+                .replace(export) { it.groupValues[1] + "false" }
+            assertTrue(onMain { service.importBackup(modified) })
+            // Non-vacuity on the import side: the restore really switched the persona off.
+            assertFalse("the restored probe must really be switched off",
+                settings.getPersonas()!!.first { it.name == ENABLED }.spontaneousEnabled)
+
+            // Without the reconciliation this chain stays armed and only ends when its next
+            // run fires, finds the persona switched off, and self-cancels — one stale
+            // execution away. The fix tears it down with the import instead. Nothing
+            // pending under EITHER slot is the contract; how WorkManager files the request
+            // it cancelled (a later REPLACE deletes the record outright) is not this test's
+            // business.
+            assertTrue("the chain must be gone, not left to fire once and self-cancel",
+                waitFor { pendingChainCount(ENABLED) == 0 })
+        } finally {
+            unbindAssistantService()
+        }
     }
 }
 

@@ -664,4 +664,127 @@ class SettingsManagerCorruptionTest {
         assertNull(restored.spontaneousWindowEndMin)
         assertEquals(0, restored.spontaneousMaxPerDay)
     }
+
+    // ---- F1: the delivery state's LIFECYCLE — it is keyed by persona NAME, so it must
+    // ---- follow the persona through deletion, rename and restore exactly like the
+    // ---- name-keyed history entry does. All three cases exercise the SHARED surfaces
+    // ---- the real service paths route through (deletePersonaHistory / migratePersonaHistory
+    // ---- / importBackup), not private reimplementations.
+
+    /**
+     * The O10 global daily cap is computed over EVERY stored state entry (the worker's
+     * `allStates.values.filter { it.sentTodayDate == today }.sumOf { it.sentTodayCount }`),
+     * mirrored here assertion-for-assertion against the same getter.
+     */
+    private fun globalSentToday(manager: SettingsManager, today: String): Int =
+        manager.getSpontaneousStates().values
+            .filter { it.sentTodayDate == today }
+            .sumOf { it.sentTodayCount }
+
+    @Test fun `the persona deletion path drops the spontaneous state so it stops counting toward the global daily cap`() {
+        val (manager, _) = newManagerWithPlainPrefs()
+        manager.savePersonas(
+            listOf(
+                spontaneousPersona("Keep", enabled = true, gapMinutes = 60),
+                spontaneousPersona("Doomed", enabled = true, gapMinutes = 60)
+            )
+        )
+        manager.recordSpontaneousSent("Keep", at = 1_000L, todayDate = "2026-01-01")
+        manager.recordSpontaneousSent("Doomed", at = 2_000L, todayDate = "2026-01-01")
+        manager.recordSpontaneousSent("Doomed", at = 3_000L, todayDate = "2026-01-01")
+        assertEquals(
+            "precondition: the probe really counts toward the cap before its deletion",
+            3, globalSentToday(manager, "2026-01-01")
+        )
+
+        // THE REAL removePersona path: this is the exact cleanup call its history-IO lane
+        // runs (AssistantService.removePersona → deletePersonaHistory). Pre-F1 it dropped
+        // only the history entry, and the persona's state entry went on counting toward
+        // the cap above for the rest of the day.
+        manager.deletePersonaHistory("Doomed")
+
+        assertNull("the deleted persona's history entry is gone", manager.getPersonaMessages("Doomed"))
+        assertEquals(
+            "and its delivery state must die with it",
+            SpontaneousState(), manager.spontaneousStateFor("Doomed")
+        )
+        assertFalse(
+            "the state map must not carry the deleted persona",
+            "Doomed" in manager.getSpontaneousStates()
+        )
+        assertEquals(
+            "a dead persona must no longer count toward the global daily cap",
+            1, globalSentToday(manager, "2026-01-01")
+        )
+        assertEquals(
+            "a surviving persona's pacing is untouched",
+            1, manager.spontaneousStateFor("Keep").sentTodayCount
+        )
+    }
+
+    @Test fun `a rename carries the spontaneous state to the new name, pacing intact`() {
+        val (manager, _) = newManagerWithPlainPrefs()
+        manager.savePersonas(listOf(spontaneousPersona("Old", enabled = true, gapMinutes = 60)))
+        manager.recordSpontaneousSent("Old", at = 1_234_500L, todayDate = "2026-02-02")
+        manager.recordSpontaneousSent("Old", at = 1_234_600L, todayDate = "2026-02-02")
+        val before = manager.spontaneousStateFor("Old")
+        assertEquals("precondition: the probe really has pacing to lose", 2, before.sentTodayCount)
+        // A history entry too, so the rename exercises the whole shared surface at once.
+        manager.savePersonaMessages("Old", emptyList())
+
+        // THE REAL updatePersona rename path: the exact call its rename branch runs
+        // (AssistantService.updatePersona → migratePersonaHistory). Pre-F1 the state
+        // entry stayed stranded under the old key — orphaned AND lost to the renamed
+        // persona, whose pacing silently reset to "never sent".
+        manager.migratePersonaHistory("Old", "New")
+
+        val moved = manager.spontaneousStateFor("New")
+        assertEquals("lastSentAt must survive the rename", before.lastSentAt, moved.lastSentAt)
+        assertEquals("and the daily counter", before.sentTodayCount, moved.sentTodayCount)
+        assertEquals("and the date that counter belongs to", before.sentTodayDate, moved.sentTodayDate)
+        assertEquals("the old key must be gone", SpontaneousState(), manager.spontaneousStateFor("Old"))
+        assertFalse("Old" in manager.getSpontaneousStates())
+        assertEquals("the history entry moved too", emptyList<ChatMessage>(), manager.getPersonaMessages("New"))
+        assertNull("and left nothing behind", manager.getPersonaMessages("Old"))
+
+        // A persona carrying state but NO history entry must still migrate: the state move
+        // runs independently of the history move, not after its absent-entry early-return.
+        manager.recordSpontaneousSent("StateOnly", at = 7_000L, todayDate = "2026-02-02")
+        manager.migratePersonaHistory("StateOnly", "StateOnlyNew")
+        assertEquals(7_000L, manager.spontaneousStateFor("StateOnlyNew").lastSentAt)
+        assertEquals(SpontaneousState(), manager.spontaneousStateFor("StateOnly"))
+    }
+
+    @Test fun `an import drops spontaneous state entries for personas the restore did not bring back`() {
+        val (manager, _) = newManagerWithPlainPrefs()
+        manager.savePersonas(listOf(spontaneousPersona("Restored", enabled = true, gapMinutes = 60)))
+        // A backup that restores ONLY "Restored".
+        val export = manager.exportBackup()
+
+        // The device being restored ONTO carries local delivery state (the device-local
+        // bookkeeping that never travels in the backup) for two personas this restore does
+        // not bring back — one WITH a history entry, one with state only, because the entry
+        // sets are independent — plus local state for the persona that IS restored.
+        val (manager2, _) = newManagerWithPlainPrefs()
+        manager2.recordSpontaneousSent("GhostWithHistory", at = 1_000L, todayDate = "2026-01-01")
+        manager2.savePersonaMessages("GhostWithHistory", emptyList())
+        manager2.recordSpontaneousSent("GhostStateOnly", at = 2_000L, todayDate = "2026-01-01")
+        manager2.recordSpontaneousSent("Restored", at = 3_000L, todayDate = "2026-01-01")
+
+        assertTrue(manager2.importBackup(export))
+
+        assertEquals(
+            "an orphan that had a history entry must lose its state",
+            SpontaneousState(), manager2.spontaneousStateFor("GhostWithHistory")
+        )
+        assertNull("and its history entry too", manager2.getPersonaMessages("GhostWithHistory"))
+        assertEquals(
+            "an orphan with state only must lose it as well — the history sweep cannot see it",
+            SpontaneousState(), manager2.spontaneousStateFor("GhostStateOnly")
+        )
+        assertEquals(
+            "the restored persona's LOCAL state survives the import",
+            3_000L, manager2.spontaneousStateFor("Restored").lastSentAt
+        )
+    }
 }

@@ -506,11 +506,37 @@ class SettingsManager(context: Context) {
     // the names match or the old persona never had saved history. (If the new name
     // collides with an existing persona's history, the renamed persona claims it —
     // persona identity is name-based throughout the app.)
+    //
+    // F1: the spontaneous delivery state is keyed by the same name, so it is the
+    // SHARED rename surface — migratePersonaHistory carries it over too (via
+    // migrateSpontaneousState below). The one production caller is
+    // AssistantService.updatePersona's rename branch, where a rename must PRESERVE
+    // lastSentAt/sentTodayCount, never reset them: a reset would read as "never sent",
+    // and a freshly renamed persona could immediately re-message after its rename.
     fun migratePersonaHistory(oldName: String, newName: String) {
         if (oldName == newName) return
+        // State first and independently of the history move below: a persona can carry
+        // delivery state with no saved history entry at all, and the history read's
+        // early-return must not strand the state under the old key.
+        migrateSpontaneousState(oldName, newName)
         val data = prefs.getString("persona_messages_$oldName", null) ?: return
         prefs.edit().putString("persona_messages_$newName", data)
             .remove("persona_messages_$oldName").apply()
+    }
+
+    /**
+     * F1 rename half: read the old key's [SpontaneousState], write it under the new name,
+     * remove the old key — the state twin of [migratePersonaHistory]'s history move, with
+     * the same claim semantics (an existing entry under the new name is claimed by the
+     * renamed persona) and the same no-ops (same name, or nothing to move).
+     */
+    fun migrateSpontaneousState(oldName: String, newName: String) {
+        if (oldName == newName) return
+        val all = getSpontaneousStates()
+        val state = all[oldName] ?: return
+        prefs.edit()
+            .putString(SPONTANEOUS_STATE_KEY, json.encodeToString(all - oldName + (newName to state)))
+            .apply()
     }
 
     // ---------------------------------------------------------------------------
@@ -672,6 +698,18 @@ class SettingsManager(context: Context) {
     // in savePersonaMessages — otherwise those files would be orphaned in the entry's
     // place. A corrupted (unparseable) entry is still removed; its files are
     // unrecoverable anyway.
+    //
+    // F1: this is the SHARED persona-deletion cleanup surface, so the persona's
+    // spontaneous delivery state (spontaneous_state_v1, keyed by the same name) dies
+    // here too — the two are the same kind of residue and only ever die together. The
+    // production deletion path (AssistantService.removePersona's history-IO lane) and
+    // importBackup's orphan sweep both route through here, so the state entry cannot
+    // outlive its persona on either path. An orphaned entry would not just leak: the
+    // worker computes the O10 global daily cap over EVERY stored entry
+    // (SpontaneousDeliveryWorker: allStates.values...), so a deleted persona's stale
+    // counter would silently suppress the SURVIVING personas' messages for the rest of
+    // the day. If a future caller genuinely wants history-without-state, extract the
+    // two concerns rather than weakening this one.
     fun deletePersonaHistory(personaName: String) {
         getPersonaMessages(personaName)?.forEach { msg ->
             msg.audioFilePath?.let { path ->
@@ -685,6 +723,7 @@ class SettingsManager(context: Context) {
             }
         }
         prefs.edit().remove("persona_messages_$personaName").apply()
+        deleteSpontaneousState(personaName)
     }
 
     fun exportBackup(): String {
@@ -836,6 +875,20 @@ class SettingsManager(context: Context) {
                 .map { it.removePrefix("room_messages_") }
                 .filter { it !in restoredRoomIds }
                 .forEach { deleteRoomHistory(it) }
+            // F1: spontaneous delivery state is keyed by persona name too. The history
+            // sweep above already drops the state of every orphan that HAD a history
+            // entry (deletePersonaHistory carries it); this second pass catches the
+            // entries with no history entry — the two entry sets are independent, and
+            // either can exist without the other. Delivery state is device-local
+            // bookkeeping that never travels in the backup (see exportBackup), so every
+            // entry here belongs to a PRE-restore persona; one whose persona the restore
+            // did not bring back is unreachable forever — and worse than a leak, the
+            // worker computes the global daily cap over every stored entry, so a stale
+            // orphan would keep suppressing the restored personas' messages for the rest
+            // of the day.
+            getSpontaneousStates().keys
+                .filter { it !in restoredNames }
+                .forEach { deleteSpontaneousState(it) }
             true
         } catch (e: Exception) {
             // Try legacy import if new format fails

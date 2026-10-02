@@ -433,14 +433,53 @@ internal fun AssistantService.removeSpontaneousSchedule(personaName: String) {
 /**
  * Safety net over every persona, called once when settings load. Never replaces pending
  * work — see [refreshSpontaneousSchedule].
+ *
+ * [force] is the import-reconciliation lever (F2): `true` re-arms every enabled persona
+ * FRESH (a disarm-then-arm, landing a new now + gap request), so settings a backup just
+ * restored take effect immediately instead of after one stale cycle completes. The
+ * load-time call site stays `false`.
  */
-internal fun AssistantService.refreshAllSpontaneousSchedules() {
+internal fun AssistantService.refreshAllSpontaneousSchedules(force: Boolean = false) {
     // Reads the IN-MEMORY list, which `loadSettings` has already run the load-time guard
     // over — so this schedules the personas the service will actually serve, not whatever
     // happens to be sitting in `personas_v2` underneath it.
     personas.value
         .filter { it.spontaneousEnabled }
-        .forEach { refreshSpontaneousSchedule(it.name, force = false) }
+        .forEach { refreshSpontaneousSchedule(it.name, force = force) }
+}
+
+/**
+ * F2: reconcile armed spontaneous chains with what a backup import just made true.
+ *
+ * The load-time safety net only ever ARMS the un-armed — it never replaces pending work,
+ * and it iterates the personas that exist AFTER the restore, so on its own an import left
+ * WorkManager holding the PRE-import schedule in two ways: a persona whose gap/window the
+ * backup changed kept counting down the old gap, and a persona the restore deleted or
+ * switched off stayed armed until its next run fired once and self-cancelled through its
+ * own guard. This pass makes the imported state take effect NOW:
+ *
+ *  - every [preImportNames] entry the restore did not bring back ENABLED loses its chain
+ *    outright — [removeSpontaneousSchedule] disarms both slots and drops any delivery
+ *    notification still sitting in the shade, which could otherwise open a chat that will
+ *    never hear from that persona again. Checked against the enabled set rather than mere
+ *    existence so a restore that switches a persona off stops it immediately too.
+ *  - everything the restore DID bring back enabled is re-armed FRESH (force = true), so a
+ *    changed gap/window resets the countdown to now + gap instead of finishing the stale
+ *    cycle first. Restored-but-ineligible personas (their server did not travel in this
+ *    backup, or the restore flipped them to cloud) are disarmed by
+ *    [refreshSpontaneousSchedule]'s own guard on the way through, which is the same
+ *    treatment a save that breaks eligibility gets.
+ *
+ * Must run AFTER `loadSettings()` has republished the restored persona list, so that
+ * `personas.value` below is the post-restore truth.
+ */
+internal fun AssistantService.reconcileSpontaneousSchedulesAfterImport(preImportNames: Set<String>) {
+    val restoredEnabledNames = personas.value
+        .filter { it.spontaneousEnabled }
+        .map { it.name }
+        .toSet()
+    (preImportNames - restoredEnabledNames).forEach { removeSpontaneousSchedule(it) }
+    refreshAllSpontaneousSchedules(force = true)
 }
 
 
