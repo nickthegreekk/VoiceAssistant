@@ -192,7 +192,7 @@ internal const val FAILED_COOLDOWN_MS = 60_000L // 60 seconds
 
 internal fun AssistantService.sendAudioToServer(file: File, currentPersona: Persona) {
     if (currentPersona.model.isBlank()) {
-        _messages.value = _messages.value + ChatMessage("assistant", "Please choose a model for this persona in its settings.", isError = true)
+        _messages.value = _messages.value + ChatMessage("assistant", "Please choose a model for this persona in its settings.", isError = true).stampedAt()
         _state.value = AssistantState.IDLE
         updateNotification("Ready to help")
         return
@@ -262,7 +262,7 @@ internal fun AssistantService.sendAudioToServer(file: File, currentPersona: Pers
                         updateNotification("Ready to help")
                         return@launch
                     }
-                    _messages.value = _messages.value + ChatMessage("user", transcribedText)
+                    _messages.value = _messages.value + ChatMessage("user", transcribedText).stampedAt()
                     saveSettings()
                     // currentTurnInHistory = true: the user turn is now the last entry in
                     // _messages, so buildCloudRequest drops exactly that entry from the
@@ -294,7 +294,7 @@ internal fun AssistantService.sendAudioToServer(file: File, currentPersona: Pers
                     } else {
                         android.util.Log.e("AssistantService", "Cloud voice chat failed", e)
                         if (isChatContextCurrent(generation, personaName)) {
-                            _messages.value = _messages.value + ChatMessage("assistant", "Error: ${e.message}", isError = true)
+                            _messages.value = _messages.value + ChatMessage("assistant", "Error: ${e.message}", isError = true).stampedAt()
                         } else {
                             android.util.Log.d("AssistantService", "Persona changed during request — discarding failure message: ${e.message}")
                         }
@@ -542,12 +542,12 @@ internal fun AssistantService.sendAudioToServer(file: File, currentPersona: Pers
             if (streamedIdx != null && streamedIdx < _messages.value.size) {
                 val base = _messages.value.toMutableList().also { it.removeAt(streamedIdx) }.toList()
                 _messages.value = base +
-                    ChatMessage("user", uText as String) +
-                    ChatMessage("assistant", rText as String, reasoning as? String, audioFilePath = audioPath, responseTimeMs = responseTimeMs)
+                    ChatMessage("user", uText as String).stampedAt() +
+                    ChatMessage("assistant", rText as String, reasoning as? String, audioFilePath = audioPath, responseTimeMs = responseTimeMs).stampedAt()
             } else {
                 _messages.value = _messages.value +
-                    ChatMessage("user", uText as String) +
-                    ChatMessage("assistant", rText as String, reasoning as? String, audioFilePath = audioPath, responseTimeMs = responseTimeMs)
+                    ChatMessage("user", uText as String).stampedAt() +
+                    ChatMessage("assistant", rText as String, reasoning as? String, audioFilePath = audioPath, responseTimeMs = responseTimeMs).stampedAt()
             }
             saveSettings()
 
@@ -586,8 +586,8 @@ internal fun AssistantService.sendAudioToServer(file: File, currentPersona: Pers
                     _messages.value.toMutableList().also { it.removeAt(streamedIdx) }.toList()
                 } else _messages.value
                 _messages.value = base +
-                    ChatMessage("user", transcribedText) +
-                    ChatMessage("assistant", e.partialContent, e.partialThinking.ifBlank { null })
+                    ChatMessage("user", transcribedText).stampedAt() +
+                    ChatMessage("assistant", e.partialContent, e.partialThinking.ifBlank { null }).stampedAt()
                 saveSettings()
             } else {
                 removeBlankPlaceholderSvc(generation)
@@ -614,7 +614,7 @@ internal fun AssistantService.sendAudioToServer(file: File, currentPersona: Pers
             } else {
                 android.util.Log.e("AssistantService", "Chat failed", e)
                 if (isChatContextCurrent(generation, personaName)) {
-                    _messages.value = _messages.value + ChatMessage("assistant", "Error: ${e.message ?: "Unknown error"}", isError = true)
+                    _messages.value = _messages.value + ChatMessage("assistant", "Error: ${e.message ?: "Unknown error"}", isError = true).stampedAt()
                 } else {
                     android.util.Log.d("AssistantService", "Persona changed during request — discarding failure message: ${e.message}")
                 }
@@ -1436,7 +1436,32 @@ internal suspend fun AssistantService.performDirectOllamaChat(baseUrl: String, m
         val allNonError = (turnContext.history ?: _messages.value).filter { !it.isError }
         val historySource = if (currentTurnInHistory && allNonError.isNotEmpty()) allNonError.dropLast(1) else allNonError
 
-        val history = budgetedHistory(historySource, budget)
+        // Per-message timestamps, for a LOCAL model only. This request is assembled BY the app
+        // and its history reaches the model with no idea when anything was said; a local model
+        // is also the one that can actually be helped by knowing "that was three days ago".
+        //
+        // Applied HERE — before `budgetedHistory`, never after — so each prefix is counted by
+        // the same token estimate as the text it prefixes. That is the whole point of the
+        // placement: an overlong history is trimmed harder to make room for the stamps, exactly
+        // as it is for the words, instead of quietly going over the window. The fixed-part
+        // refusal in `resolveHistoryBudget` above is untouched by this (it measures the system
+        // prompt and the current message, neither of which is stamped).
+        //
+        // The gate is `stampsHistoryWithTimestamps` — the SAME direct-Ollama distinction Rooms
+        // and Spontaneous messages read (`Persona.requestRouting`), not a second local-vs-cloud
+        // test that could drift from the router.
+        //
+        // And the EXCLUSION is structural, not a flag: this is the Direct-Ollama builder.
+        // `buildCloudRequest`, the other budgeted builder, never calls this, so a cloud
+        // persona's history cannot pick the prefixes up by anything being forgotten here.
+        val stampedHistorySource =
+            if (persona.stampsHistoryWithTimestamps(ollamaServerNames(), cloudProviderNames())) {
+                historySource.map { it.copy(text = it.historyTextWithTimestamp()) }
+            } else {
+                historySource
+            }
+
+        val history = budgetedHistory(stampedHistorySource, budget)
 
         android.util.Log.d("AssistantService", "Ollama Budget: history=${history.size}, budget=$budget")
         history.forEachIndexed { i, msg -> android.util.Log.d("AssistantService", "DEBUG history[$i] role=${msg.role} preview=${msg.text.take(100)}") }
@@ -2121,7 +2146,7 @@ internal suspend fun AssistantService.performImageGeneration(prompt: String, cur
             text = prompt,
             generatedImagePath = cacheFile.absolutePath,
             responseTimeMs = responseTime
-        )
+        ).stampedAt()
         saveSettings()
     } catch (e: Exception) {
         _state.value = AssistantState.IDLE
@@ -2131,7 +2156,7 @@ internal suspend fun AssistantService.performImageGeneration(prompt: String, cur
             role = "assistant",
             text = "Image generation error: $errorMsg",
             isError = true
-        )
+        ).stampedAt()
         saveSettings()
     }
 }

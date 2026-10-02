@@ -351,6 +351,25 @@ fun ChatMessageBubble(
                 )
             }
         }
+
+        // When this message was sent: a bare time for today, date and time for anything older
+        // (see formatMessageStamp). Display only — it is a property of the stored message, so
+        // it renders identically for every persona type, local or cloud, and in single chat
+        // and rooms alike (Rooms renders through this same bubble).
+        //
+        // `null` when the message predates the timestamp field: no stamp beats a fabricated
+        // one. The Column's horizontalAlignment puts it under the bubble on the same side as
+        // the text, so a user's own turns stay right-aligned.
+        val sentAt = formatMessageStamp(message)
+        if (sentAt != null) {
+            Text(
+                text = sentAt,
+                style = MaterialTheme.typography.labelSmall,
+                fontSize = 10.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f),
+                modifier = Modifier.padding(top = 3.dp)
+            )
+        }
     }
 }
 

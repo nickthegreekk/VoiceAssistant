@@ -34,7 +34,21 @@ data class ChatMessage(
     val audioFilePath: String? = null,
     val responseTimeMs: Long? = null,
     val imagePath: String? = null,
-    val generatedImagePath: String? = null
+    val generatedImagePath: String? = null,
+    /**
+     * When this message was created — epoch millis, the same clock and default convention
+     * [RoomMessage.timestamp] uses.
+     *
+     * **0 means UNKNOWN, and is deliberate.** This field is new, so every message already on
+     * disk decodes without it, and a default of `System.currentTimeMillis()` would stamp the
+     * whole existing transcript with the moment the app happened to start — a fabricated
+     * "sent just now" on messages from last month. Legacy messages therefore decode as 0 and
+     * the UI shows no time for them, which is honest; a wrong time would not be.
+     *
+     * Writers stamp as they append ([stampedAt]); anything that reaches the transcript
+     * without one renders without a timestamp rather than with a guessed one.
+     */
+    val timestamp: Long = 0L
 )
 
 /**
@@ -319,6 +333,42 @@ fun Persona.roomEligibility(ollamaServerNames: Set<String>, cloudProviderNames: 
     if (isTranslator) return RoomEligibility.Blocked("Translators replace the conversation with a single translation request")
     if (model.isBlank()) return RoomEligibility.Blocked("No model selected")
 
+    // One classification, shared: `roomEligibility` below decides rooms with it, and
+    // `stampsHistoryWithTimestamps` (the Direct-Ollama history prefix) reads the SAME
+    // `isDirectOllama` flag rather than re-deciding local-vs-cloud for itself.
+    val routing = requestRouting(ollamaServerNames, cloudProviderNames)
+
+    return when {
+        routing.routesToCloud -> RoomEligibility.Eligible(cloud = true)
+        routing.isDirectOllama -> RoomEligibility.Eligible(cloud = false)
+        // A bare model name (no bracket prefix) reaches Ollama via the gateway's
+        // backend_url/failover path, which is history-blind — same exclusion.
+        else -> RoomEligibility.Blocked("Only reachable through the gateway, which can't carry room history")
+    }
+}
+
+/** Which of the three request paths a persona's model routes to. */
+internal data class PersonaRouting(
+    /** The name inside the `[Name] model` prefix, or null when there is no such prefix. */
+    val displayServer: String?,
+    /** A cloud provider this persona is configured to route to. */
+    val routesToCloud: Boolean,
+    /** A CONFIGURED Ollama server, i.e. a request the app builds itself (never the gateway). */
+    val isDirectOllama: Boolean
+)
+
+/**
+ * How [Persona.model]'s `"[Name] model"` form routes — the single place that parse lives.
+ *
+ * Extracted from [roomEligibility] so the Rooms rule, the Spontaneous-messages rule and the
+ * Direct-Ollama history-timestamp rule are all answered by the same function. Before this,
+ * the timestamp feature would have needed its own local-vs-cloud check, which is exactly the
+ * kind of second rule that silently drifts from the router's real branches.
+ */
+internal fun Persona.requestRouting(
+    ollamaServerNames: Set<String>,
+    cloudProviderNames: Set<String>
+): PersonaRouting {
     // Parse the same "[Provider] model" / "[Server] model" form the router parses.
     // The trim() matters: the real isCloudModel() trims before testing the bracket form, so
     // an untrimmed model routes to cloud while an untrimmed parse here would not.
@@ -328,23 +378,36 @@ fun Persona.roomEligibility(ollamaServerNames: Set<String>, cloudProviderNames: 
     } else {
         null
     }
-
-    // Exactly `persona.isCloud && isCloudModel(model)`, decomposed against the configured
-    // provider names (named routesToCloud, not `isCloud`, to avoid shadowing the Persona
-    // property the left-hand side reads).
-    val routesToCloud = isCloud && displayServer != null && displayServer in cloudProviderNames
-    // Direct Ollama: a "[Server]" prefix naming a CONFIGURED Ollama server, exactly the
-    // `_ollamaBaseUrls.find { it.name == displayServer }` test the router performs.
-    val isDirectOllama = displayServer != null && displayServer in ollamaServerNames
-
-    return when {
-        routesToCloud -> RoomEligibility.Eligible(cloud = true)
-        isDirectOllama -> RoomEligibility.Eligible(cloud = false)
-        // A bare model name (no bracket prefix) reaches Ollama via the gateway's
-        // backend_url/failover path, which is history-blind — same exclusion.
-        else -> RoomEligibility.Blocked("Only reachable through the gateway, which can't carry room history")
-    }
+    return PersonaRouting(
+        displayServer = displayServer,
+        // Exactly `persona.isCloud && isCloudModel(model)`, decomposed against the configured
+        // provider names (named routesToCloud, not `isCloud`, to avoid shadowing the Persona
+        // property the left-hand side reads).
+        routesToCloud = isCloud && displayServer != null && displayServer in cloudProviderNames,
+        // Direct Ollama: a "[Server]" prefix naming a CONFIGURED Ollama server, exactly the
+        // `_ollamaBaseUrls.find { it.name == displayServer }` test the router performs.
+        isDirectOllama = displayServer != null && displayServer in ollamaServerNames
+    )
 }
+
+/**
+ * Does this persona's history get per-message timestamps injected before it reaches the
+ * model?
+ *
+ * **Direct-Ollama only**, and the answer is [PersonaRouting.isDirectOllama] — the same
+ * distinction Rooms and Spontaneous messages read — rather than a new local-vs-cloud test.
+ * Cloud personas must not get them: their history is a paid request where the extra tokens
+ * buy nothing the model was not already told by the system prompt's "Current date and time",
+ * and gateway-routed personas send no history at all.
+ *
+ * The caller is [AssistantService]'s Direct-Ollama request builder, which is the ONLY place
+ * this is consulted — so the exclusion is structural (cloud requests never reach the code),
+ * not a flag some future caller could forget to pass.
+ */
+internal fun Persona.stampsHistoryWithTimestamps(
+    ollamaServerNames: Set<String>,
+    cloudProviderNames: Set<String>
+): Boolean = requestRouting(ollamaServerNames, cloudProviderNames).isDirectOllama
 
 /** Result of [roomEligibility]. */
 sealed class RoomEligibility {

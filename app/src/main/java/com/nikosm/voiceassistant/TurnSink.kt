@@ -63,7 +63,9 @@ internal class SingleChatSink(private val service: AssistantService) : TurnSink 
     override fun size(): Int = service._messages.value.size
 
     override fun append(message: ChatMessage): Int {
-        val updated = service._messages.value + message
+        // Stamped HERE, at the one place every text/voice turn's transcript write passes
+        // through, so no append path can reach the transcript unstamped.
+        val updated = service._messages.value + message.stampedAt()
         service._messages.value = updated
         return updated.size - 1
     }

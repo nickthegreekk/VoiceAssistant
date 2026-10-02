@@ -881,7 +881,10 @@ fun RoomChatArea(
                                 text = message.text,
                                 reasoning = message.reasoning,
                                 isError = message.isError,
-                                responseTimeMs = message.responseTimeMs
+                                responseTimeMs = message.responseTimeMs,
+                                // Carried across so the bubble's stamp is the ROOM message's
+                                // own time — the bubble itself is persona-agnostic.
+                                timestamp = message.timestamp
                             ),
                             displayText = message.text,
                             personaColor = MaterialTheme.colorScheme.primary,

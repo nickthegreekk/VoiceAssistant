@@ -160,12 +160,14 @@ internal class PersonaHistorySink(
 
     override fun append(message: ChatMessage): Int {
         if (!exists()) return -1
+        // Stamped on both branches, for the same reason SingleChatSink stamps: a spontaneous
+        // message lands in the very same transcript the user reads.
         if (isLive()) {
-            val updated = service._messages.value + message
+            val updated = service._messages.value + message.stampedAt()
             service._messages.value = updated
             return updated.size - 1
         }
-        detached.add(message)
+        detached.add(message.stampedAt())
         return detached.size - 1
     }
 

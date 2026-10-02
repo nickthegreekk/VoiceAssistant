@@ -78,15 +78,18 @@ internal fun roomHistoryAsChatMessages(
     // caller dropped). Never feed one to a model.
     .filter { it.text.isNotBlank() }
     .map { msg ->
+        // The room message's own time is carried onto the ChatMessage the model will see, so
+        // a Direct-Ollama member's history carries the same [Oct 1, 2026 14:32] prefixes a
+        // single chat would (historyTextWithTimestamp reads exactly this field).
         if (msg.isUser) {
             // The human's own turn stays a "user" role: providers require a leading
             // user message, and it keeps the alternation handlers intact.
-            ChatMessage("user", formatRoomTranscriptLine(msg))
+            ChatMessage("user", formatRoomTranscriptLine(msg), timestamp = msg.timestamp)
         } else {
             // Every persona (this one included) is an "assistant" role carrying a
             // name label — never a bare "assistant" turn, which a persona would read
             // as its own unrecoverable output.
-            ChatMessage("assistant", formatRoomTranscriptLine(msg))
+            ChatMessage("assistant", formatRoomTranscriptLine(msg), timestamp = msg.timestamp)
         }
     }
 
