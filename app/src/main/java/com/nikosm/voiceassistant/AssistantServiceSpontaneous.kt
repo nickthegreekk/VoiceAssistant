@@ -358,7 +358,8 @@ internal fun AssistantService.applySpontaneousDeepLink(personaName: String): Per
  *    request on its own, so unconditionally re-arming here would restart the countdown on
  *    every service start and could cancel a run that is mid-turn. This is also what picks
  *    up personas that reached storage without passing through `updatePersona`, such as an
- *    `importBackup`.
+ *    `importBackup` — which comes back through `loadSettings`, republishing the in-memory
+ *    list from storage before the safety net runs.
  *  - `true` (what `updatePersona` uses when `spontaneousScheduleDiffers` says the schedule
  *    actually changed): a RESET. The previous delay was computed from settings that no
  *    longer hold, so both slots are cleared and slot 0 is armed fresh. Clearing first — and
@@ -374,7 +375,26 @@ internal fun AssistantService.applySpontaneousDeepLink(personaName: String): Per
  */
 internal fun AssistantService.refreshSpontaneousSchedule(personaName: String, force: Boolean = false) {
     serviceScope.launch {
-        val persona = settingsManager.getPersonas()?.find { it.name == personaName }
+        // The IN-MEMORY list — every caller has already published to it before getting
+        // here (`addPersona` and `updatePersona` both assign `_personas.value` first).
+        //
+        // This used to read `settingsManager.getPersonas()`, which made `addPersona`'s
+        // arming call a no-op in exactly the case it exists for. `saveSettings()` only
+        // SCHEDULES a write — it cancels the pending job and launches a coroutine that
+        // sleeps `SAVE_DEBOUNCE_MS` before persisting — so `personas_v2` on disk was still
+        // the PRE-add list when this coroutine ran. The lookup returned null, and null is
+        // not "nothing to do": it takes the branch below that DISARMS the chain and
+        // cancels the persona's notification. A brand-new spontaneous-enabled persona was
+        // therefore actively disarmed and stayed unarmed until a later settings load ran
+        // the safety net. The same staleness quietly gutted `updatePersona`'s re-arm: a
+        // toggle switched on in the editor read the OLD, still-disabled persona off disk
+        // and disarmed it too.
+        //
+        // `refreshAllSpontaneousSchedules` had already made this call deliberately: it
+        // iterates `personas.value` precisely so scheduling follows "the personas the
+        // service will actually serve, not whatever happens to be sitting in personas_v2".
+        // The per-persona lookup was the one place still reading underneath that.
+        val persona = personas.value.find { it.name == personaName }
         if (persona == null ||
             !persona.spontaneousEnabled ||
             !SpontaneousPolicy.isEligible(persona, ollamaServerNames(), cloudProviderNames())

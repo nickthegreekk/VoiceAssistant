@@ -5,11 +5,13 @@ import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.os.IBinder
+import android.os.SystemClock
 import androidx.compose.ui.graphics.Color
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import org.junit.After
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -221,5 +223,78 @@ class SpontaneousWriteGuardInstrumentedTest {
             stored("ProbeGateway").spontaneousEnabled
         )
     }
+
+    // ---- arming, not just flagging -----------------------------------------------------
+    //
+    // Everything above proves the FLAG is right. These prove the flag reaches WorkManager
+    // when it is set — the gap `addPersona` had: it armed from `settingsManager.getPersonas()`
+    // while `saveSettings()` had only SCHEDULED its debounced write, so a brand-new
+    // spontaneous-enabled persona read back as null and was actively DISARMED (and had its
+    // notification cancelled) instead of armed, until some later settings load ran the
+    // safety net.
+
+    @Test fun `a spontaneous-enabled persona is armed as soon as it is added`() {
+        val name = "ProbeArmedOnAdd"
+        mainSync { service.addPersona(armedPersona(name)) }
+
+        assertNotPersistedYet(name)
+        assertTrue(
+            "addPersona must arm the persona it just created, without waiting for a settings " +
+                "load — nothing else re-arms it, and the debounced save never calls this",
+            waitUntilArmed(name)
+        )
+    }
+
+    @Test fun `switching spontaneous messages on re-arms the persona immediately`() {
+        // The same staleness reached updatePersona: the re-arm read the OLD, still-disabled
+        // persona off disk and disarmed it.
+        val name = "ProbeArmedOnToggle"
+        mainSync { service.addPersona(armedPersona(name).copy(spontaneousEnabled = false)) }
+        mainSync {
+            service.updatePersona(indexOf(name), stored(name).copy(spontaneousEnabled = true))
+        }
+
+        assertNotPersistedYet(name)
+        assertTrue(
+            "turning the feature on must arm the chain immediately",
+            waitUntilArmed(name)
+        )
+    }
+
+    /**
+     * The debounced write cannot have landed yet: `saveSettings()` sleeps
+     * `SAVE_DEBOUNCE_MS` on IO, and these assertions still run inside the main-thread block
+     * that did the add. If this ever starts failing, the save became synchronous — which
+     * would make the tests above pass for the wrong reason (arming off a completed write).
+     */
+    private fun assertNotPersistedYet(name: String) {
+        val storedOnDisk = runCatching {
+            service.settingsManager.getPersonas()?.firstOrNull { it.name == name }
+        }.getOrNull()
+        assertNull(
+            "precondition: storage must not know about '$name' yet, or this test would prove " +
+                "nothing about arming from memory",
+            storedOnDisk
+        )
+    }
+
+    private fun waitUntilArmed(name: String, timeoutMs: Long = 30_000): Boolean {
+        val deadline = SystemClock.uptimeMillis() + timeoutMs
+        while (SystemClock.uptimeMillis() < deadline) {
+            if (isSpontaneouslyArmed(context, name)) return true
+            SystemClock.sleep(100)
+        }
+        return isSpontaneouslyArmed(context, name)
+    }
+
+    /**
+     * A local, ELIGIBLE persona with the feature on. The window spans the whole day so the
+     * test does not depend on what time it is on the device — the chain is enqueued either
+     * way, but an out-of-window clamp would make the assertion depend on the hour.
+     */
+    private fun armedPersona(name: String) = localPersona(name, enabled = true).copy(
+        spontaneousWindowStartMin = 0,
+        spontaneousWindowEndMin = 24 * 60 - 1
+    )
 }
 
