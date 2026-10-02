@@ -172,9 +172,21 @@ private val EditingPersonaSaver = Saver<Pair<Int, Persona>?, String>(
      * The actual switch waits for `MainScreen` for two reasons: the service may not be
      * bound yet (cold start), and only the UI knows which overlays (`showSettings`,
      * room mode) would hide the chat the notification promised.
+     *
+     * The extra is REMOVED the moment it is read (F3). The launch intent outlives the Activity
+     * instance — every recreation (rotation, dark-mode toggle, font-scale change, "Don't keep
+     * activities") redelivers it to the new instance's onCreate — so leaving it in place made
+     * the recreation re-read it and re-fire the deep link: a second switchPersona() →
+     * stopEverything(), aborting whatever was in progress after the tap (verified on-device
+     * against an in-progress manual recording: the unfixed build killed it on rotation, the
+     * fixed build carries it straight through). Both entry paths are covered by this one
+     * mutation: onCreate reads the same intent object the system retained, and onNewIntent
+     * sets this same object as the activity's intent via setIntent above.
      */
     private fun handleSpontaneousDeepLink(intent: Intent?) {
         val target = intent?.getStringExtra(EXTRA_TARGET_PERSONA_NAME)?.takeIf { it.isNotBlank() }
+        // F3: consume the extra so no recreation of this Activity can re-read it.
+        intent?.removeExtra(EXTRA_TARGET_PERSONA_NAME)
         if (target != null) deepLinkPersona = target
     }
 
