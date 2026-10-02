@@ -828,8 +828,13 @@ fun MainScreen(
             // the Scaffold because Scaffold paints its containerColor opaquely, which
             // would hide it. One layer serves both bodies: the celestial HUD's
             // starfield is a transparent Canvas, so the image shows through it too.
+            //
+            // Room mode renders this same body, so the backdrop is gated on NOT being in a
+            // room (see personaBackdropPath): a room is a shared conversation with no
+            // persona of its own, and it used to inherit whichever persona was selected when
+            // it was opened — someone else's photo, and their scrim, behind the transcript.
             Box(modifier = Modifier.fillMaxSize()) {
-                currentPersona.backgroundImageUri?.takeIf { it.isNotBlank() }?.let { path ->
+                personaBackdropPath(activeRoom, currentPersona.backgroundImageUri)?.let { path ->
                     AsyncImage(
                         model = File(path),
                         contentDescription = null,
@@ -1046,8 +1051,13 @@ fun MainScreen(
                 // derives from it. This is also the site whose omission caused the deep-link
                 // bug: the mirror was set here by hand, and any path that forgot to was
                 // silently wrong.
+                //
+                // `switchPersonaFromPicker`, not `switchPersona`: this sheet is also reachable
+                // from the room header, and room mode renders in place of the persona chat — a
+                // bare switch moved the selection while leaving the room transcript on screen,
+                // which read as a dead tap. See AssistantServiceRooms.switchPersonaFromPicker.
                 showPersonaPicker = false
-                service?.switchPersona(it)
+                service?.switchPersonaFromPicker(it)
                 if (it.isTranslator) {
                     service?.clearMessages()
                 }

@@ -247,6 +247,34 @@ internal fun AssistantService.leaveRoom() {
     }
 }
 
+/**
+ * The persona picker's selection: switch to [persona] AND step out of room mode.
+ *
+ * One entry point for both modes, because the picker sheet is reachable from both — the
+ * persona header in single chat, and the room header in room mode (`RoomHeader.onRoomClick`
+ * opens this same sheet). Room mode renders IN PLACE of the persona chat (MainScreen's
+ * `if (activeRoom != null)`), which is exactly why a bare `switchPersona` left the tap
+ * looking like a no-op: the selection genuinely moved — `currentPersonaName` and the derived
+ * [currentPersonaFlow] both followed it — but what stayed on screen was the room transcript
+ * with the newly selected persona's conversation hidden underneath. The picker looked broken;
+ * the selection never was.
+ *
+ * Leaving here is what makes the one tap land where "Leave" then selecting the same persona
+ * would have: their own chat, with the room's transcript off the screen and (per [leaveRoom])
+ * saved rather than discarded. Ordering mirrors `applySpontaneousDeepLink` — switchPersona
+ * cannot re-enter a room, so leaving after the switch is what keeps the two from racing.
+ * [leaveRoom] no-ops when no room is open, so the overwhelmingly common single-chat selection
+ * costs nothing extra.
+ *
+ * Deliberately does NOT cancel a delivery notification the way `applySpontaneousDeepLink`
+ * does: this is a tap inside the app the user is already looking at, so there is no stale card
+ * to retract.
+ */
+internal fun AssistantService.switchPersonaFromPicker(persona: Persona) {
+    switchPersona(persona)
+    leaveRoom()
+}
+
 /** Clear the active room's transcript (in memory + on disk). */
 internal fun AssistantService.clearRoomMessages() {
     if (_activeRoomId.value == null) return

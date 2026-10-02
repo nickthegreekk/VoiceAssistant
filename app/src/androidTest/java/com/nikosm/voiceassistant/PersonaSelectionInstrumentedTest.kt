@@ -51,6 +51,7 @@ class PersonaSelectionInstrumentedTest {
     private var currentPersonaBefore: String? = null
     private var messagesOwnerBefore: String? = null
     private var messagesBefore: List<ChatMessage> = emptyList()
+    private var roomsBefore: List<Room> = emptyList()
 
     @Before
     fun bindAssistantService() {
@@ -75,6 +76,7 @@ class PersonaSelectionInstrumentedTest {
         currentPersonaBefore = service.currentPersonaName
         messagesOwnerBefore = service.messagesOwnerName
         messagesBefore = service._messages.value
+        roomsBefore = service.rooms.value
 
         // Two personas, so a switch has somewhere to go and a wrong target is distinguishable
         // from "already there".
@@ -95,6 +97,11 @@ class PersonaSelectionInstrumentedTest {
     fun tearDown() {
         runCatching {
             onMain {
+                // Room state first: the picker cases below can leave a room OPEN, and a
+                // still-open room would make the next test render room mode over its own
+                // chat — the very confusion this class is about.
+                service.leaveRoom()
+                service._rooms.value = roomsBefore
                 service.personas.value.indices.reversed().forEach { service.removePersona(it) }
                 personasBefore.forEach { service.addPersona(it) }
                 service._messages.value = messagesBefore
@@ -103,8 +110,23 @@ class PersonaSelectionInstrumentedTest {
                 service.saveSettings()
             }
         }
+        // Debounced saves mean the probe room could otherwise land on disk AFTER this class
+        // restored the list, leaving a phantom room in the user's own rooms_v1. Wait the
+        // restore out — same protection (and the same reason) as RoomPersistenceInstrumentedTest.
+        waitFor { runCatching { service.settingsManager.getRooms() }.getOrNull() == roomsBefore }
         connection?.let { runCatching { context.unbindService(it) } }
         connection = null
+    }
+
+    /** A room created through the production path, with exactly [members] as its members. */
+    private fun seedRoom(name: String, members: List<String>): Room {
+        val room = Room(name = name, memberNames = members)
+        onMain { service.addRoom(room) }
+        assertTrue(
+            "the probe room must really be in the service's list",
+            waitFor { service.rooms.value.any { it.id == room.id } }
+        )
+        return room
     }
 
     private fun onMain(block: () -> Unit) =
@@ -336,5 +358,62 @@ class PersonaSelectionInstrumentedTest {
         }
         assertEquals(PROBE, awaitSelection(PROBE)?.name)
         assertTrue("the swap must settle", waitFor { service.messagesOwnerName == PROBE })
+    }
+
+    // ---- the picker's selection must also step out of room mode ---------------------------
+    //
+    // Room mode renders IN PLACE of the persona chat, and the picker sheet is reachable from
+    // the room header too — so a bare switchPersona moved the selection while the room
+    // transcript stayed on screen, and the tap read as a dead no-op. The selection itself was
+    // never broken, which the first case proves as an executable precondition before pinning
+    // the fix, so these can never pass by the switch simply failing instead.
+
+    @Test fun `picking a persona from inside a room exits room mode into the normal chat of that persona`() {
+        val room = seedRoom("ProbeSelectionRoomOutside", listOf(OTHER))
+        onMain { service.switchRoom(room) }
+        assertTrue("precondition: room mode must actually be on",
+            waitFor { service.activeRoomId.value == room.id })
+        assertTrue("precondition: the picked persona must NOT be in this room",
+            PROBE !in room.memberNames)
+
+        // The diagnosis, executable: the selection itself follows a switch even while a room
+        // is open — which is exactly why the bug looked like nothing happened. Were this to
+        // stop holding, the bug would have a second cause and the fix below would be passing
+        // for the wrong reason.
+        onMain { service.switchPersona(persona(PROBE)) }
+        assertEquals("precondition: the bare switch must move the selection under room mode",
+            PROBE, awaitSelection(PROBE)?.name)
+        assertEquals("precondition: and that is the bug — the room is still open",
+            room.id, service.activeRoomId.value)
+        onMain { service.switchPersona(persona(OTHER)) }
+        assertEquals(OTHER, awaitSelection(OTHER)?.name)
+
+        // The fixed picker entry point: one tap, the outcome "Leave" then selecting PROBE
+        // would have given.
+        onMain { service.switchPersonaFromPicker(persona(PROBE)) }
+
+        assertEquals("the tap must select the persona it was given", PROBE, awaitSelection(PROBE)?.name)
+        assertTrue("and it must exit room mode",
+            waitFor { service.activeRoomId.value == null })
+        assertNull("with no room left selected", service.activeRoomId.value)
+    }
+
+    @Test fun `picking a persona that is a member of the active room still exits to the private chat`() {
+        // Membership must not turn the tap into a no-op either: the outcome is the persona's
+        // PRIVATE chat, not the room — the room is where they were, not where they are now.
+        val room = seedRoom("ProbeSelectionRoomInside", listOf(PROBE, OTHER))
+        onMain { service.switchRoom(room) }
+        assertTrue("precondition: room mode must actually be on",
+            waitFor { service.activeRoomId.value == room.id })
+        assertTrue("precondition: the picked persona must really be a member",
+            PROBE in room.memberNames)
+
+        onMain { service.switchPersonaFromPicker(persona(PROBE)) }
+
+        assertEquals("the tap must select the persona it was given", PROBE, awaitSelection(PROBE)?.name)
+        assertTrue("membership must not keep the user inside the room",
+            waitFor { service.activeRoomId.value == null })
+        assertTrue("and leaving must not delete the room — it is still there to re-enter",
+            service.rooms.value.any { it.id == room.id })
     }
 }

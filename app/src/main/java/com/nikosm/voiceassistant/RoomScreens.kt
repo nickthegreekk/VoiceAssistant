@@ -195,6 +195,25 @@ internal fun roomMemberSummary(room: Room): String =
     if (room.memberNames.isEmpty()) "No members yet" else room.memberNames.joinToString(", ")
 
 /**
+ * Which backdrop, if any, the main screen may paint behind itself — `null` for none.
+ *
+ * The backdrop is a PERSONALITY trait: the photo the user chose for one persona, plus the
+ * scrim that keeps text legible over it. Room mode is not that persona's chat — it is a shared
+ * conversation with no persona of its own — so a room must never wear it. The screen used to
+ * draw the backdrop unconditionally from the currently selected persona, which meant a room
+ * inherited whichever persona happened to be selected when the room was opened: someone
+ * else's photo (and the darkened scrim) behind the room transcript.
+ *
+ * Takes the ALREADY-RESOLVED [activeRoom] rather than an id, so this decision cannot drift
+ * from the one the render gate itself uses (`rooms.find { it.id == activeRoomId }`) — a stale
+ * id naming a room that no longer exists is not room mode, and must keep the backdrop.
+ *
+ * Blank stays blank here too: a stored-but-empty path is no image, exactly as before.
+ */
+internal fun personaBackdropPath(activeRoom: Room?, personaBackgroundPath: String?): String? =
+    if (activeRoom != null) null else personaBackgroundPath?.takeIf { it.isNotBlank() }
+
+/**
  * One-line cap summary for a room row, naming the effective source.
  *
  * A cap of 0 is spelled out rather than printed bare: "cap 0/round" on its own reads as

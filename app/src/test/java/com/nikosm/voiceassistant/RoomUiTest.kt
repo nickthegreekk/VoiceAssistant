@@ -177,6 +177,33 @@ class RoomUiTest {
         assertTrue("it must say the continuation is off, not unbounded", summary.contains("no autonomous"))
     }
 
+    // ------------------------------------------------------------- Persona backdrop
+
+    @Test fun `a room never wears the selected persona background`() {
+        // The reported bug: the backdrop is drawn in the Scaffold's shared content body, so
+        // without this gate a room inherited whichever persona was selected when it was
+        // opened — their photo, and the 0.55 scrim that goes with it, behind the transcript.
+        val room = Room(name = "R", memberNames = listOf("Bob", "Alice"))
+        assertNull(
+            "room mode has no persona of its own, so no persona backdrop may paint behind it",
+            personaBackdropPath(room, "/data/user/0/app/files/persona_images/background_1.jpg")
+        )
+    }
+
+    @Test fun `a room member's background is not lent to the room either`() {
+        // Membership does not change the relationship: the backdrop is that persona's CHAT,
+        // not a property of who happens to be in the room.
+        val room = Room(name = "R", memberNames = listOf("Bob"))
+        assertNull(personaBackdropPath(room, "/files/persona_images/background_1.jpg"))
+    }
+
+    @Test fun `single chat shows the persona backdrop, and an absent or blank path stays none`() {
+        val path = "/files/persona_images/background_1.jpg"
+        assertEquals("no room means the persona's own backdrop, unchanged", path, personaBackdropPath(null, path))
+        assertNull("no backdrop set", personaBackdropPath(null, null))
+        assertNull("a blank path is not an image", personaBackdropPath(null, "   "))
+    }
+
     // ------------------------------------------------- Editor commit (auto-save)
 
     private fun room(name: String = "R", cap: Int? = null, members: List<String> = listOf("A", "B")) =
