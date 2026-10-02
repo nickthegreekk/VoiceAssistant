@@ -131,20 +131,34 @@ internal fun alternateSpontaneousSlot(slot: Int): Int = (slot and 1) xor 1
  * A pure function of its arguments: no ordering requirement, no interaction with any other
  * run. That is the entire point of the slot scheme in [spontaneousWorkName], and it is why
  * this function carries no contract note about where a caller may put it.
+ *
+ * **Total by construction (F4).** WorkManager is infrastructure and its calls can throw for
+ * reasons outside our control — `getInstance` when the singleton is not initialized,
+ * `enqueueUniqueWork` on a shutdown race or an OEM quirk — and neither of this function's
+ * callers can afford a propagated throw (see the totality note on [disarmSpontaneousWork]
+ * for exactly what each caller loses). A failure here is logged, not propagated, and costs
+ * only "the previous chain (if any) stands": the worker's own precondition guards are the
+ * backstop, so a stale survivor ends itself instead of ever sending anything.
  */
 internal fun armSpontaneousWork(context: Context, personaName: String, slot: Int, delayMillis: Long) {
     if (personaName.isBlank()) return
-    val request = OneTimeWorkRequestBuilder<SpontaneousDeliveryWorker>()
-        .setInitialDelay(delayMillis.coerceAtLeast(0L), TimeUnit.MILLISECONDS)
-        .setConstraints(Constraints.NONE)
-        .setInputData(workDataOf(EXTRA_PERSONA_NAME to personaName, EXTRA_SLOT to (slot and 1)))
-        .build()
-    WorkManager.getInstance(context).enqueueUniqueWork(
-        spontaneousWorkName(personaName, slot),
-        ExistingWorkPolicy.REPLACE,
-        request
-    )
-    Log.d(TAG, "Armed '$personaName' slot ${slot and 1} in ${delayMillis.coerceAtLeast(0L)}ms")
+    runCatching {
+        val request = OneTimeWorkRequestBuilder<SpontaneousDeliveryWorker>()
+            .setInitialDelay(delayMillis.coerceAtLeast(0L), TimeUnit.MILLISECONDS)
+            .setConstraints(Constraints.NONE)
+            .setInputData(workDataOf(EXTRA_PERSONA_NAME to personaName, EXTRA_SLOT to (slot and 1)))
+            .build()
+        WorkManager.getInstance(context).enqueueUniqueWork(
+            spontaneousWorkName(personaName, slot),
+            ExistingWorkPolicy.REPLACE,
+            request
+        )
+    }.onSuccess {
+        // Only claimed when it actually armed — a swallowed failure must not also log a lie.
+        Log.d(TAG, "Armed '$personaName' slot ${slot and 1} in ${delayMillis.coerceAtLeast(0L)}ms")
+    }.onFailure {
+        Log.w(TAG, "Failed to arm spontaneous work for '$personaName' slot ${slot and 1}", it)
+    }
 }
 
 /**
@@ -155,11 +169,32 @@ internal fun armSpontaneousWork(context: Context, personaName: String, slot: Int
  * here, rather than at every call site. A run in flight is cancelled too, which is the
  * intended meaning of the three callers (toggle off, persona deleted or renamed): the user
  * changed their mind about something the run was started for.
+ *
+ * **Total by construction (F4),** same reason as [armSpontaneousWork]. The two call sites
+ * are what make a propagated throw here unacceptable, and they fail in opposite ways:
+ *
+ *  - [refreshSpontaneousSchedule] calls this (via [removeSpontaneousSchedule]) inside
+ *    `serviceScope.launch` on Dispatchers.Main with **no CoroutineExceptionHandler**, where an
+ *    uncaught throw takes the whole process down — a failed toggle or persona delete would
+ *    crash the app, not merely lose a timer;
+ *  - the worker's own `rearm()` calls [armSpontaneousWork] from inside `doWork()`, where an
+ *    uncaught throw fails that run and silently ends the chain — the one outcome this
+ *    feature's guard-and-log design exists to avoid, since the persona then never speaks
+ *    again and nothing anywhere says why.
+ *
+ * A swallowed failure is logged rather than dropped, and it degrades to "the old schedule
+ * stands", which the worker's own guards ([evaluateSpontaneousCycle]'s Cancel) then resolve:
+ * a surviving chain whose persona is gone, switched off or ineligible ends itself on its
+ * next run instead of ever sending anything.
  */
 internal fun disarmSpontaneousWork(context: Context, personaName: String) {
     if (personaName.isBlank()) return
-    val workManager = WorkManager.getInstance(context)
-    spontaneousWorkNames(personaName).forEach { workManager.cancelUniqueWork(it) }
+    runCatching {
+        val workManager = WorkManager.getInstance(context)
+        spontaneousWorkNames(personaName).forEach { workManager.cancelUniqueWork(it) }
+    }.onFailure {
+        Log.w(TAG, "Failed to disarm spontaneous work for '$personaName'", it)
+    }
 }
 
 
