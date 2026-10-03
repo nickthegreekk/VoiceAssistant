@@ -73,7 +73,6 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -436,6 +435,66 @@ private fun SettingsCategoryRow(
         }
     }
 }
+/**
+ * Footer caption size, in sp. Was 12sp, the same as Close.
+ *
+ * Named because it is deliberately the one Settings text size that is NOT shared with
+ * the rest of the chrome: the caption is a passive note rather than something to read,
+ * so it sits below the group captions (13sp) instead of matching Close (12sp). It is
+ * the only text that may use it — every other Settings text keeps its own size.
+ */
+internal val SettingsFooterCaptionSize = 10.sp
+
+/**
+ * The Settings footer's single shared copy: "Settings are automatically saved." at the
+ * far left, Close at the far right, on ONE row.
+ *
+ * The dialog renders this exactly once, below the crossfading content, so it is pinned
+ * under the scrolling category list and under every category screen without any of them
+ * having to draw their own footer — there is no second copy to keep in step.
+ *
+ * Position only: Close keeps its accent colour and medium weight, and no other Settings
+ * text size changes.
+ *
+ * Sizing is deliberately asymmetric. The caption takes the slack (weight 1f) and wraps
+ * onto a second line at large font scales rather than being clipped; Close is measured at
+ * its natural width with maxLines = 1 and softWrap = false, and carries an explicit 48dp
+ * minimum height, so a wrapping caption can never squeeze it, wrap it or shrink it below
+ * the accessibility floor for a touch target.
+ */
+@Composable
+private fun SettingsFooter(
+    accentColor: Color,
+    onDismiss: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .navigationBarsPadding()
+            .padding(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = "Settings are automatically saved.",
+            fontSize = SettingsFooterCaptionSize,
+            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+            modifier = Modifier.weight(1f)
+        )
+        TextButton(
+            onClick = onDismiss,
+            modifier = Modifier.defaultMinSize(minHeight = 48.dp)
+        ) {
+            Text(
+                text = "Close",
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Medium,
+                color = accentColor,
+                maxLines = 1,
+                softWrap = false
+            )
+        }
+    }
+}
 
 /**
  * A category's own full screen: a header (back arrow + category name) over that
@@ -639,38 +698,10 @@ fun SettingsDialog(service: AssistantService?, onDismiss: () -> Unit, personaCol
                     }
                 }
 
-                // Footer stays on both screens: it's the dialog's own close affordance.
-                // Pinned below the scrolling area, unchanged in behaviour: still the dialog's
-                // own close affordance on both screens. Only restyled to match the list — and
-                // given the navigation-bar inset, so on a gesture-nav device the Close button
-                // is not sitting under the bar at the largest font scale.
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .navigationBarsPadding()
-                        .padding(horizontal = 16.dp, vertical = 4.dp)
-                ) {
-                    Text(
-                        text = "Settings are automatically saved.",
-                        fontSize = 12.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
-                        modifier = Modifier.fillMaxWidth().padding(bottom = 4.dp),
-                        textAlign = TextAlign.Center
-                    )
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.End
-                    ) {
-                        TextButton(onClick = onDismiss) {
-                            Text(
-                                text = "Close",
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Medium,
-                                color = personaColor
-                            )
-                        }
-                    }
-                }
+                // One footer for the whole dialog, so it is pinned below the scrolling
+                // content on the category list AND on every category screen. Same close
+                // affordance as before, now a single caption/Close row.
+                SettingsFooter(accentColor = personaColor, onDismiss = onDismiss)
             }
         }
     }
