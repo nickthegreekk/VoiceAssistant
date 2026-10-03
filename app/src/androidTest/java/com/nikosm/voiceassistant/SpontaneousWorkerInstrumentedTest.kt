@@ -68,13 +68,11 @@ class SpontaneousWorkerInstrumentedTest {
         get() = InstrumentationRegistry.getInstrumentation().targetContext
 
     private lateinit var settings: SettingsManager
-    private var personasBefore: List<Persona> = emptyList()
     private var ollamaBefore: List<ServerConfig> = emptyList()
 
     @Before
     fun setUp() {
         settings = SettingsManager(context)
-        personasBefore = settings.getPersonas().orEmpty()
         ollamaBefore = settings.getOllamaBases().orEmpty()
         // A crashed previous run would otherwise leave a chain ticking against a probe name.
         PROBES.forEach { disarmSpontaneousWork(context, it) }
@@ -90,8 +88,15 @@ class SpontaneousWorkerInstrumentedTest {
             PROBES.forEach { disarmSpontaneousWork(context, it) }
             settings.deleteSpontaneousState(SERVER)
             PROBES.forEach { settings.deleteSpontaneousState(it) }
-            settings.savePersonas(personasBefore)
-            settings.saveOllamaBases(ollamaBefore)
+            // No savePersonas/saveOllamaBases restore HERE. This @After runs while the
+            // service is still alive, and a rename in the test body leaves a debounced
+            // saveSettings() in flight: that flush lands AFTER this restore and puts the
+            // renamed persona straight back, which is exactly the ServiceIsolationRule
+            // failure this used to cause intermittently. ServiceIsolationRule now stops
+            // the service, drains that flush and reconciles storage to the run baseline
+            // itself, in that order, so restoring here was both redundant and harmful.
+            // ollamaBefore is still captured and applied in setUp: this class adds a
+            // probe server there, and the rule's baseline does not cover server lists.
         }
     }
 

@@ -39,16 +39,27 @@ import org.junit.runners.model.Statement
  *
  * ## What it guarantees, before and after every test
  *
- *  - **No service left running or bound.** `stopService`, then wait until the platform
- *    reports it gone. Destroying it is what makes the next bind build a fresh instance
- *    whose `onCreate` runs `loadSettings()` against current storage; `onDestroy` also
- *    cancels the pending debounce and flushes synchronously.
+ *  - **No service left running or bound, and none of its writes still in flight.**
+ *    `stopService`, wait until the platform reports it gone, then wait for the main
+ *    looper to drain so `onDestroy`'s synchronous flush has returned. Destroying it is
+ *    what makes the next bind build a fresh instance whose `onCreate` runs
+ *    `loadSettings()` against current storage. See [quiesce] for why the drain is not
+ *    optional.
  *  - **No work armed.** `cancelAllWork()` on the real singleton: unique chains live in
  *    WorkManager's database and outlive both the persona and the class that armed them.
  *  - **No leftover rooms, personas, skills or spontaneous state.** Anything in storage
  *    that was not in the baseline captured at the start of the run is deleted, with the
  *    spontaneous state and chains keyed by its name.
  *  - **Notifications cleared.**
+ *
+ * ## The ordering this rule exists to get right
+ *
+ * Stopping the service, draining its writes, reconciling storage and reading the result
+ * is a fixed order, and every step is useless in the wrong one. The rule used to read
+ * storage BEFORE stopping the service, which is what let a debounced save land after the
+ * read and resurrect a persona a test had just removed. It now quiesces first (see
+ * [quiesce]), then reconciles, and only then reads — so the state it reports is the
+ * state that actually survives into the next test.
  *
  * ## Failing the polluter, not the victim
  *
@@ -69,6 +80,7 @@ class ServiceIsolationRule : TestRule {
         this.description = description
         return object : Statement() {
             override fun evaluate() {
+                quiesce()
                 clean()
                 // Whatever the test throws wins; a leak is only reported when the test itself
                 // passed, so a genuine failure is never masked by an isolation complaint.
@@ -78,8 +90,11 @@ class ServiceIsolationRule : TestRule {
                 } catch (t: Throwable) {
                     failure = t
                 }
-                val leaks = describeLeaks()
+                // Order matters, and it is the fix: quiesce (stop the service and let its
+                // debounced flush land), THEN reconcile storage, THEN read. See quiesce().
+                quiesce()
                 clean()
+                val leaks = describeLeaks()
                 failure?.let { throw it }
                 if (leaks.isNotEmpty()) {
                     throw AssertionError(
@@ -146,8 +161,27 @@ class ServiceIsolationRule : TestRule {
         }.getOrDefault(false)
     }
 
-    /** Stop, disarm, clear. Safe to call when nothing is running. */
-    private fun clean() {
+    /**
+     * Stop the service and wait until every write it had queued has actually landed.
+     *
+     * This is the ordering the rule was missing, and it is the whole race:
+     * [AssistantService.saveSettings] debounces onto its own IO scope, and `onDestroy`
+     * flushes synchronously under a mutex. A test that mutates state (a persona rename)
+     * and returns immediately therefore has a write still in flight when its `@After`
+     * restores the baseline. Whichever way that lands is a coin flip:
+     *
+     *  - flush BEFORE the restore -> the restore wins and nothing leaks;
+     *  - flush AFTER the restore  -> the flushed snapshot overwrites the restore, and the
+     *    next test inherits a persona the test deliberately removed.
+     *
+     * `stopService` + "wait until the platform says it is gone" is not enough on its own,
+     * because `getRunningServices` stops listing the service as soon as it is DESTROYING —
+     * its flush can still be mid-write when that read comes back false. So this waits for
+     * the service to be gone AND for the main looper to be idle, which is the point at
+     * which `onDestroy`'s blocking flush has returned. `waitForIdleSync` is a real
+     * condition, not a sleep: it returns the moment the queue drains.
+     */
+    private fun quiesce() {
         val ctx = context()
         if (serviceRunning()) {
             ctx.stopService(Intent(ctx, AssistantService::class.java))
@@ -156,6 +190,20 @@ class ServiceIsolationRule : TestRule {
                 Thread.sleep(25)
             }
         }
+        // The service is gone from the platform's list; now wait for its teardown write.
+        runCatching {
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+        }
+    }
+
+    /**
+     * Disarm, clear and RESTORE storage last. Safe to call when nothing is running.
+     *
+     * Ordering matters here too: [quiesce] must have run first, otherwise this rewrites
+     * storage and a still-in-flight flush rewrites it straight back.
+     */
+    private fun clean() {
+        val ctx = context()
         runCatching {
             WorkManager.getInstance(ctx).cancelAllWork()
                 .result.get(5, java.util.concurrent.TimeUnit.SECONDS)
