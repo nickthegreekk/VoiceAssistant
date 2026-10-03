@@ -49,23 +49,50 @@ import org.junit.runners.model.Statement
  *    WorkManager's database and outlive both the persona and the class that armed them.
  *  - **No leftover rooms, personas, skills or spontaneous state.** Anything in storage
  *    that was not in the baseline captured at the start of the run is deleted, with the
- *    spontaneous state and chains keyed by its name.
+ *    spontaneous state and chains keyed by its name. The server lists (ollama bases,
+ *    server bases, image-gen servers, cloud providers, custom cloud providers) are
+ *    reconciled the same way — the service persists all of them from one debounced
+ *    `saveSettings()`, so a test that adds a probe server leaks it just as surely as one
+ *    that adds a persona.
  *  - **Notifications cleared.**
+ *
+ * ## What is DETECTED versus what is silently CLEANED
+ *
+ * These are different jobs, and conflating them breaks the rule in one of two directions.
+ *
+ * **Detected — the test is failed by name:**
+ *  - a still-running / still-bound `AssistantService`;
+ *  - a spontaneous chain still ENQUEUED or RUNNING.
+ *
+ * **Silently cleaned — never reported:**
+ *  - every storage leftover above (rooms, personas, skills, spontaneous state, all five
+ *    server lists). The rule reconciles them away itself, so reporting them would only
+ *    describe the rule's own work.
  *
  * ## The ordering this rule exists to get right
  *
  * Stopping the service, draining its writes, reconciling storage and reading the result
- * is a fixed order, and every step is useless in the wrong one. The rule used to read
- * storage BEFORE stopping the service, which is what let a debounced save land after the
- * read and resurrect a persona a test had just removed. It now quiesces first (see
- * [quiesce]), then reconciles, and only then reads — so the state it reports is the
- * state that actually survives into the next test.
+ * is a fixed order, and every step is useless in the wrong one.
+ *
+ * Two orderings have each broken this rule, and they pull in opposite directions:
+ *
+ *  - **Reading before quiescing** is what let a debounced save land after the read and
+ *    resurrect a persona a test had just removed. Hence [quiesce] first.
+ *  - **Reading the detected states after cleaning** deleted the evidence before it was
+ *    read, so the rule could not fail anything at all — a silent no-op. Hence the
+ *    snapshot in [evaluate]: the service-running and armed-work states are captured while
+ *    the test's mess is still on disk, and only then cleaned and reported.
+ *
+ * The two rules together are why storage leftovers are exempt from reporting: they are
+ * the one category whose "dirty" reading is genuinely ambiguous (a rename's in-flight
+ * flush makes a restore look transiently lost), and the rule now owns restoring them, so
+ * a test that renames a persona must pass rather than be named for it.
  *
  * ## Failing the polluter, not the victim
  *
- * [after] re-checks the same conditions and throws if the test that just ran left
- * something behind, naming it. That turns "some later test failed for no reason" into
- * "this test leaked", which is the only version of the problem that can be fixed.
+ * [evaluate] throws if the test that just ran left a detected state behind, naming it.
+ * That turns "some later test failed for no reason" into "this test leaked", which is
+ * the only version of the problem that can be fixed.
  *
  * ## Scope note
  *
@@ -90,11 +117,19 @@ class ServiceIsolationRule : TestRule {
                 } catch (t: Throwable) {
                     failure = t
                 }
-                // Order matters, and it is the fix: quiesce (stop the service and let its
-                // debounced flush land), THEN reconcile storage, THEN read. See quiesce().
+                // Snapshot FIRST, clean second, report third.
+                //
+                // quiesce() stops the service and clean() cancels every chain, so both of
+                // the states this rule exists to name are destroyed by the very cleanup
+                // that makes the next test safe. Reading them after it is how the reorder
+                // that fixed the teardown race silently turned this rule into a no-op that
+                // could never fail anything. They are therefore captured here, while the
+                // test's mess is still on disk, and reported below.
+                val leftRunning = serviceRunning()
+                val leftArmed = armedChains(context())
                 quiesce()
                 clean()
-                val leaks = describeLeaks()
+                val leaks = describeLeaks(leftRunning, leftArmed)
                 failure?.let { throw it }
                 if (leaks.isNotEmpty()) {
                     throw AssertionError(
@@ -115,22 +150,25 @@ class ServiceIsolationRule : TestRule {
 
 
     /**
-     * What the test that just ran left behind, read before any cleanup: a running service, a
-     * still-armed chain, or entities in storage that were not in the run's baseline.
+     * What the test that just ran left behind, from the snapshot taken before cleanup.
+     *
+     * Only the two states cleanup cannot leave for the next test to trip over are
+     * reported: a service still running or bound, and a chain still armed. Both are
+     * destroyed by [quiesce] and [clean], which is exactly why they are passed in
+     * pre-cleanup rather than read here.
+     *
+     * Storage leftovers are deliberately NOT reported. [clean] reconciles them away in the
+     * same pass, so reporting them would only ever describe the rule's own work — and it
+     * would misfire on a test that renames a persona, whose in-flight flush makes the
+     * restore look transiently lost. They are cleaned silently instead.
      */
-    private fun describeLeaks(): List<String> {
-        val ctx = context()
+    private fun describeLeaks(leftRunning: Boolean, leftArmed: List<String>): List<String> {
         val leaks = mutableListOf<String>()
-        if (serviceRunning()) {
+        if (leftRunning) {
             leaks += "AssistantService is still running or bound"
         }
-        val armed = armedChains(ctx)
-        if (armed.isNotEmpty()) {
-            leaks += "spontaneous work still armed: ${armed.joinToString()}"
-        }
-        val leftovers = runCatching { IsolationState.leftovers(ctx) }.getOrDefault(emptyList())
-        if (leftovers.isNotEmpty()) {
-            leaks += "state in storage: ${leftovers.joinToString()}"
+        if (leftArmed.isNotEmpty()) {
+            leaks += "spontaneous work still armed: ${leftArmed.joinToString()}"
         }
         return leaks
     }
@@ -233,8 +271,36 @@ private object IsolationState {
     private class Baseline(
         val personaNames: Set<String>,
         val roomIds: Set<String>,
-        val skillIds: Set<String>
+        val skillIds: Set<String>,
+        // Server lists were missing, which left tests that add a probe server holding
+        // their own restore (SpontaneousWorkerInstrumentedTest.ollamaBefore) because the
+        // rule would not remove it. Keyed by "name\u0000url": a name alone is not unique
+        // — the service forbids duplicate URLs, not duplicate names, so two entries can
+        // legitimately share one.
+        val ollamaServers: Set<String>,
+        val serverBases: Set<String>,
+        val imageGenServers: Set<String>,
+        val cloudApis: Set<String>,
+        val customCloudApis: Set<String>
     )
+
+    /** Stable identity for a [ServerConfig], which has no id of its own. */
+    private fun serverKey(name: String, url: String) = "$name\u0000$url"
+
+    private fun ollamaKeys(s: SettingsManager) =
+        s.getOllamaBases().orEmpty().map { serverKey(it.name, it.url) }.toSet()
+
+    private fun serverBaseKeys(s: SettingsManager) =
+        s.getServerBases().orEmpty().map { serverKey(it.name, it.url) }.toSet()
+
+    private fun imageGenKeys(s: SettingsManager) =
+        s.getImageGenBases().orEmpty().map { serverKey(it.name, it.url) }.toSet()
+
+    private fun cloudKeys(s: SettingsManager) =
+        s.getCloudApis().orEmpty().map { serverKey(it.name, it.baseUrl) }.toSet()
+
+    private fun customCloudKeys(s: SettingsManager) =
+        s.getCustomCloudApis().orEmpty().map { serverKey(it.name, it.baseUrl) }.toSet()
 
     @Volatile
     private var baseline: Baseline? = null
@@ -247,7 +313,12 @@ private object IsolationState {
                 val b = Baseline(
                     personaNames = s.getPersonas().orEmpty().map { it.name }.toSet(),
                     roomIds = s.getRooms().orEmpty().map { it.id }.toSet(),
-                    skillIds = s.getSkills().orEmpty().map { it.id }.toSet()
+                    skillIds = s.getSkills().orEmpty().map { it.id }.toSet(),
+                    ollamaServers = ollamaKeys(s),
+                    serverBases = serverBaseKeys(s),
+                    imageGenServers = imageGenKeys(s),
+                    cloudApis = cloudKeys(s),
+                    customCloudApis = customCloudKeys(s)
                 )
                 baseline = b
                 b
@@ -282,6 +353,39 @@ private object IsolationState {
             }
             if (extraSkills.isNotEmpty()) {
                 s.saveSkills(s.getSkills().orEmpty().filter { it.id in b.skillIds })
+            }
+            // Server lists ride the same path: the service persists all of them from one
+            // debounced saveSettings(), so a test that adds a probe server leaks it just
+            // as surely as one that adds a persona.
+            if (ollamaKeys(s) != b.ollamaServers) {
+                s.saveOllamaBases(
+                    s.getOllamaBases().orEmpty()
+                        .filter { serverKey(it.name, it.url) in b.ollamaServers }
+                )
+            }
+            if (serverBaseKeys(s) != b.serverBases) {
+                s.saveServerBases(
+                    s.getServerBases().orEmpty()
+                        .filter { serverKey(it.name, it.url) in b.serverBases }
+                )
+            }
+            if (imageGenKeys(s) != b.imageGenServers) {
+                s.saveImageGenBases(
+                    s.getImageGenBases().orEmpty()
+                        .filter { serverKey(it.name, it.url) in b.imageGenServers }
+                )
+            }
+            if (cloudKeys(s) != b.cloudApis) {
+                s.saveCloudApis(
+                    s.getCloudApis().orEmpty()
+                        .filter { serverKey(it.name, it.baseUrl) in b.cloudApis }
+                )
+            }
+            if (customCloudKeys(s) != b.customCloudApis) {
+                s.saveCustomCloudApis(
+                    s.getCustomCloudApis().orEmpty()
+                        .filter { serverKey(it.name, it.baseUrl) in b.customCloudApis }
+                )
             }
         }
     }

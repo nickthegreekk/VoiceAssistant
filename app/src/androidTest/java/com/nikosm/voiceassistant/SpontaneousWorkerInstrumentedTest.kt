@@ -95,8 +95,9 @@ class SpontaneousWorkerInstrumentedTest {
             // failure this used to cause intermittently. ServiceIsolationRule now stops
             // the service, drains that flush and reconciles storage to the run baseline
             // itself, in that order, so restoring here was both redundant and harmful.
-            // ollamaBefore is still captured and applied in setUp: this class adds a
-            // probe server there, and the rule's baseline does not cover server lists.
+            // ollamaBefore is still applied in setUp (this class adds a probe server);
+            // it is no longer RESTORED here — ServiceIsolationRule's baseline now covers
+            // the ollama server list and reconciles it away in the same pass as personas.
         }
     }
 

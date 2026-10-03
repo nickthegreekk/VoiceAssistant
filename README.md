@@ -173,17 +173,33 @@ persisted state therefore carries `ServiceIsolationRule`
 (`app/src/androidTest/.../ServiceIsolationRule.kt`), which before and after every test:
 
 - stops any `AssistantService` left running or bound, so the next bind builds a fresh
-  instance whose `onCreate` reloads storage (and `onDestroy` settles the debounced save);
+  instance whose `onCreate` reloads storage;
+- waits for that teardown to finish writing — the debounced save is drained on the main
+  looper, so a write cannot land after storage has been restored (this ordering is the
+  fix for a rename test whose in-flight flush used to resurrect the persona it removed);
 - cancels armed spontaneous work;
-- deletes rooms, personas, skills and spontaneous state that were not in the run's
-  baseline;
+- deletes rooms, personas, skills, spontaneous state and all five server lists (ollama
+  bases, server bases, image-gen servers, cloud providers, custom cloud providers) that
+  were not in the run's baseline;
 - clears notifications.
 
-Afterwards it checks the same three things and fails **the test that leaked**, by name,
-rather than letting the next class inherit the mess. If you add an instrumented class
-that touches the service, add the rule too — and if it starts the real `MainActivity`,
-remember that `MainActivity.onCreate` calls `startService()`, so the started service must
-be stopped in your `@After` (unbinding alone is not enough).
+**Two of those are detected, the rest are cleaned silently.** The rule fails **the test
+that leaked**, by name, for exactly two things:
+
+- a still-running / still-bound `AssistantService`;
+- a spontaneous chain still `ENQUEUED` or `RUNNING`.
+
+Storage leftovers are **not** reported: the rule reconciles them away itself, so
+reporting them would only ever describe the rule's own work — and it would misfire on a
+test that legitimately renames a persona, whose in-flight flush makes the restore look
+transiently lost. Those tests must pass.
+
+Both detected states are snapshotted *before* the cleanup that deletes them, so if you
+touch this rule, keep that order: read-after-clean is a silent no-op that fails nothing.
+If you add an instrumented class that touches the service, add the rule too — and if it
+starts the real `MainActivity`, remember that `MainActivity.onCreate` calls
+`startService()`, so the started service must be stopped in your `@After` (unbinding
+alone is not enough).
 
 Tests that bind the service also join its startup history load
 (`runBlocking { service.awaitPersonaHistoryIo() }`) before touching `_messages`:
