@@ -67,6 +67,8 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -139,82 +141,298 @@ private val CloudApiSettingSaver = Saver<CloudApiSetting?, String>(
 )
 
 /**
- * The five top-level Settings categories, in the order they appear on the flat list.
+ * The top-level Settings categories, in the order they appear on the flat list.
  *
- * Plain data rather than an enum so each entry carries its own icon, keeping the flat
- * list a simple `forEach` and the drill-down target a single value.
+ * Plain data rather than an enum so each entry carries its own icon AND its section caption,
+ * which keeps both the grouping and the drill-down target a single registry: adding a category
+ * is one line here, and it appears in the right section with no other edit. The section a
+ * category belongs to is therefore NEVER written into the composable — it is derived from this
+ * order by [settingsCategoryGroups].
  */
-private val SETTINGS_CATEGORIES = listOf(
-    SettingsCategory("General", Icons.Default.Settings),
-    SettingsCategory("Servers", Icons.Default.Dns),
-    SettingsCategory("Cloud", Icons.Default.Cloud),
-    SettingsCategory("Personas", Icons.Default.Person),
-    SettingsCategory("Rooms", Icons.Default.Forum),
+internal val SETTINGS_CATEGORIES = listOf(
+    SettingsCategory("General", Icons.Default.Settings, SettingsGroup.APP),
+    SettingsCategory("Servers", Icons.Default.Dns, SettingsGroup.CONNECTIONS),
+    SettingsCategory("Cloud", Icons.Default.Cloud, SettingsGroup.CONNECTIONS),
+    SettingsCategory("Personas", Icons.Default.Person, SettingsGroup.ASSISTANTS),
+    SettingsCategory("Rooms", Icons.Default.Forum, SettingsGroup.ASSISTANTS),
     // After Personas, not beside them: a skill only means something once the persona that
     // can enable it exists, so the order follows "what to configure" rather than the alphabet.
-    SettingsCategory("Skills", Icons.Default.AutoAwesome)
+    SettingsCategory("Skills", Icons.Default.AutoAwesome, SettingsGroup.ASSISTANTS)
 )
 
+/**
+ * The three section captions. Held here rather than inline in the composable so the registry
+ * stays the single place a category (or a whole section) is declared.
+ */
+internal enum class SettingsGroup(val caption: String) {
+    APP("App"),
+    CONNECTIONS("Connections"),
+    ASSISTANTS("Assistants")
+}
+
 /** One entry of the flat top-level Settings list. */
-private data class SettingsCategory(val title: String, val icon: ImageVector)
+internal data class SettingsCategory(
+    val title: String,
+    val icon: ImageVector,
+    val group: SettingsGroup
+)
+
+/** One caption and the categories filed under it, in registry order. */
+internal data class SettingsCategoryGroup(
+    val caption: String,
+    val categories: List<SettingsCategory>
+)
 
 /**
- * The flat top-level Settings list: one row per category, icon + label only.
+ * The categories folded into captioned sections, derived from [SETTINGS_CATEGORIES] order.
  *
- * No inline content, no toggle, no expand affordance — tapping a row navigates to that
- * category's screen. This is the same list-then-detail shape Personas and Rooms already
- * use one level down, applied to the categories themselves.
+ * `groupBy` returns a LinkedHashMap, so sections appear in the order their first member does —
+ * reordering the registry reorders the screen, and a new category needs no other edit.
+ */
+internal fun settingsCategoryGroups(
+    categories: List<SettingsCategory> = SETTINGS_CATEGORIES
+): List<SettingsCategoryGroup> =
+    categories.groupBy { it.group }
+        .map { (group, members) -> SettingsCategoryGroup(group.caption, members) }
+
+// ---------------------------------------------------------------------------------
+// Row summaries
+//
+// Pure functions beside the composable (the `roomMemberSummary` / `roomCapSummary`
+// pattern), because what each row says must be unit-testable without a device and without
+// a composition. They read only what the dialog ALREADY collects — no disk access, so a
+// summary can never block or slow the first frame.
+// ---------------------------------------------------------------------------------
+
+/**
+ * The General screen's own contents, listed as they are today: Appearance, Data & Usage,
+ * Location, History, Backup & Recovery. Static on purpose — this category has no counts to
+ * report, and inventing any would rot the moment a section is added.
+ */
+internal const val GENERAL_SETTINGS_SUMMARY = "Appearance, usage, location, history, backup"
+
+/** "$count word", with the label pluralized at n > 1. */
+internal fun countedItems(count: Int, singular: String, plural: String): String =
+    "$count " + if (count == 1) singular else plural
+
+/**
+ * What the Servers row says, e.g. `2 Ollama, 1 gateway, 1 image-gen`.
+ *
+ * Zero segments are omitted entirely rather than shown as "0 …" — a row reading
+ * "2 Ollama, 0 gateway" is noise — and a genuinely empty Servers screen says so instead.
+ * "Ollama" and "image-gen" are product/kind names and stay invariant; "gateway" pluralizes.
+ */
+internal fun serversSummary(ollama: Int, gateway: Int, imageGen: Int): String {
+    val segments = buildList {
+        if (ollama > 0) add(countedItems(ollama, "Ollama", "Ollama"))
+        if (gateway > 0) add(countedItems(gateway, "gateway", "gateways"))
+        if (imageGen > 0) add(countedItems(imageGen, "image-gen", "image-gen"))
+    }
+    return segments.joinToString(", ").ifEmpty { "No servers yet" }
+}
+
+/**
+ * How many cloud providers are actually usable.
+ *
+ * "Set up" deliberately means [builtInWithKey] — the BUILT-IN providers are always present in
+ * the list (the app seeds `DEFAULT_CLOUD_APIS` on first run whether or not the user has a key),
+ * so counting the list itself would report "5 configured" on a device that has never used a
+ * cloud model. Every CUSTOM provider counts: adding one is already a deliberate act, and
+ * OpenAI-compatible endpoints are legitimately keyless.
+ */
+internal fun cloudSummary(builtInWithKey: Int, custom: Int): String {
+    val total = builtInWithKey + custom
+    return if (total == 0) "None set up yet" else countedItems(total, "provider", "providers")
+}
+
+internal fun personasSummary(count: Int): String =
+    if (count == 0) "No personas yet" else countedItems(count, "persona", "personas")
+
+internal fun roomsSummary(count: Int): String =
+    if (count == 0) "No rooms yet" else countedItems(count, "room", "rooms")
+
+internal fun skillsSummary(count: Int): String =
+    if (count == 0) "No skills yet" else countedItems(count, "skill", "skills")
+
+/**
+ * Every category's summary line, keyed by the category itself.
+ *
+ * Built once per state change and handed to the list, so the composable only renders and a
+ * test can assert the whole set without composing anything. Derived from the registry, so a
+ * new category is covered by adding its summary case here — no silent blank row.
+ */
+internal fun settingsCategorySummaries(
+    ollamaServers: Int,
+    gatewayServers: Int,
+    imageGenServers: Int,
+    cloudProvidersWithKey: Int,
+    customCloudProviders: Int,
+    personas: Int,
+    rooms: Int,
+    skills: Int
+): Map<SettingsCategory, String> = buildMap {
+    SETTINGS_CATEGORIES.forEach { category ->
+        put(
+            category,
+            when (category.title) {
+                "General" -> GENERAL_SETTINGS_SUMMARY
+                "Servers" -> serversSummary(ollamaServers, gatewayServers, imageGenServers)
+                "Cloud" -> cloudSummary(cloudProvidersWithKey, customCloudProviders)
+                "Personas" -> personasSummary(personas)
+                "Rooms" -> roomsSummary(rooms)
+                "Skills" -> skillsSummary(skills)
+                else -> ""
+            }
+        )
+    }
+}
+
+/**
+ * The flat top-level Settings list: a captioned "Settings" title, then one card per category
+ * showing its title and a live one-line summary.
+ *
+ * Purely presentational. Tapping a row still navigates to that category's screen, and the
+ * list stays inside the dialog's existing AnimatedContent slot — the drill-down, the crossfade
+ * and the BackHandler are untouched.
+ *
+ * @param summaries precomputed per-category lines (see [settingsCategorySummaries]); passed in
+ *   rather than collected here so this composable renders only what it is given, which is also
+ *   what makes it testable on its own.
  */
 @Composable
-private fun SettingsCategoryList(
+internal fun SettingsCategoryList(
     accentColor: Color,
+    summaries: Map<SettingsCategory, String>,
     onCategorySelected: (SettingsCategory) -> Unit
 ) {
     LazyColumn(
         // fillMaxSize, not weight(): AnimatedContent already carries the weight(1f) that
         // reserves this area, and its content lambda is not a ColumnScope.
+        //
+        // The insets: this dialog is a fullscreen, edge-to-edge window, so the list used to
+        // start underneath the status bar. statusBarsPadding plus the display cutout's
+        // horizontal edges keeps the title clear of both, and degrades to no padding on a
+        // window that reports none.
         modifier = Modifier
             .fillMaxSize()
+            .statusBarsPadding()
+            .windowInsetsPadding(WindowInsets.displayCutout.only(WindowInsetsSides.Horizontal))
             .padding(horizontal = 16.dp),
-        contentPadding = PaddingValues(top = 4.dp, bottom = 4.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp)
+        contentPadding = PaddingValues(top = 4.dp, bottom = 12.dp)
     ) {
-        items(SETTINGS_CATEGORIES, key = { it.title }) { category ->
+        item(key = "settings-title") {
+            Text(
+                text = "Settings",
+                fontSize = 24.sp,
+                fontWeight = FontWeight.Medium,
+                color = MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier.padding(top = 8.dp, bottom = 8.dp)
+            )
+        }
+
+        settingsCategoryGroups().forEach { group ->
+            item(key = "settings-caption-${group.caption}") {
+                Text(
+                    text = group.caption,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 16.dp, bottom = 8.dp)
+                )
+            }
+            items(group.categories, key = { it.title }) { category ->
+                SettingsCategoryRow(
+                    category = category,
+                    summary = summaries[category].orEmpty(),
+                    accentColor = accentColor,
+                    onClick = { onCategorySelected(category) },
+                    modifier = Modifier.padding(bottom = 6.dp)
+                )
+            }
+        }
+    }
+}
+
+/**
+ * One category row: a tonal card holding an accent-tinted icon tile, the category name, a
+ * one-line summary and the chevron.
+ *
+ * Sizing is deliberately NOT fixed. The row carries a 48dp MINIMUM height (the accessibility
+ * floor for a touch target, which the 12dp padding plus the 36dp tile already exceeds) and
+ * lets the text grow the card at large font scales rather than clipping it — that growth is
+ * also what keeps this scrollable list honest on a small screen.
+ */
+@Composable
+private fun SettingsCategoryRow(
+    category: SettingsCategory,
+    summary: String,
+    accentColor: Color,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        modifier = modifier
+            .fillMaxWidth()
+            // One node for the whole row: TalkBack reads "Servers, 2 Ollama, 1 gateway"
+            // instead of walking three unlabeled pieces. The icon and chevron are decorative
+            // (contentDescription = null below), so nothing extra merges in.
+            .semantics(mergeDescendants = true) {
+                contentDescription =
+                    if (summary.isBlank()) category.title else "${category.title}, $summary"
+            }
+            .clickable(onClick = onClick),
+        shape = RoundedCornerShape(12.dp),
+        // The same container the existing settings cards use (SettingsSection), not a new
+        // color: tonal fill, and borderless — the outline is what made this read as a form.
+        color = Color.Black.copy(alpha = 0.2f)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .defaultMinSize(minHeight = 48.dp)
+                .padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
             Surface(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable { onCategorySelected(category) },
-                shape = RoundedCornerShape(16.dp),
-                color = Color.Black.copy(alpha = 0.2f),
-                border = BorderStroke(1.dp, accentColor.copy(alpha = 0.25f))
+                shape = RoundedCornerShape(10.dp),
+                color = accentColor.copy(alpha = 0.16f),
+                modifier = Modifier.size(36.dp)
             ) {
-                Row(
-                    modifier = Modifier.padding(16.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
+                Box(contentAlignment = Alignment.Center) {
                     Icon(
                         imageVector = category.icon,
                         contentDescription = null,
                         tint = accentColor,
-                        modifier = Modifier.size(22.dp)
-                    )
-                    Spacer(Modifier.width(12.dp))
-                    Text(
-                        text = category.title,
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Spacer(Modifier.weight(1f))
-                    // Trailing chevron: the row goes somewhere, as opposed to the
-                    // old expand/collapse chevron which rotated in place.
-                    Icon(
-                        imageVector = Icons.Default.ChevronRight,
-                        contentDescription = null,
-                        tint = accentColor.copy(alpha = 0.5f),
-                        modifier = Modifier.size(22.dp)
+                        modifier = Modifier.size(20.dp)
                     )
                 }
             }
+            Spacer(Modifier.width(12.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = category.title,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                if (summary.isNotBlank()) {
+                    Text(
+                        text = summary,
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+            Icon(
+                imageVector = Icons.Default.ChevronRight,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                modifier = Modifier.size(18.dp)
+            )
         }
     }
 }
@@ -293,6 +511,9 @@ fun SettingsDialog(service: AssistantService?, onDismiss: () -> Unit, personaCol
     var ollamaBases by remember { mutableStateOf<List<ServerConfig>>(emptyList()) }
     var imageGenBases by remember { mutableStateOf<List<ServerConfig>>(emptyList()) }
     var cloudApis by remember { mutableStateOf<List<CloudApiSetting>>(emptyList()) }
+    // The Cloud row's summary counts custom providers too, and they live in their own flow.
+    // Still no disk access: both are StateFlows the service already keeps in memory.
+    var customCloudApis by remember { mutableStateOf<List<CloudApiSetting>>(emptyList()) }
     var personas by remember { mutableStateOf<List<Persona>>(emptyList()) }
     var rooms by remember { mutableStateOf<List<Room>>(emptyList()) }
     var skills by remember { mutableStateOf<List<Skill>>(emptyList()) }
@@ -304,6 +525,7 @@ fun SettingsDialog(service: AssistantService?, onDismiss: () -> Unit, personaCol
             launch { service.ollamaBaseUrls.collect { ollamaBases = it } }
             launch { service.imageGenBases.collect { imageGenBases = it } }
             launch { service.cloudApis.collect { cloudApis = it } }
+            launch { service.customCloudApis.collect { customCloudApis = it } }
             launch { service.personas.collect { personas = it } }
             launch { service.rooms.collect { rooms = it } }
             launch { service.skills.collect { skills = it } }
@@ -313,6 +535,23 @@ fun SettingsDialog(service: AssistantService?, onDismiss: () -> Unit, personaCol
     if (service == null) return
 
     val svc = service
+
+    // Every category row's second line, computed from what is already collected above. This is
+    // derived state, so it is computed once per change and passed down: the list composable
+    // renders it and reads nothing itself.
+    val categorySummaries = settingsCategorySummaries(
+        ollamaServers = ollamaBases.size,
+        gatewayServers = serverBases.size,
+        imageGenServers = imageGenBases.size,
+        // A built-in provider counts as "set up" only once it carries a key — the built-ins
+        // are seeded whether or not the user has one.
+        cloudProvidersWithKey = cloudApis.count { it.apiKey.isNotBlank() },
+        customCloudProviders = customCloudApis.size,
+        personas = personas.size,
+        rooms = rooms.size,
+        skills = skills.size
+    )
+
     AlertDialog(
         onDismissRequest = onDismiss,
         // Fullscreen settings: fill the whole screen (the previous 90%-height
@@ -350,6 +589,7 @@ fun SettingsDialog(service: AssistantService?, onDismiss: () -> Unit, personaCol
                     if (category == null) {
                         SettingsCategoryList(
                             accentColor = personaColor,
+                            summaries = categorySummaries,
                             onCategorySelected = { activeCategory = it }
                         )
                     } else {
@@ -400,11 +640,20 @@ fun SettingsDialog(service: AssistantService?, onDismiss: () -> Unit, personaCol
                 }
 
                 // Footer stays on both screens: it's the dialog's own close affordance.
-                Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
+                // Pinned below the scrolling area, unchanged in behaviour: still the dialog's
+                // own close affordance on both screens. Only restyled to match the list — and
+                // given the navigation-bar inset, so on a gesture-nav device the Close button
+                // is not sitting under the bar at the largest font scale.
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .navigationBarsPadding()
+                        .padding(horizontal = 16.dp, vertical = 4.dp)
+                ) {
                     Text(
                         text = "Settings are automatically saved.",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
                         modifier = Modifier.fillMaxWidth().padding(bottom = 4.dp),
                         textAlign = TextAlign.Center
                     )
@@ -413,7 +662,12 @@ fun SettingsDialog(service: AssistantService?, onDismiss: () -> Unit, personaCol
                         horizontalArrangement = Arrangement.End
                     ) {
                         TextButton(onClick = onDismiss) {
-                            Text("Close", color = personaColor)
+                            Text(
+                                text = "Close",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = personaColor
+                            )
                         }
                     }
                 }
