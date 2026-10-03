@@ -41,6 +41,9 @@ import java.util.concurrent.atomic.AtomicReference
 class AdaptiveThemeInstrumentedTest {
 
     @get:Rule
+    val serviceIsolation = ServiceIsolationRule()
+
+    @get:Rule
     val composeRule = createComposeRule()
 
     private val context get() = InstrumentationRegistry.getInstrumentation().targetContext

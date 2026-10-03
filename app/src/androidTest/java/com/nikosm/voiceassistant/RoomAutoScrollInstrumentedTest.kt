@@ -21,6 +21,7 @@ import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
@@ -49,6 +50,9 @@ import java.util.concurrent.TimeUnit
  */
 @RunWith(AndroidJUnit4::class)
 class RoomAutoScrollInstrumentedTest {
+
+    @get:Rule
+    val serviceIsolation = ServiceIsolationRule()
 
     @get:Rule
     val composeRule = createComposeRule()
@@ -83,6 +87,12 @@ class RoomAutoScrollInstrumentedTest {
         )
         assertTrue("AssistantService did not bind within 30s", bound.await(30, TimeUnit.SECONDS))
         service = boundService!!
+        // Join the service's startup history load before this test touches _messages:
+        // onCreate -> loadSettings() -> switchPersona() publishes _messages asynchronously,
+        // and a test that assigns _messages while that is still in flight has it
+        // overwritten underneath (a replay then finds no message to index and publishes
+        // nothing). No-op when no history operation is in flight.
+        runBlocking { service.awaitPersonaHistoryIo() }
         roomMessagesBefore = service._roomMessages.value
         ownerBefore = service.roomMessagesOwnerId
     }

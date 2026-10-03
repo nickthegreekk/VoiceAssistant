@@ -161,6 +161,34 @@ Contributions are welcome! Please feel free to:
 - [Ollama](https://ollama.ai/) - Local LLM runtime
 - [ONNX Runtime](https://onnxruntime.ai/) - ML inference framework
 
+## Testing
+
+Unit tests run with `./gradlew testDebugUnitTest`. Instrumented tests run with
+`./gradlew connectedDebugAndroidTest` (set `ANDROID_SERIAL` if more than one device is
+attached; the task targets every attached device).
+
+**`AssistantService` is process-global, and an instrumented run is one process for the
+whole suite.** Any test that touches the service, the spontaneous WorkManager chains or
+persisted state therefore carries `ServiceIsolationRule`
+(`app/src/androidTest/.../ServiceIsolationRule.kt`), which before and after every test:
+
+- stops any `AssistantService` left running or bound, so the next bind builds a fresh
+  instance whose `onCreate` reloads storage (and `onDestroy` settles the debounced save);
+- cancels armed spontaneous work;
+- deletes rooms, personas, skills and spontaneous state that were not in the run's
+  baseline;
+- clears notifications.
+
+Afterwards it checks the same three things and fails **the test that leaked**, by name,
+rather than letting the next class inherit the mess. If you add an instrumented class
+that touches the service, add the rule too — and if it starts the real `MainActivity`,
+remember that `MainActivity.onCreate` calls `startService()`, so the started service must
+be stopped in your `@After` (unbinding alone is not enough).
+
+Tests that bind the service also join its startup history load
+(`runBlocking { service.awaitPersonaHistoryIo() }`) before touching `_messages`:
+`onCreate -> loadSettings() -> switchPersona()` publishes `_messages` asynchronously.
+
 ## Disclaimer
 
 This app connects to third-party AI services. You are responsible for:

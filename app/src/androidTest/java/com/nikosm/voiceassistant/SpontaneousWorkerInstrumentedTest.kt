@@ -22,6 +22,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
+import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 
@@ -47,6 +48,9 @@ import org.junit.runner.RunWith
  */
 @RunWith(AndroidJUnit4::class)
 class SpontaneousWorkerInstrumentedTest {
+
+    @get:Rule
+    val serviceIsolation = ServiceIsolationRule()
 
     private companion object {
         const val SERVER = "ProbeWorkerOllama"
@@ -233,16 +237,17 @@ class SpontaneousWorkerInstrumentedTest {
     @Test fun `arming leaves exactly one pending chain per persona`() {
         assertEquals("a stale chain would make the assertions below vacuous", 0, pendingChainCount(ENABLED))
         armSpontaneousWork(context, ENABLED, slot = 0, delayMillis = HOUR_MS)
-        assertTrue(isSpontaneouslyArmed(context, ENABLED))
-        assertEquals(1, pendingChainCount(ENABLED))
-        assertTrue(slotPending(ENABLED, 0))
+        // Every read below waits on the condition rather than firing once: enqueueUniqueWork
+        // commits asynchronously, so an immediate read races its own insert.
+        assertTrue(waitFor { isSpontaneouslyArmed(context, ENABLED) })
+        assertTrue(waitFor { pendingChainCount(ENABLED) == 1 })
+        assertTrue(waitFor { slotPending(ENABLED, 0) })
     }
 
     @Test fun `chains stay separated per persona name`() {
         armSpontaneousWork(context, ENABLED, slot = 0, delayMillis = HOUR_MS)
         armSpontaneousWork(context, DISABLED, slot = 0, delayMillis = HOUR_MS)
-        assertEquals(1, pendingChainCount(ENABLED))
-        assertEquals(1, pendingChainCount(DISABLED))
+        assertTrue(waitFor { pendingChainCount(ENABLED) == 1 && pendingChainCount(DISABLED) == 1 })
         disarmSpontaneousWork(context, ENABLED)
         assertTrue("disarming one persona must not touch another",
             waitFor { !isSpontaneouslyArmed(context, ENABLED) && isSpontaneouslyArmed(context, DISABLED) })
@@ -250,15 +255,14 @@ class SpontaneousWorkerInstrumentedTest {
 
     @Test fun `re-arming the same slot replaces rather than accumulating`() {
         repeat(3) { armSpontaneousWork(context, ENABLED, slot = 0, delayMillis = HOUR_MS) }
-        assertEquals("REPLACE must leave a single chain, not three stacked delays",
-            1, pendingChainCount(ENABLED))
+        assertTrue("REPLACE must leave a single chain, not three stacked delays",
+            waitFor { pendingChainCount(ENABLED) == 1 })
     }
 
     @Test fun `disarming clears both slots`() {
         armSpontaneousWork(context, ENABLED, slot = 0, delayMillis = HOUR_MS)
         armSpontaneousWork(context, ENABLED, slot = 1, delayMillis = HOUR_MS)
-        assertTrue(slotPending(ENABLED, 0))
-        assertTrue(slotPending(ENABLED, 1))
+        assertTrue(waitFor { slotPending(ENABLED, 0) && slotPending(ENABLED, 1) })
         disarmSpontaneousWork(context, ENABLED)
         assertTrue("a leftover slot would resurrect a chain the user switched off",
             waitFor { !slotPending(ENABLED, 0) && !slotPending(ENABLED, 1) })
@@ -278,20 +282,20 @@ class SpontaneousWorkerInstrumentedTest {
      */
     @Test fun `a re-arm arms the other slot so it cannot cancel its own chain`() {
         armSpontaneousWork(context, ENABLED, slot = 0, delayMillis = HOUR_MS)
-        assertTrue(slotPending(ENABLED, 0))
+        assertTrue(waitFor { slotPending(ENABLED, 0) })
 
         // Exactly what a run in slot 0 does when it re-arms.
         armSpontaneousWork(context, ENABLED, slot = alternateSpontaneousSlot(0), delayMillis = HOUR_MS)
 
-        assertTrue("arming from slot 0 must not cancel slot 0", slotPending(ENABLED, 0))
-        assertTrue("the successor must land in the other slot", slotPending(ENABLED, 1))
+        assertTrue("arming from slot 0 must not cancel slot 0", waitFor { slotPending(ENABLED, 0) })
+        assertTrue("the successor must land in the other slot", waitFor { slotPending(ENABLED, 1) })
     }
 
     @Test fun `isSpontaneouslyArmed sees either slot`() {
         assertFalse(isSpontaneouslyArmed(context, ENABLED))
         armSpontaneousWork(context, ENABLED, slot = 1, delayMillis = HOUR_MS)
         assertTrue("a chain living in slot 1 must still count as armed",
-            isSpontaneouslyArmed(context, ENABLED))
+            waitFor { isSpontaneouslyArmed(context, ENABLED) })
     }
 
     // ---------------------------------------------------------------- the run
@@ -405,7 +409,8 @@ class SpontaneousWorkerInstrumentedTest {
             // under test is the teardown, not how the chain came to exist.
             onMain { service.addPersona(probePersona(DELETE, enabled = true, window = windowFarFromNow())) }
             armSpontaneousWork(context, DELETE, slot = 0, delayMillis = HOUR_MS)
-            assertTrue("precondition: the probe must hold a live chain", pendingChainCount(DELETE) == 1)
+            assertTrue("precondition: the probe must hold a live chain",
+                waitFor { pendingChainCount(DELETE) == 1 })
             settings.recordSpontaneousSent(DELETE, at = 9_000L, todayDate = "2026-01-01")
             assertEquals("precondition: the probe really carries state",
                 9_000L, settings.spontaneousStateFor(DELETE).lastSentAt)
@@ -431,7 +436,13 @@ class SpontaneousWorkerInstrumentedTest {
         try {
             onMain { service.addPersona(probePersona(RENAME_OLD, enabled = true, window = windowFarFromNow())) }
             armSpontaneousWork(context, RENAME_OLD, slot = 0, delayMillis = HOUR_MS)
-            assertTrue("precondition: the probe must hold a live chain", pendingChainCount(RENAME_OLD) == 1)
+            // Waited, not read straight after arming: enqueueUniqueWork() returns an
+            // Operation that commits asynchronously, so an immediate read can see the
+            // work database before its own insert lands. That is a race in the READ, not
+            // a slow arm, and it is why every other precondition in this class polls
+            // (see waitFor). Same bound, same helper - no new timeout.
+            assertTrue("precondition: the probe must hold a live chain",
+                waitFor { pendingChainCount(RENAME_OLD) == 1 })
             settings.recordSpontaneousSent(RENAME_OLD, at = 5_000L, todayDate = "2026-03-03")
             settings.recordSpontaneousSent(RENAME_OLD, at = 6_000L, todayDate = "2026-03-03")
             val before = settings.spontaneousStateFor(RENAME_OLD)

@@ -29,6 +29,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.concurrent.thread
 import org.json.JSONObject
+import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -57,6 +58,9 @@ import org.junit.runner.RunWith
  */
 @RunWith(AndroidJUnit4::class)
 class MessageTimestampInstrumentedTest {
+
+    @get:Rule
+    val serviceIsolation = ServiceIsolationRule()
 
     @get:Rule
     val composeRule = createComposeRule()
@@ -97,6 +101,12 @@ class MessageTimestampInstrumentedTest {
         )
         assertTrue("AssistantService did not bind within 30s", bound.await(30, TimeUnit.SECONDS))
         service = boundService!!
+        // Join the service's startup history load before this test touches _messages:
+        // onCreate -> loadSettings() -> switchPersona() publishes _messages asynchronously,
+        // and a test that assigns _messages while that is still in flight has it
+        // overwritten underneath (a replay then finds no message to index and publishes
+        // nothing). No-op when no history operation is in flight.
+        runBlocking { service.awaitPersonaHistoryIo() }
         ollamaBasesBefore = service._ollamaBaseUrls.value
         customCloudApisBefore = service._customCloudApis.value
         personasBefore = service.personas.value

@@ -29,6 +29,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Rule
@@ -47,6 +48,9 @@ import java.util.concurrent.TimeUnit
  */
 @RunWith(AndroidJUnit4::class)
 class RoomEditorUiPersistenceInstrumentedTest {
+
+    @get:Rule
+    val serviceIsolation = ServiceIsolationRule()
 
     @get:Rule
     val composeRule = createComposeRule()
@@ -117,6 +121,12 @@ class RoomEditorUiPersistenceInstrumentedTest {
         ) { "bindService() refused to connect to AssistantService" }
         check(bound.await(30, TimeUnit.SECONDS)) { "AssistantService did not bind within 30s" }
         service = boundService!!
+        // Join the service's startup history load before this test touches _messages:
+        // onCreate -> loadSettings() -> switchPersona() publishes _messages asynchronously,
+        // and a test that assigns _messages while that is still in flight has it
+        // overwritten underneath (a replay then finds no message to index and publishes
+        // nothing). No-op when no history operation is in flight.
+        runBlocking { service.awaitPersonaHistoryIo() }
         roomsBefore = service.rooms.value
     }
 

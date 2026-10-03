@@ -15,10 +15,12 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Before
+import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 
@@ -43,6 +45,9 @@ import org.junit.runner.RunWith
  */
 @RunWith(AndroidJUnit4::class)
 class SpontaneousDeepLinkActivityInstrumentedTest {
+
+    @get:Rule
+    val serviceIsolation = ServiceIsolationRule()
 
     private companion object {
         const val PROBE = "ProbeActivityRecreate"
@@ -80,6 +85,12 @@ class SpontaneousDeepLinkActivityInstrumentedTest {
         )
         assertTrue("AssistantService did not bind within 30s", bound.await(30, TimeUnit.SECONDS))
         service = boundService!!
+        // Join the service's startup history load before this test touches _messages:
+        // onCreate -> loadSettings() -> switchPersona() publishes _messages asynchronously,
+        // and a test that assigns _messages while that is still in flight has it
+        // overwritten underneath (a replay then finds no message to index and publishes
+        // nothing). No-op when no history operation is in flight.
+        runBlocking { service.awaitPersonaHistoryIo() }
 
         personasBefore = service.personas.value
         currentPersonaBefore = service.currentPersonaName
@@ -113,6 +124,13 @@ class SpontaneousDeepLinkActivityInstrumentedTest {
         }
         connection?.let { runCatching { context.unbindService(it) } }
         connection = null
+        // This class is the one place in the suite that drives the real MainActivity, and
+        // MainActivity.onCreate calls startService(): that promotes AssistantService to a
+        // STARTED service, which outlives the ActivityScenario closing and outlives the
+        // unbind above — so it would survive into every later class in this process with an
+        // in-memory view loaded at an arbitrary moment, and the next class to bind would
+        // inherit it. Unbinding is not enough; the started service has to be stopped.
+        runCatching { context.stopService(Intent(context, AssistantService::class.java)) }
     }
 
     /**

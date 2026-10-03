@@ -9,12 +9,14 @@ import android.os.SystemClock
 import androidx.compose.ui.graphics.Color
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
+import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.IOException
@@ -52,6 +54,9 @@ import java.util.concurrent.TimeUnit
 @RunWith(AndroidJUnit4::class)
 class AssistantServiceConcurrencyInstrumentedTest {
 
+    @get:Rule
+    val serviceIsolation = ServiceIsolationRule()
+
     private val context: Context
         get() = InstrumentationRegistry.getInstrumentation().targetContext
 
@@ -82,6 +87,12 @@ class AssistantServiceConcurrencyInstrumentedTest {
         )
         assertTrue("AssistantService did not bind within 30s", bound.await(30, TimeUnit.SECONDS))
         service = boundService!!
+        // Join the service's startup history load before this test touches _messages:
+        // onCreate -> loadSettings() -> switchPersona() publishes _messages asynchronously,
+        // and a test that assigns _messages while that is still in flight has it
+        // overwritten underneath (a replay then finds no message to index and publishes
+        // nothing). No-op when no history operation is in flight.
+        runBlocking { service.awaitPersonaHistoryIo() }
         // onCreate() (loadSettings / pricing sync) fires the service's own fetches. Let them
         // drain so that a failure below is this test's doing and not theirs; if they are
         // still running when the probes start, every assertion here stays valid (a
