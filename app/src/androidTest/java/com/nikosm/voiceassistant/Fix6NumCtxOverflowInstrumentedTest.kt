@@ -275,14 +275,28 @@ class Fix6NumCtxOverflowInstrumentedTest {
      * Rebuilt here from the same pattern, so the only possible drift is a date-string length
      * change between the turn and this assertion — hence [DATE_PREFIX_SLACK_TOKENS].
      */
-    private fun expectedSystemPrompt(persona: Persona): String =
+    /**
+     * The system prompt the Direct-Ollama path really sends, including the stamp
+     * instruction: this probe persona is a stamped direct-Ollama one, so that suffix IS part
+     * of the fixed prompt the pre-flight check measures — which is exactly why it is added
+     * here from the production constant rather than pasted as a literal that could drift.
+     */
+    private fun expectedSystemPrompt(persona: Persona, stampedDirectOllama: Boolean = false): String =
         "Current date and time: " +
             SimpleDateFormat("EEEE, MMMM d, yyyy, HH:mm", Locale.getDefault()).format(Date()) +
-            "\n\n${persona.systemPrompt}"
+            "\n\n${persona.systemPrompt}" +
+            // Only the stamped Direct-Ollama builder appends it; the cloud builder composes no
+            // such suffix, so a cloud request must keep measuring exactly what it did before.
+            if (stampedDirectOllama) "\n\n$MODEL_STAMP_INSTRUCTION" else ""
 
     /** The whole fixed (never-trimmed) prompt the pre-flight check measures against the window. */
-    private fun expectedFixedTokens(persona: Persona, modelText: String): Int =
-        RESERVED_OUTPUT_TOKENS + estimateTokens(expectedSystemPrompt(persona)) + estimateTokens(modelText)
+    private fun expectedFixedTokens(
+        persona: Persona,
+        modelText: String,
+        stampedDirectOllama: Boolean = false
+    ): Int =
+        RESERVED_OUTPUT_TOKENS + estimateTokens(expectedSystemPrompt(persona, stampedDirectOllama)) +
+            estimateTokens(modelText)
 
     /**
      * `buildModelPrompt` with one attachment: the question, then the "--- Attached file: X ---"
@@ -438,7 +452,7 @@ class Fix6NumCtxOverflowInstrumentedTest {
     @Test
     fun longSystemPromptIsRefusedBeforeSending() {
         val persona = directPersona(LONG_PROMPT_PERSONA_NAME, LONG_SYSTEM_PROMPT)
-        val fixed = expectedFixedTokens(persona, PROBE_SHORT_MESSAGE)
+        val fixed = expectedFixedTokens(persona, PROBE_SHORT_MESSAGE, stampedDirectOllama = true)
         assertTrue(
             "precondition: the long system prompt alone must exceed the $SMALL_NUM_CTX-token " +
                 "window (measured ~$fixed tokens including $RESERVED_OUTPUT_TOKENS reserved)",
@@ -477,7 +491,7 @@ class Fix6NumCtxOverflowInstrumentedTest {
     @Test
     fun largeTextAttachmentIsRefusedBeforeSending() {
         val persona = directPersona(SHORT_PROMPT_PERSONA_NAME, SHORT_SYSTEM_PROMPT)
-        val withoutAttachment = expectedFixedTokens(persona, PROBE_SHORT_MESSAGE)
+        val withoutAttachment = expectedFixedTokens(persona, PROBE_SHORT_MESSAGE, stampedDirectOllama = true)
         assertTrue(
             "precondition: this persona must be UNDER budget without the attachment " +
                 "(measured ~$withoutAttachment tokens against a $SMALL_NUM_CTX-token window)",
@@ -488,7 +502,7 @@ class Fix6NumCtxOverflowInstrumentedTest {
             ATTACHMENT_FILE_NAME,
             LARGE_ATTACHMENT_FILLER
         )
-        val withAttachment = expectedFixedTokens(persona, modelText)
+        val withAttachment = expectedFixedTokens(persona, modelText, stampedDirectOllama = true)
         assertTrue(
             "precondition: the ${LARGE_ATTACHMENT_FILLER.length}-char attachment must push the " +
                 "request over the $SMALL_NUM_CTX-token window (measured ~$withAttachment tokens)",
@@ -560,7 +574,7 @@ class Fix6NumCtxOverflowInstrumentedTest {
     @Test
     fun requestThatFitsIsStillSentNormally() {
         val persona = directPersona(CONTROL_PERSONA_NAME, SHORT_SYSTEM_PROMPT)
-        val fixed = expectedFixedTokens(persona, PROBE_CONTROL_MESSAGE)
+        val fixed = expectedFixedTokens(persona, PROBE_CONTROL_MESSAGE, stampedDirectOllama = true)
         assertTrue(
             "precondition: the control request must FIT the $SMALL_NUM_CTX-token window " +
                 "(measured ~$fixed tokens including $RESERVED_OUTPUT_TOKENS reserved)",

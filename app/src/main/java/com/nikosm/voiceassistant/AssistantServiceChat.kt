@@ -1413,7 +1413,14 @@ internal suspend fun AssistantService.performDirectOllamaChat(baseUrl: String, m
             // Phase 0: room preamble (if any) rides at the END of the persona's own
             // system prompt — the persona's prompt keeps governing its response — and
             // is appended BEFORE the budget math so resolveHistoryBudget accounts for it.
-            suffix = turnContext.systemPromptSuffix
+            suffix = buildList {
+                add(turnContext.systemPromptSuffix)
+                // Only on the stamped Direct-Ollama path, and only there: buildCloudRequest
+                // composes no such suffix, so a cloud or gateway request stays byte-identical.
+                if (persona.stampsHistoryWithTimestamps(ollamaServerNames(), cloudProviderNames())) {
+                    add(MODEL_STAMP_INSTRUCTION)
+                }
+            }.filter { it.isNotBlank() }.joinToString("\n\n")
         )
 
         // Add system prompt first
@@ -1559,7 +1566,12 @@ internal suspend fun AssistantService.performDirectOllamaChat(baseUrl: String, m
                 if (!ownsStreamedPlaceholderSvc(generation)) return
                 val idx = streamedPlaceholderIndex ?: return
                 sink.updateAt(idx) { it.copy(
-                    text = content.toString(),
+                    // displaySafeStreamedReply, not the raw buffer: this is the ONLY path
+                    // that could ever put a model-written stamp on screen mid-stream, and
+                    // it holds the text while a stamp is still forming so "[Oct 3, 20"
+                    // never blinks in and out. Complete stamps are stripped here, so the
+                    // bubble never shows the doubled stamp the reporter saw either.
+                    text = displaySafeStreamedReply(content.toString()),
                     reasoning = thinkingBuf.toString().ifBlank { null }
                 ) }
             }
@@ -1602,7 +1614,7 @@ internal suspend fun AssistantService.performDirectOllamaChat(baseUrl: String, m
                     // caller (D2: the partial is kept as real history).
                     if (!isChatRequestCurrent(generation)) {
                         call.cancel()
-                        throw StreamCancelledByUserException(content.toString(), thinkingBuf.toString())
+                        throw StreamCancelledByUserException(stripLeadingModelStamps(content.toString()), thinkingBuf.toString())
                     }
                     // Per-chunk persona guard: persona switched mid-stream —
                     // cancel; the partial is written back into the OLD persona's
@@ -1620,7 +1632,7 @@ internal suspend fun AssistantService.performDirectOllamaChat(baseUrl: String, m
                                     settingsManager.savePersonaMessages(persona.name, saved.filterIndexed { i, _ -> i != idx })
                                 } else {
                                     settingsManager.savePersonaMessages(persona.name, saved.mapIndexed { i, m ->
-                                        if (i == idx) m.copy(text = content.toString(), reasoning = thinkingBuf.toString().ifBlank { null }) else m
+                                        if (i == idx) m.copy(text = stripLeadingModelStamps(content.toString()), reasoning = thinkingBuf.toString().ifBlank { null }) else m
                                     })
                                 }
                             }
@@ -1630,7 +1642,7 @@ internal suspend fun AssistantService.performDirectOllamaChat(baseUrl: String, m
                         // funnels through the owned helpers).
                         releaseStreamedPlaceholderIfOwned(generation)
                         clearStreamingTextIfOwned(generation)
-                        throw StreamPersonaChangedException(content.toString(), thinkingBuf.toString())
+                        throw StreamPersonaChangedException(stripLeadingModelStamps(content.toString()), thinkingBuf.toString())
                     }
 
                     content.append(chunk)
@@ -1654,7 +1666,7 @@ internal suspend fun AssistantService.performDirectOllamaChat(baseUrl: String, m
                     // Stop pressed mid-read: hand the partial back so the
                     // caller's cancellation branch can persist it (D2).
                     clearStreamingTextIfOwned(generation)
-                    throw StreamCancelledByUserException(content.toString(), thinkingBuf.toString())
+                    throw StreamCancelledByUserException(stripLeadingModelStamps(content.toString()), thinkingBuf.toString())
                 }
                 // Generic stream failure (network drop mid-generation): drop a
                 // blank placeholder, keep any partial text in place, and let
@@ -1664,7 +1676,11 @@ internal suspend fun AssistantService.performDirectOllamaChat(baseUrl: String, m
                 throw e
             }
 
-            return Triple(content.toString(), thinkingBuf.toString().ifBlank { null }, null)
+            // Stripped once, here, so what is STORED is the clean reply: the placeholder
+            // was only ever showing displaySafeStreamedReply, and this returned string is
+            // what the caller writes to the transcript (and what a cancelled stream keeps
+            // as its partial). Old messages are left alone — no silent rewrite.
+            return Triple(stripLeadingModelStamps(content.toString()), thinkingBuf.toString().ifBlank { null }, null)
         }
     } finally {
         // A6: clear the in-flight reference on success AND failure — but only if it's
