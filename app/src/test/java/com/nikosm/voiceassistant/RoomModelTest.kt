@@ -1,7 +1,6 @@
 package com.nikosm.voiceassistant
 
 import androidx.compose.ui.graphics.Color
-import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
@@ -41,8 +40,17 @@ class RoomModelTest {
         isTranslator = translator
     )
 
+    // Pinned so a round trip cannot depend on the clock: Room/RoomMessage default
+    // createdAt/timestamp to System.currentTimeMillis() at CONSTRUCTION, so an
+    // unpinned value is "whatever now was" and any comparison of it is a race.
     private fun room(vararg members: String, cap: Int? = null) =
-        Room(id = "room-1", name = "War Room", memberNames = members.toList(), autoReplyCap = cap)
+        Room(
+            id = "room-1",
+            name = "War Room",
+            memberNames = members.toList(),
+            autoReplyCap = cap,
+            createdAt = 1_700_000_000_000L
+        )
 
     // ------------------------------------------------------------- Identity
 
@@ -57,17 +65,33 @@ class RoomModelTest {
 
     @Test fun `room survives a round trip through kotlinx serialization`() {
         val original = room("A", "B", cap = 7)
-        val encoded = Json.encodeToString(Room.serializer(), original)
-        assertEquals(original, Json.decodeFromString(Room.serializer(), encoded))
+        // Production's Json, not the default one. With encodeDefaults = false the clock
+        // default is dropped on encode and re-derived as "now" on decode, so this
+        // assertion fails whenever the millisecond ticks mid-test.
+        val encoded = SettingsJson.encodeToString(Room.serializer(), original)
+        assertEquals(original, SettingsJson.decodeFromString(Room.serializer(), encoded))
     }
 
     @Test fun `room message round-trips and identifies the human by a reserved name`() {
-        val user = RoomMessage(speakerName = RoomMessage.USER_SPEAKER, text = "hi")
-        val agent = RoomMessage(speakerName = "A", text = "hello", responseTimeMs = 12L)
+        // id and timestamp pinned for the same reason as Room's createdAt above.
+        val user = RoomMessage(
+            id = "msg-1",
+            speakerName = RoomMessage.USER_SPEAKER,
+            text = "hi",
+            timestamp = 1_700_000_000_000L
+        )
+        val agent = RoomMessage(
+            id = "msg-2",
+            speakerName = "A",
+            text = "hello",
+            responseTimeMs = 12L,
+            timestamp = 1_700_000_000_001L
+        )
         assertTrue("the reserved speaker name must map to isUser", user.isUser)
         assertFalse(agent.isUser)
-        assertEquals(user, RoomMessage.serializer().let { Json.decodeFromString(it, Json.encodeToString(it, user)) })
-        assertEquals(agent, RoomMessage.serializer().let { Json.decodeFromString(it, Json.encodeToString(it, agent)) })
+        val ser = RoomMessage.serializer()
+        assertEquals(user, SettingsJson.decodeFromString(ser, SettingsJson.encodeToString(ser, user)))
+        assertEquals(agent, SettingsJson.decodeFromString(ser, SettingsJson.encodeToString(ser, agent)))
     }
 
     // ------------------------------------------------------------- Eligibility

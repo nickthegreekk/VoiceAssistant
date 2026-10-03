@@ -18,6 +18,30 @@ import java.io.File
 import java.io.FileOutputStream
 import java.security.KeyStore
 
+/**
+ * THE Json every persisted type goes through: [Persona], [Room], [RoomMessage],
+ * [ChatMessage], [Skill], the server/cloud lists, backups and history files.
+ *
+ * `encodeDefaults = true` is load-bearing, not decoration. Several models default a
+ * field to something derived at CONSTRUCTION time — `Room.createdAt` and
+ * `RoomMessage.timestamp` to `System.currentTimeMillis()`, `Room.id`/`RoomMessage.id`/
+ * `Skill.id` to a random UUID — and kotlinx.serialization drops any field whose value
+ * equals its default when `encodeDefaults` is false. A clock default is re-derived as
+ * "now" on decode, so the round trip returns a different millisecond whenever the clock
+ * ticks between encoding and decoding; the app would silently rewrite the timestamp of
+ * anything it loaded. Emitting the key always means what is stored is exactly what was
+ * saved.
+ *
+ * Declared here, at file scope, rather than privately on [SettingsManager], so the tests
+ * that round-trip persisted models can use the production configuration itself instead
+ * of a copy that can drift away from it.
+ */
+internal val SettingsJson = Json {
+    ignoreUnknownKeys = true
+    coerceInputValues = true
+    encodeDefaults = true
+}
+
 class SettingsManager(context: Context) {
 
     // Retained so artwork import/restore can resolve filesDir without going through
@@ -114,11 +138,8 @@ class SettingsManager(context: Context) {
         )
     }
 
-    private val json = Json {
-        ignoreUnknownKeys = true
-        coerceInputValues = true
-        encodeDefaults = true
-    }
+    // The shared production Json, not a second copy of it — see [SettingsJson].
+    private val json = SettingsJson
 
     fun saveServerBases(bases: List<ServerConfig>) {
         prefs.edit().putString("server_bases_v2", json.encodeToString(bases)).apply()

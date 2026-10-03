@@ -5,7 +5,6 @@ import android.content.ContextWrapper
 import android.content.SharedPreferences
 import androidx.compose.ui.graphics.Color
 import java.security.GeneralSecurityException
-import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -27,13 +26,10 @@ import org.junit.Test
 class SpontaneousGuardTest {
 
     private companion object {
-        // Mirrors SettingsManager's Json exactly, so the compat test decodes the way
-        // production does rather than against a more forgiving configuration.
-        val PRODUCTION_JSON = Json {
-            ignoreUnknownKeys = true
-            coerceInputValues = true
-            encodeDefaults = true
-        }
+        // Production's own Json instance (SettingsJson), not a copy of it: the compat
+        // test then decodes exactly the way production does, and cannot drift away from
+        // it if the configuration ever changes.
+        val PRODUCTION_JSON = SettingsJson
 
         // The configured server/provider names, as the real router would resolve them.
         val OLLAMA = setOf("HomeBox")
@@ -355,7 +351,7 @@ class SpontaneousGuardTest {
             trustedCerts = emptyMap()
         )
 
-        assertTrue("import should succeed", manager.importBackup(Json.encodeToString(BackupData.serializer(), backup)))
+        assertTrue("import should succeed", manager.importBackup(SettingsJson.encodeToString(BackupData.serializer(), backup)))
 
         val stored = manager.getPersonas()!!.associateBy { it.name }
         assertFalse("imported cloud persona must be stripped", stored["C"]!!.spontaneousEnabled)
@@ -377,7 +373,7 @@ class SpontaneousGuardTest {
             spontaneousWindowEndMin = 22 * 60,
             spontaneousMaxPerDay = 5
         )
-        val json = Json.encodeToString(
+        val json = SettingsJson.encodeToString(
             BackupData.serializer(),
             BackupData(
                 serverBases = emptyList(),
