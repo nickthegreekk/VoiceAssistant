@@ -2622,23 +2622,44 @@ internal fun AssistantService.modelCatalogFor(serverUrl: String): ModelCatalogSt
     _modelCatalog.value[serverUrl] ?: ModelCatalogState.NotLoaded
 
 /**
- * One short-timeout client for the whole process (OkHttp pools connections per client).
+ * One short-timeout client for the whole process.
+ *
  * 3s/5s on purpose: this enrichment runs in the background of a list the user is already
  * reading, so a slow server must never make the screen feel stuck. The 15s/120s
  * `fastClient` defaults are tuned for chat and are the wrong shape here.
+ *
+ * Deliberately a single process-wide client and NOT a map keyed by the service. The suite
+ * destroys and recreates `AssistantService` constantly (ServiceIsolationRule quiesces it
+ * around every test), and keying a cache by the service retains each dead instance along
+ * with its own connection pool and dispatcher threads for the life of the process - which
+ * shows up much later as resource exhaustion and an instrumentation run that aborts
+ * part-way through, far from the cause.
+ *
+ * OkHttpClient is thread-safe and is designed to be shared, so one instance is correct.
  */
-private val modelShowClientHolder = ConcurrentHashMap<AssistantService, OkHttpClient>()
-
-private fun AssistantService.modelShowClient(): OkHttpClient =
-    modelShowClientHolder.getOrPut(this) {
-        client.newBuilder()
-            .connectTimeout(3, TimeUnit.SECONDS)
-            .readTimeout(5, TimeUnit.SECONDS)
-            .build()
-    }
+private val modelShowClient: OkHttpClient by lazy {
+    OkHttpClient.Builder()
+        .connectTimeout(3, TimeUnit.SECONDS)
+        .readTimeout(5, TimeUnit.SECONDS)
+        .retryOnConnectionFailure(false)
+        .build()
+}
 
 /** Guards the per-server fetch so a double-open cannot launch two. */
 private val modelCatalogInFlight = ConcurrentHashMap.newKeySet<String>()
+
+/**
+ * Per-URL generation, bumped by [dropModelCatalog].
+ *
+ * Deleting or re-pointing a server cannot cancel a fetch that is already on the wire: its
+ * coroutine will finish and write its result back, resurrecting a cache entry for a server
+ * the user just removed. Each fetch captures the generation it started under and only
+ * applies its result if that generation is still current, so a late write is dropped rather
+ * than undoing the delete.
+ */
+private val modelCatalogGeneration = ConcurrentHashMap<String, Long>()
+
+private fun generationFor(url: String): Long = modelCatalogGeneration[url] ?: 0L
 
 /** Read-modify-write one server's entry in the live map (never a stale snapshot). */
 private fun AssistantService.updateCatalog(
@@ -2655,6 +2676,9 @@ private fun AssistantService.updateCatalog(
  * the key IS the URL: keeping the entry would show another server's models.
  */
 internal fun AssistantService.dropModelCatalog(serverUrl: String) {
+    // Bump FIRST: any fetch already in flight for this URL is now stale, and must not be
+    // able to write its result back over the deletion.
+    modelCatalogGeneration.merge(serverUrl, 1L, Long::plus)
     modelCatalogInFlight.remove(serverUrl)
     val next = _modelCatalog.value.toMutableMap()
     if (next.remove(serverUrl) != null) {
@@ -2673,7 +2697,7 @@ private fun authorized(builder: Request.Builder, target: ServerConfig): Request.
 /** `GET {base}/api/tags`, then `GET {base}/v1/models` - same endpoint order as fetchModels. */
 private fun AssistantService.requestModels(base: String, target: ServerConfig): List<ModelEntry> {
     val tags = runCatching {
-        modelShowClient().newCall(
+        modelShowClient.newCall(
             authorized(Request.Builder().url("$base/api/tags").get(), target).build()
         ).execute().use { response ->
             if (response.isSuccessful) parseTagsModels(response.body.string()) else emptyList()
@@ -2684,7 +2708,7 @@ private fun AssistantService.requestModels(base: String, target: ServerConfig): 
     // The /v1/models shape carries ids only, so those come back with capabilities NULL
     // (not reported) rather than empty, and /api/show then fills them in.
     return runCatching {
-        modelShowClient().newCall(
+        modelShowClient.newCall(
             authorized(Request.Builder().url("$base/v1/models").get(), target).build()
         ).execute().use { response ->
             if (response.isSuccessful) parseOpenAiModels(response.body.string()) else emptyList()
@@ -2701,7 +2725,7 @@ private fun AssistantService.requestShow(
     val body = JSONObject().apply { put("model", name) }.toString()
         .toRequestBody("application/json".toMediaType())
     return runCatching {
-        modelShowClient().newCall(
+        modelShowClient.newCall(
             authorized(Request.Builder().url("$base/api/show").post(body), target).build()
         ).execute().use { response ->
             if (!response.isSuccessful) null else parseShowModel(response.body.string(), name)
@@ -2727,6 +2751,7 @@ internal fun AssistantService.fetchModelCatalog(target: ServerConfig, force: Boo
     if (!modelCatalogInFlight.add(url)) return
 
     updateCatalog(url) { if (it !is ModelCatalogState.Loaded) ModelCatalogState.Loading else it }
+    val generation = generationFor(url)
 
     serviceScope.launch(Dispatchers.IO) {
         try {
@@ -2735,6 +2760,7 @@ internal fun AssistantService.fetchModelCatalog(target: ServerConfig, force: Boo
                 // Keep the last good list if there is one; report Failed only cold.
                 val reason = error.message ?: "Could not connect to server"
                 val previous = modelCatalogFor(url)
+                if (generation != generationFor(url)) return@launch
                 updateCatalog(url) {
                     if (previous is ModelCatalogState.Loaded) {
                         previous.copy(stale = true, degradedReason = reason)
@@ -2746,6 +2772,9 @@ internal fun AssistantService.fetchModelCatalog(target: ServerConfig, force: Boo
             }
 
             if (listed.isEmpty()) {
+                // Same guard as the failure branch above: a server deleted or re-pointed
+                // while this fetch was on the wire must not be resurrected here.
+                if (generation != generationFor(url)) return@launch
                 val previous = modelCatalogFor(url)
                 updateCatalog(url) {
                     if (previous is ModelCatalogState.Loaded) {
@@ -2760,6 +2789,7 @@ internal fun AssistantService.fetchModelCatalog(target: ServerConfig, force: Boo
             // Publish the tags-level list IMMEDIATELY with every model PENDING, so the list
             // is scrollable at once and badges do not flip under the user as each
             // /api/show lands.
+            if (generation != generationFor(url)) return@launch
             updateCatalog(url) {
                 ModelCatalogState.Loaded(
                     listed,
@@ -2782,6 +2812,7 @@ internal fun AssistantService.fetchModelCatalog(target: ServerConfig, force: Boo
                 }
             }.awaitAll()
 
+            if (generation != generationFor(url)) return@launch
             updateCatalog(url) {
                 ModelCatalogState.Loaded(
                     results.map { it.second },

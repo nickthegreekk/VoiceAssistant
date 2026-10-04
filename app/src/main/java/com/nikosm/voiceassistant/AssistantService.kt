@@ -1542,7 +1542,38 @@ class AssistantService : Service() {
         saveSettings()
     }
 
+    /**
+     * Every name a `"[Name] model"` string could currently mean: Ollama servers plus BOTH
+     * cloud lists.
+     *
+     * Cloud providers are included deliberately. `PersonaRouting` decides cloud-vs-Ollama
+     * by looking the same prefix string up in two different name sets, so a local server
+     * named "OpenAI" would be indistinguishable from the OpenAI provider and would
+     * silently take its personas. See ServerIdentity.kt.
+     */
+    private fun allServerAndProviderNames(): List<String> =
+        _ollamaBaseUrls.value.map { it.name } +
+            _cloudApis.value.map { it.name } +
+            _customCloudApis.value.map { it.name }
+
+    /** The toast text for a name collision, or null when the name is free. */
+    private fun nameConflictMessage(
+        candidate: String,
+        exclude: Collection<String> = emptyList()
+    ): String? {
+        if (!isServerNameTaken(candidate, allServerAndProviderNames(), exclude)) return null
+        return "'${candidate.trim()}' already used by another server or provider — not saved"
+    }
+
     fun addOllamaBase(name: String, url: String, username: String? = null, password: String? = null, authType: AuthType = AuthType.NONE, apiKey: String? = null) {
+        // Name first: a duplicate name makes every "[Name] model" string ambiguous, which is
+        // strictly worse than a duplicate URL, and a URL clash is rejected below anyway.
+        val conflict = nameConflictMessage(name)
+        if (conflict != null) {
+            Log.w("AssistantService", "addOllamaBase refused: $conflict")
+            Toast.makeText(applicationContext, conflict, Toast.LENGTH_LONG).show()
+            return
+        }
         if (_ollamaBaseUrls.value.none { it.url == url }) {
             _ollamaBaseUrls.value = _ollamaBaseUrls.value + ServerConfig(name, url, username, password, authType, apiKey)
             saveSettings()
@@ -1561,6 +1592,16 @@ class AssistantService : Service() {
 
     fun removeOllamaBase(config: ServerConfig) {
         _ollamaBaseUrls.value = _ollamaBaseUrls.value - config
+        // Drop this server's favorites: a "[Name] model" favorite for a server that no
+        // longer exists can never be shown or toggled again, and would sit in storage
+        // forever. Personas are deliberately NOT touched — see the note in the plan: a
+        // persona pointing at a deleted server keeps its string and shows the existing
+        // error, which is this step's "leave that behaviour alone".
+        val kept = _favoriteModels.value.filterNot { serverPrefixOf(it) == config.name }
+        if (kept.size != _favoriteModels.value.size) {
+            _favoriteModels.value = kept
+        }
+        dropModelCatalog(config.url)
         saveSettings()
     }
 
@@ -1592,6 +1633,7 @@ class AssistantService : Service() {
         val current = _ollamaBaseUrls.value.toMutableList()
         val idx = current.indexOf(oldConfig)
         if (idx != -1) {
+            val oldUrl = current[idx].url
             // Fix #6: same dedup the add path enforces (none { it.url == url }) — see
             // updateServerBase for the full rationale. The edited entry is excluded,
             // so saving with an unchanged URL still works; a URL another entry owns
@@ -1605,11 +1647,63 @@ class AssistantService : Service() {
                 ).show()
                 return
             }
+            // Name uniqueness, checked against every name a "[Name] model" string could
+            // mean (Ollama servers plus both cloud lists). The entry being edited is
+            // excluded, so saving without changing the name is not a self-collision, and
+            // renaming one member of a pre-existing duplicate pair out is allowed.
+            val oldName = current[idx].name
+            val conflict = nameConflictMessage(newName, exclude = listOf(oldName))
+            if (conflict != null) {
+                Log.w("AssistantService", "updateOllamaBase refused: $conflict")
+                Toast.makeText(applicationContext, conflict, Toast.LENGTH_LONG).show()
+                return
+            }
+
             current[idx] = ServerConfig(newName, newUrl, newUsername, newPassword, newAuthType, newApiKey)
             _ollamaBaseUrls.value = current
+
+            // Rename migration, BEFORE the save below. A persona left pointing at the old
+            // name reads as an UNCONFIGURED server, and SpontaneousPolicy.sanitize then
+            // strips its spontaneousEnabled on the very next persist — a rename that
+            // silently turns off a feature the user never touched.
+            if (newName != oldName) {
+                migrateServerNameReferences(oldName, newName)
+            }
+
+            // The catalog cache is keyed by URL, so only a URL change invalidates it; a
+            // name-only edit keeps the models already fetched.
+            if (newUrl != oldUrl) {
+                dropModelCatalog(oldUrl)
+            }
+
             saveSettings()
             fetchModels(current[idx])
         }
+    }
+
+    /**
+     * Repoint everything that stores an Ollama server by NAME at its new name.
+     *
+     * Audited for other holders of a server name or a "[server] model" string:
+     *  - [Persona.model] — rewritten here.
+     *  - `favorite_models_v2` — rewritten here.
+     *  - [Persona.backendUrl] — a URL, not a name, and untouched by a rename; an explicit
+     *    backendUrl is the user's own override, not the resolved server.
+     *  - [Room.memberNames] — PERSONA names, not server names. Nothing to do.
+     *  - [Skill] — has no server or model field at all. Nothing to do.
+     *  - `persona_messages_<name>` and SpontaneousState — keyed by PERSONA name, which is
+     *    also why the armed WorkManager chain (keyed by persona name) is unaffected by a
+     *    server rename.
+     *  - Gateway and image-gen registries — addressed through `backendUrl`, not the
+     *    "[Name] model" prefix. Out of scope here.
+     *
+     * Order matters: the persona list is rewritten in memory FIRST, so the `saveSettings()`
+     * that follows persists the new strings and no later save can put the old ones back.
+     */
+    private fun migrateServerNameReferences(oldName: String, newName: String) {
+        settingsManager.migrateFavoriteModelServerPrefix(oldName, newName)
+        _favoriteModels.value = rewriteServerPrefixes(_favoriteModels.value, oldName, newName)
+        _personas.value = rewritePersonasServerPrefix(_personas.value, oldName, newName)
     }
 
     fun addImageGenBase(name: String, url: String, username: String? = null, password: String? = null, authType: AuthType = AuthType.NONE, apiKey: String? = null) {
@@ -2199,8 +2293,42 @@ class AssistantService : Service() {
         if (success) {
             loadSettings()
             reconcileSpontaneousSchedulesAfterImport(preImportNames)
+            warnOnImportedDuplicateNames()
         }
         return success
+    }
+
+    /**
+     * Report duplicate server/provider names that arrived with a backup, WITHOUT changing
+     * them.
+     *
+     * The uniqueness guard deliberately sits on the add/edit chokepoints and not in
+     * `SettingsManager.importBackup`, because a restore is a verbatim copy of another
+     * device's state: rejecting or renaming entries there would silently edit a backup the
+     * user did not ask us to edit. So a backup written before this guard (or hand-edited)
+     * can still load a duplicate pair.
+     *
+     * What happens with one is left as-is and made SAFE rather than corrected:
+     *  - nothing throws, and no name is silently changed, so the restored state matches
+     *    the file the user holds;
+     *  - `isDirectOllama` / `routesToCloud` resolve such a name through whichever list is
+     *    consulted first, so routing is ambiguous but stable, not intermittent;
+     *  - the user is told which names collide, and can resolve it with one edit;
+     *  - **a rename of either member of the pair is allowed**: the guard excludes the entry
+     *    being edited, so it can be renamed out of the collision without touching the other.
+     */
+    private fun warnOnImportedDuplicateNames() {
+        val seen = mutableSetOf<String>()
+        val duplicates = mutableSetOf<String>()
+        allServerAndProviderNames().forEach { name ->
+            val key = name.trim().lowercase()
+            if (key.isNotEmpty() && !seen.add(key)) duplicates.add(name.trim())
+        }
+        if (duplicates.isEmpty()) return
+        val message = "Imported ${duplicates.size} duplicate server name(s): " +
+            duplicates.joinToString(", ") + " — rename one of each to tell them apart"
+        Log.w("AssistantService", message)
+        Toast.makeText(applicationContext, message, Toast.LENGTH_LONG).show()
     }
 
     // ── Backup encryption (Fix #7) ───────────────────────────────────────────────

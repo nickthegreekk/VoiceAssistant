@@ -573,6 +573,21 @@ class SettingsManager(context: Context) {
      * the same claim semantics (an existing entry under the new name is claimed by the
      * renamed persona) and the same no-ops (same name, or nothing to move).
      */
+    /**
+     * Rename a server inside every stored `"[Server] model"` favorite.
+     *
+     * Written immediately rather than through the debounced save, because the service
+     * renames the server in memory in the same call and any persist after it must already
+     * see the new prefix - the same synchronous-migration contract as
+     * [migratePersonaHistory].
+     */
+    fun migrateFavoriteModelServerPrefix(oldName: String, newName: String) {
+        if (oldName == newName) return
+        val current = getFavoriteModels() ?: return
+        val moved = rewriteServerPrefixes(current, oldName, newName)
+        if (moved != current) saveFavoriteModels(moved)
+    }
+
     fun migrateSpontaneousState(oldName: String, newName: String) {
         if (oldName == newName) return
         val all = getSpontaneousStates()

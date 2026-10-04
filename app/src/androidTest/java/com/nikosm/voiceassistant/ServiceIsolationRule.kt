@@ -281,7 +281,14 @@ private object IsolationState {
         val serverBases: Set<String>,
         val imageGenServers: Set<String>,
         val cloudApis: Set<String>,
-        val customCloudApis: Set<String>
+        val customCloudApis: Set<String>,
+        /**
+         * Step 2: `favoriteModels` is written by `persistSettings` (the same debounced save
+         * as everything else) and a step-2 test mutates it through a server rename, so it
+         * needs a baseline entry or the rule would report a leak it just caused itself —
+         * and, worse, would not clean a real one.
+         */
+        val favoriteModels: Set<String>
     )
 
     /** Stable identity for a [ServerConfig], which has no id of its own. */
@@ -318,7 +325,8 @@ private object IsolationState {
                     serverBases = serverBaseKeys(s),
                     imageGenServers = imageGenKeys(s),
                     cloudApis = cloudKeys(s),
-                    customCloudApis = customCloudKeys(s)
+                    customCloudApis = customCloudKeys(s),
+                    favoriteModels = s.getFavoriteModels().orEmpty().toSet()
                 )
                 baseline = b
                 b
@@ -380,6 +388,9 @@ private object IsolationState {
                     s.getCloudApis().orEmpty()
                         .filter { serverKey(it.name, it.baseUrl) in b.cloudApis }
                 )
+            }
+            if (s.getFavoriteModels().orEmpty().toSet() != b.favoriteModels) {
+                s.saveFavoriteModels(s.getFavoriteModels().orEmpty().filter { it in b.favoriteModels })
             }
             if (customCloudKeys(s) != b.customCloudApis) {
                 s.saveCustomCloudApis(
