@@ -362,3 +362,171 @@ private fun JsonObject.string(key: String): String? =
 
 private fun JsonObject.long(key: String): Long? =
     (this[key] as? JsonPrimitive)?.longOrNull
+
+// ---------------------------------------------------------------------------------
+// Models screen: the pure logic behind it
+// ---------------------------------------------------------------------------------
+//
+// Kept out of the composable so it can be tested without a device, and so the screen
+// itself stays a rendering of a decision rather than making the decision.
+
+/** How the list is ordered. */
+internal enum class ModelSort { NAME, SIZE }
+
+/**
+ * The full model name, which is what `/api/tags` returned and what every id is keyed by.
+ *
+ * Kept as its own function so the screen's split can never be mistaken for a new identity:
+ * the row displays `displayModelName` + `modelTag`, but the star, the favorites key and the
+ * `/api/show` lookup all use this value.
+ */
+internal fun shortModelName(fullName: String): String = fullName
+
+/**
+ * The prominent part of a name: after the last `/`, and with the trailing `:tag` split off.
+ *
+ * The tag is rendered separately and quieter (see `modelTag`), so it must not also sit in
+ * the bold text: "deepseek-coder:6.7b" would otherwise read as "deepseek-coder:6.7b :6.7b".
+ */
+internal fun displayModelName(fullName: String): String {
+    val short = fullName.substringAfterLast('/')
+    val tag = modelTag(fullName)
+    return if (tag.isEmpty()) short else short.removeSuffix(tag)
+}
+
+/** The quieter trailing tag, e.g. ":q4_k_m"; empty when the name carries no tag. */
+internal fun modelTag(fullName: String): String {
+    val short = shortModelName(fullName)
+    val colon = short.lastIndexOf(':')
+    // Only a trailing tag: a colon inside a repo path (hf.co/x/y:z) is part of the name.
+    return if (colon > 0) short.substring(colon) else ""
+}
+
+/**
+ * Does [entry] match every capability in [filters]?
+ *
+ * A model whose capabilities were NOT REPORTED (`capabilities == null`) matches NO
+ * capability filter and never claims one. That is the whole point of the nullable set:
+ * filtering on "vision" must not read as "this model has no vision", only "we were not
+ * told". The same rule covers a reported-but-empty set, which also matches nothing.
+ */
+internal fun matchesCapabilityFilters(
+    entry: ModelEntry,
+    filters: Set<ModelCapability>
+): Boolean {
+    if (filters.isEmpty()) return true
+    val reported = entry.capabilities ?: return false
+    return filters.all { it in reported }
+}
+
+/**
+ * Apply the screen's controls: capability filters (AND), the Favorites/Show all toggle,
+ * then the sort.
+ *
+ * @param favoriteNames the full `"[ServerName] model"` strings, since that is the form the
+ *   star toggles and the form stored in `favorite_models_v2`. [serverName] is the prefix
+ *   being displayed, so favorites for OTHER servers never leak into this list.
+ */
+internal fun selectModels(
+    entries: List<ModelEntry>,
+    serverName: String,
+    favoriteNames: Set<String>,
+    filters: Set<ModelCapability>,
+    favoritesOnly: Boolean,
+    sort: ModelSort
+): List<ModelEntry> {
+    val prefix = "[$serverName] "
+    val mine = favoriteNames.filter { it.startsWith(prefix) }.map { it.removePrefix(prefix) }.toSet()
+
+    return entries
+        .filter { matchesCapabilityFilters(it, filters) }
+        .filter { !favoritesOnly || it.name in mine }
+        .sortedWith(Comparator { a, b ->
+            when (sort) {
+                // Embedding-only last and favorites first are carried by the shared
+                // comparator; SIZE then orders the chat models by their own key, so the
+                // "embedding last, favorites first" rule survives either sort.
+                ModelSort.NAME -> compareForChatPicker(a, b, mine)
+                ModelSort.SIZE -> {
+                    val byCategory = compareForChatPicker(a, b, mine)
+                    if (byCategory != 0) byCategory
+                    else (b.sizeBytes ?: 0L).compareTo(a.sizeBytes ?: 0L)
+                }
+            }
+        })
+}
+
+/** Does this server have any favorites at all? Decides the toggle's default. */
+internal fun serverHasFavorites(serverName: String, favoriteNames: Set<String>): Boolean =
+    favoriteNames.any { it.startsWith("[$serverName] ") }
+
+/**
+ * The row's spoken label: name, what the server reported, and whether it is a favorite.
+ *
+ * Reads capabilities through the same "reported by this server" wording the UI uses, and
+ * says "capabilities not reported" rather than implying a model lacks them.
+ */
+internal fun modelContentDescription(
+    entry: ModelEntry,
+    serverName: String,
+    isFavorite: Boolean
+): String {
+    val caps = entry.capabilities
+    val capabilities = when {
+        caps == null -> "capabilities not reported by this server"
+        caps.isEmpty() -> "no capabilities reported by this server"
+        else -> {
+            val listed = caps.filterNot { it == ModelCapability.COMPLETION }
+                .joinToString(", ") { it.name.lowercase() }
+            if (listed.isEmpty()) "text only, as reported by this server" else "$listed, reported by this server"
+        }
+    }
+    val favorite = if (isFavorite) "favorite" else "not a favorite"
+    return "${entry.name} on $serverName, $capabilities, $favorite"
+}
+
+/** "Updated 14:32", or "Never loaded" before the first successful fetch. */
+internal fun modelFreshnessLabel(fetchedAtMillis: Long?): String {
+    if (fetchedAtMillis == null || fetchedAtMillis <= 0L) return "Never loaded"
+    val calendar = java.util.Calendar.getInstance()
+    calendar.timeInMillis = fetchedAtMillis
+    return String.format(
+        java.util.Locale.US,
+        "Updated %02d:%02d",
+        calendar.get(java.util.Calendar.HOUR_OF_DAY),
+        calendar.get(java.util.Calendar.MINUTE)
+    )
+}
+
+/**
+ * Is this server unreachable, per the existing health status?
+ *
+ * Reads `service.serverStatus[url]` and treats the vaguer "Could not connect to server"
+ * (written by `fetchModels`) as unreachable alongside the health check's own wording.
+ * Informational only: it labels the screen and never hides, blocks or disables anything.
+ */
+internal fun isServerUnreachable(status: String?): Boolean {
+    if (status == null) return false
+    if (status == "Online") return false
+    return status.startsWith("failed") || status.contains("Could not connect")
+        || status == "Unauthorized"
+}
+
+/** The badge label for a capability chip. `COMPLETION` is deliberately not offered. */
+internal fun capabilityLabel(capability: ModelCapability): String = when (capability) {
+    ModelCapability.COMPLETION -> "Text"
+    ModelCapability.VISION -> "Vision"
+    ModelCapability.TOOLS -> "Tools"
+    ModelCapability.THINKING -> "Thinking"
+    ModelCapability.EMBEDDING -> "Embedding"
+    ModelCapability.AUDIO -> "Audio"
+}
+
+/** The capability filters offered in the UI: everything except the universal COMPLETION. */
+internal val FILTERABLE_CAPABILITIES: List<ModelCapability> = listOf(
+    ModelCapability.VISION,
+    ModelCapability.TOOLS,
+    ModelCapability.THINKING,
+    ModelCapability.EMBEDDING,
+    ModelCapability.AUDIO
+)

@@ -667,7 +667,8 @@ fun SettingsDialog(service: AssistantService?, onDismiss: () -> Unit, personaCol
                                     service = svc,
                                     gateways = serverBases,
                                     ollama = ollamaBases,
-                                    imageGen = imageGenBases
+                                    imageGen = imageGenBases,
+                                    currentThemeColor = personaColor
                                 )
                                 "Cloud" -> CloudSettings(
                                     service = svc,
@@ -1119,11 +1120,23 @@ fun ServerSettings(
     service: AssistantService,
     gateways: List<ServerConfig>,
     ollama: List<ServerConfig>,
-    imageGen: List<ServerConfig>
+    imageGen: List<ServerConfig>,
+    currentThemeColor: Color
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var serverStatus by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
+
+    // List-to-detail for the models screen, keyed on server URL — the same identity the
+    // catalog cache uses, and the one field ServerConfig guarantees unique. Keyed by NAME
+    // would break on a rename, and by nothing at all would lose the selection.
+    var modelsServerUrl by rememberSaveable { mutableStateOf<String?>(null) }
+    var favoriteModels by remember { mutableStateOf<List<String>>(emptyList()) }
+    var catalog by remember { mutableStateOf<Map<String, ModelCatalogState>>(emptyMap()) }
+    LaunchedEffect(service) {
+        launch { service.favoriteModels.collect { favoriteModels = it } }
+        launch { service.modelCatalog.collect { catalog = it } }
+    }
     // Setup-context connection failures (Test Connection button, save flow, dot re-check)
     // are surfaced through this host — visible and specific, unlike the passive status dot.
     val snackbarHostState = remember { SnackbarHostState() }
@@ -1132,6 +1145,24 @@ fun ServerSettings(
     }
     Box(modifier = Modifier.fillMaxWidth()) {
 Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+    // Detail view for one server's models. Plain Column, no nested scroller: the category
+    // page's LazyColumn remains the single scroller, exactly as RoomEditor/SkillEditor do.
+    val modelsServer = modelsServerUrl?.let { url -> ollama.firstOrNull { it.url == url } }
+    if (modelsServer != null) {
+        // A server deleted elsewhere must not strand the selection.
+        LaunchedEffect(ollama) { if (modelsServerUrl != null && modelsServer == null) modelsServerUrl = null }
+        ModelsScreen(
+            server = modelsServer,
+            state = catalog[modelsServer.url] ?: ModelCatalogState.NotLoaded,
+            healthStatus = serverStatus[modelsServer.url],
+            favoriteModels = favoriteModels,
+            onRefresh = { service.fetchModelCatalog(modelsServer, force = true) },
+            onToggleFavorite = { service.toggleFavoriteModel(it) },
+            accentColor = currentThemeColor,
+            onBack = { modelsServerUrl = null }
+        )
+        return@Column
+    }
     SettingsSectionHeader(title = "Connections", icon = Icons.Default.Dns)
     ServerListSection(
         title = "Local Gateways",
@@ -1140,6 +1171,7 @@ Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
         onAdd = { name: String, url: String, user: String?, pass: String?, authType: AuthType, apiKey: String? -> service.addServerBase(name, url, user, pass, authType, apiKey) },
         onRemove = { service.removeServerBase(it) },
         onEdit = { old: ServerConfig, name: String, url: String, user: String?, pass: String?, authType: AuthType, apiKey: String? -> service.updateServerBase(old, name, url, user, pass, authType, apiKey) },
+        currentThemeColor = currentThemeColor,
         onRefreshHealth = { service.forceCheckHealth(it, true) },
         onRefreshModels = { /* Gateways don't have models */ },
         onMoveUp = { service.moveServerUp(it, false) },
@@ -1155,13 +1187,15 @@ Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
         onAdd = { name: String, url: String, user: String?, pass: String?, authType: AuthType, apiKey: String? -> service.addOllamaBase(name, url, user, pass, authType, apiKey) },
         onRemove = { service.removeOllamaBase(it) },
         onEdit = { old: ServerConfig, name: String, url: String, user: String?, pass: String?, authType: AuthType, apiKey: String? -> service.updateOllamaBase(old, name, url, user, pass, authType, apiKey) },
+        currentThemeColor = currentThemeColor,
         onRefreshHealth = { service.forceCheckHealth(it, false) },
         onRefreshModels = { service.fetchModels(it) },
         onMoveUp = { service.moveServerUp(it, true) },
         onMoveDown = { service.moveServerDown(it, true) },
         isGateway = false,
         service = service,
-        snackbarHostState = snackbarHostState
+        snackbarHostState = snackbarHostState,
+        onOpenModels = { modelsServerUrl = it.url }
     )
     ServerListSection(
         title = "Image Gen Servers",
@@ -1170,6 +1204,7 @@ Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
         onAdd = { name: String, url: String, user: String?, pass: String?, authType: AuthType, apiKey: String? -> service.addImageGenBase(name, url, user, pass, authType, apiKey) },
         onRemove = { service.removeImageGenBase(it) },
         onEdit = { old: ServerConfig, name: String, url: String, user: String?, pass: String?, authType: AuthType, apiKey: String? -> service.updateImageGenBase(old, name, url, user, pass, authType, apiKey) },
+        currentThemeColor = currentThemeColor,
         onRefreshHealth = { service.forceCheckHealth(it, false, true) },
         onRefreshModels = { },
         onMoveUp = { service.moveImageGenUp(it) },
@@ -1341,7 +1376,14 @@ fun ServerListSection(
     isGateway: Boolean,
     isImageGen: Boolean = false,
     service: AssistantService,
-    snackbarHostState: SnackbarHostState
+    snackbarHostState: SnackbarHostState,
+    /** The persona's accent colour, so the Models entry matches every other row here. */
+    currentThemeColor: Color,
+    /**
+     * Opens the models screen for this server. Null for gateway and image-gen lists, which
+     * have no Ollama catalog — those sections simply render no entry.
+     */
+    onOpenModels: ((ServerConfig) -> Unit)? = null
 ) {
     val scope = rememberCoroutineScope()
     var showAddDialog by rememberSaveable { mutableStateOf(false) }
@@ -1447,6 +1489,13 @@ fun ServerListSection(
                             Icon(Icons.Default.Delete, null, tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(18.dp))
                         }
                     }
+                }
+                // The per-server Models entry, under its own server row. Only where a
+                // callback was supplied (the Ollama list): gateways and image-gen servers
+                // have no Ollama catalog, so no entry is rendered for them at all.
+                onOpenModels?.let { open ->
+                    Spacer(Modifier.height(4.dp))
+                    ModelsEntryRow(server = server, accentColor = currentThemeColor, onClick = { open(server) })
                 }
                 if (index < servers.size - 1) {
                     HorizontalDivider(color = Color.White.copy(alpha = 0.05f))
