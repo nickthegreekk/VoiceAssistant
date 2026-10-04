@@ -10,7 +10,11 @@ import androidx.compose.ui.graphics.Color
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import okhttp3.Call
 import okhttp3.Credentials
@@ -2600,4 +2604,193 @@ internal fun AssistantService.budgetedHistory(source: List<ChatMessage>, budget:
         usedTokens += tokens
     }
     return kept
+}
+
+// ---------------------------------------------------------------------------------
+// Model catalog cache (models screen, step 1)
+// ---------------------------------------------------------------------------------
+//
+// Runs BESIDE the existing `fetchModels` above, which is untouched: it keeps its flat
+// `List<String>`, its "[Server] model" prefixing and its own status writes. Step 4 retires
+// it. Four states per server ([ModelCatalogState]), keyed by server URL, with no TTL and no
+// polling - a refresh happens only when the user asks for one.
+
+private const val MODEL_SHOW_CONCURRENCY = 4
+
+/** The cache entry for [serverUrl], or [ModelCatalogState.NotLoaded]. */
+internal fun AssistantService.modelCatalogFor(serverUrl: String): ModelCatalogState =
+    _modelCatalog.value[serverUrl] ?: ModelCatalogState.NotLoaded
+
+/**
+ * One short-timeout client for the whole process (OkHttp pools connections per client).
+ * 3s/5s on purpose: this enrichment runs in the background of a list the user is already
+ * reading, so a slow server must never make the screen feel stuck. The 15s/120s
+ * `fastClient` defaults are tuned for chat and are the wrong shape here.
+ */
+private val modelShowClientHolder = ConcurrentHashMap<AssistantService, OkHttpClient>()
+
+private fun AssistantService.modelShowClient(): OkHttpClient =
+    modelShowClientHolder.getOrPut(this) {
+        client.newBuilder()
+            .connectTimeout(3, TimeUnit.SECONDS)
+            .readTimeout(5, TimeUnit.SECONDS)
+            .build()
+    }
+
+/** Guards the per-server fetch so a double-open cannot launch two. */
+private val modelCatalogInFlight = ConcurrentHashMap.newKeySet<String>()
+
+/** Read-modify-write one server's entry in the live map (never a stale snapshot). */
+private fun AssistantService.updateCatalog(
+    url: String,
+    transform: (ModelCatalogState) -> ModelCatalogState
+) {
+    val next = _modelCatalog.value.toMutableMap()
+    next[url] = transform(next[url] ?: ModelCatalogState.NotLoaded)
+    _modelCatalog.value = next
+}
+
+/**
+ * Drop a server's cached catalog. Called on delete AND on a URL change (edit), because
+ * the key IS the URL: keeping the entry would show another server's models.
+ */
+internal fun AssistantService.dropModelCatalog(serverUrl: String) {
+    modelCatalogInFlight.remove(serverUrl)
+    val next = _modelCatalog.value.toMutableMap()
+    if (next.remove(serverUrl) != null) {
+        _modelCatalog.value = next
+    }
+}
+
+/** Same credential rule `fetchModels` uses: basic auth when a username is set. */
+private fun authorized(builder: Request.Builder, target: ServerConfig): Request.Builder {
+    if (!target.username.isNullOrBlank()) {
+        builder.header("Authorization", Credentials.basic(target.username, target.password ?: ""))
+    }
+    return builder
+}
+
+/** `GET {base}/api/tags`, then `GET {base}/v1/models` - same endpoint order as fetchModels. */
+private fun AssistantService.requestModels(base: String, target: ServerConfig): List<ModelEntry> {
+    val tags = runCatching {
+        modelShowClient().newCall(
+            authorized(Request.Builder().url("$base/api/tags").get(), target).build()
+        ).execute().use { response ->
+            if (response.isSuccessful) parseTagsModels(response.body.string()) else emptyList()
+        }
+    }.getOrDefault(emptyList())
+    if (tags.isNotEmpty()) return tags
+
+    // The /v1/models shape carries ids only, so those come back with capabilities NULL
+    // (not reported) rather than empty, and /api/show then fills them in.
+    return runCatching {
+        modelShowClient().newCall(
+            authorized(Request.Builder().url("$base/v1/models").get(), target).build()
+        ).execute().use { response ->
+            if (response.isSuccessful) parseOpenAiModels(response.body.string()) else emptyList()
+        }
+    }.getOrDefault(emptyList())
+}
+
+/** `POST {base}/api/show` for one model. Returns null on any failure. */
+private fun AssistantService.requestShow(
+    base: String,
+    target: ServerConfig,
+    name: String
+): ModelEntry? {
+    val body = JSONObject().apply { put("model", name) }.toString()
+        .toRequestBody("application/json".toMediaType())
+    return runCatching {
+        modelShowClient().newCall(
+            authorized(Request.Builder().url("$base/api/show").post(body), target).build()
+        ).execute().use { response ->
+            if (!response.isSuccessful) null else parseShowModel(response.body.string(), name)
+        }
+    }.getOrNull()
+}
+
+/**
+ * Fetch (or refresh) one server's catalog: `/api/tags` for the list, then `/api/show`
+ * for EVERY model on it.
+ *
+ * `show` is enrichment, not a fallback - see the header of ModelCatalog.kt for the
+ * measurements behind that. It runs [MODEL_SHOW_CONCURRENCY] at a time so a 15-model
+ * server does not open 15 sockets, and one model's failure leaves that model on its tags
+ * values while the rest load normally.
+ *
+ * A refresh that fails KEEPS the previous entries, marked stale. Only a first fetch that
+ * never succeeded yields [ModelCatalogState.Failed].
+ */
+internal fun AssistantService.fetchModelCatalog(target: ServerConfig, force: Boolean = false) {
+    val url = target.url
+    if (!force && modelCatalogFor(url) is ModelCatalogState.Loaded) return
+    if (!modelCatalogInFlight.add(url)) return
+
+    updateCatalog(url) { if (it !is ModelCatalogState.Loaded) ModelCatalogState.Loading else it }
+
+    serviceScope.launch(Dispatchers.IO) {
+        try {
+            val base = ollamaBaseUrl(target.url)
+            val listed = runCatching { requestModels(base, target) }.getOrElse { error ->
+                // Keep the last good list if there is one; report Failed only cold.
+                val reason = error.message ?: "Could not connect to server"
+                val previous = modelCatalogFor(url)
+                updateCatalog(url) {
+                    if (previous is ModelCatalogState.Loaded) {
+                        previous.copy(stale = true, degradedReason = reason)
+                    } else {
+                        ModelCatalogState.Failed(reason, System.currentTimeMillis())
+                    }
+                }
+                return@launch
+            }
+
+            if (listed.isEmpty()) {
+                val previous = modelCatalogFor(url)
+                updateCatalog(url) {
+                    if (previous is ModelCatalogState.Loaded) {
+                        previous.copy(stale = true, degradedReason = "server reported no models")
+                    } else {
+                        ModelCatalogState.Failed("No models reported", System.currentTimeMillis())
+                    }
+                }
+                return@launch
+            }
+
+            // Publish the tags-level list IMMEDIATELY with every model PENDING, so the list
+            // is scrollable at once and badges do not flip under the user as each
+            // /api/show lands.
+            updateCatalog(url) {
+                ModelCatalogState.Loaded(
+                    listed,
+                    listed.associate { it.name to ModelShowState.PENDING },
+                    System.currentTimeMillis()
+                )
+            }
+
+            val gate = Semaphore(MODEL_SHOW_CONCURRENCY)
+            val results = listed.map { entry ->
+                async {
+                    gate.withPermit {
+                        val shown = runCatching { requestShow(base, target, entry.name) }.getOrNull()
+                        Triple(
+                            entry,
+                            mergeModelEntry(entry, shown),
+                            if (shown == null) ModelShowState.FAILED else ModelShowState.RESOLVED
+                        )
+                    }
+                }
+            }.awaitAll()
+
+            updateCatalog(url) {
+                ModelCatalogState.Loaded(
+                    results.map { it.second },
+                    results.associate { it.second.name to it.third },
+                    System.currentTimeMillis()
+                )
+            }
+        } finally {
+            modelCatalogInFlight.remove(url)
+        }
+    }
 }

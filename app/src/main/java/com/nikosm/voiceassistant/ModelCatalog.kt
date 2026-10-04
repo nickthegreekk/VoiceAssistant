@@ -1,0 +1,364 @@
+package com.nikosm.voiceassistant
+
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.longOrNull
+
+/**
+ * Step 1 of the per-server models screen: the data shape and the pure parse/merge
+ * functions. Everything here is a pure function over a response body, so it is unit
+ * testable without a device. The cache that consumes it lives beside today's
+ * `fetchModels` (see AssistantServiceChat.kt), not in this file.
+ *
+ * ## Why `/api/show` is enrichment, not a fallback
+ *
+ * `/api/tags` gives the list, byte sizes and basic details. `/api/show` is called for
+ * EVERY model on a server and treated as the authority, field by field, wherever it
+ * actually carries a value, for three measured reasons:
+ *
+ *  - **It is the only source of context length.** `/api/tags` has no context field. In
+ *    the ziptie tags fixture four models (`translategemma:12b`, `gemma4:e4b`,
+ *    `translategemma:4b`, `fluffy/magnum-v4-9b:q4_k_m`) carry none, while the
+ *    `/api/show` fixture for `translategemma:12b` reports `gemma3.context_length =
+ *    131072`.
+ *  - **tags under-reports capabilities.** On the 5800x, `/api/tags` lists
+ *    `gemma4:latest` as `[completion, tools, thinking]` while `/api/show` for the same
+ *    model reports `[completion, vision, audio, tools, thinking]`. In the ziptie
+ *    fixture the same pattern: `translategemma:12b` is `[completion]` in tags and
+ *    `[completion, vision]` in show.
+ *  - **The capability filters need every model answered.** A filter chip that silently
+ *    excludes models whose capabilities were never fetched is worse than no filter.
+ *
+ * The disagreement runs BOTH ways and is not a superset relationship: on the same 5800x,
+ * `/api/show` reports `tools`/`thinking` for `qwythos:latest`, `glm4:9b` and
+ * `llama3.3:latest`, where `/api/tags` reports `[completion]` alone. Resolving that in
+ * show's favour is deliberate and documented here so it is not mistaken for an accident:
+ * show is the per-model endpoint, and it is the one that produced the vision/audio values
+ * an earlier load log showed.
+ *
+ * A failed `/api/show` leaves that ONE model on its tags values. It never fails the list.
+ *
+ * ## "Not reported" is not "reported as none"
+ *
+ * [ModelEntry.capabilities] is a nullable set and the distinction is load-bearing:
+ *  - `null`       -> the server said nothing; render no badges, and a capability filter
+ *                    must not match (we do not know).
+ *  - `emptySet()` -> the server answered with an empty list. That IS an answer.
+ *
+ * Collapsing the two would let a filter claim a model lacks vision when nobody said so.
+ */
+
+/** A capability Ollama can report for a model. */
+internal enum class ModelCapability {
+    COMPLETION, VISION, TOOLS, THINKING, EMBEDDING, AUDIO;
+
+    companion object {
+        /**
+         * Maps one wire token to a capability. Unknown tokens are dropped rather than
+         * throwing: a newer server may report a capability this build predates, and that
+         * must not cost the user the whole model.
+         */
+        fun fromWire(value: String): ModelCapability? = when (value.lowercase()) {
+            "completion" -> COMPLETION
+            "vision" -> VISION
+            "tools" -> TOOLS
+            "thinking" -> THINKING
+            "embedding" -> EMBEDDING
+            "audio" -> AUDIO
+            else -> null
+        }
+    }
+}
+
+/**
+ * One model as this app knows it, from whatever responses have arrived.
+ *
+ * Every field except [name] is nullable because every one can be absent from a real
+ * response: tags has no first-class context length, `/v1/models` has neither
+ * capabilities nor size, and a failed `/api/show` contributes nothing at all.
+ */
+internal data class ModelEntry(
+    val name: String,
+    /** `null` = not reported. `emptySet()` = reported, and empty. Never conflated. */
+    val capabilities: Set<ModelCapability>?,
+    /** e.g. "8.0B" / "137M" — a display string from `details.parameter_size`. */
+    val parameterSize: String?,
+    /** e.g. "Q4_K_M" — `details.quantization_level`. */
+    val quantization: String?,
+    /** `model_info["<arch>.context_length"]`; in practice only ever from `/api/show`. */
+    val contextLength: Long?,
+    /** Bytes — `size`, only present in `/api/tags`. */
+    val sizeBytes: Long?
+) {
+    /**
+     * True when the server reported this model as embedding-capable and nothing else.
+     *
+     * Such models are labelled and sorted last in chat pickers, never removed. Returns
+     * false for `capabilities == null`: "we were not told" is not "embedding only".
+     */
+    val isEmbeddingOnly: Boolean
+        get() = capabilities != null &&
+            ModelCapability.EMBEDDING in capabilities &&
+            capabilities.none { it == ModelCapability.COMPLETION }
+}
+
+/**
+ * Whether a model's `/api/show` enrichment has resolved, so a list can hold badges still
+ * pending rather than letting them flip from tags values to show values under the user.
+ */
+internal enum class ModelShowState { PENDING, RESOLVED, FAILED }
+
+/** Per-model show status, keyed by model name. */
+internal typealias ModelShowStates = Map<String, ModelShowState>
+
+/**
+ * One server's catalog state in the service-level cache, keyed by server URL.
+ *
+ * The states the models screen has to render, and nothing else:
+ *  - [NotLoaded]  never fetched.
+ *  - [Loading]    a fetch is in flight and there is nothing to show yet.
+ *  - [Loaded]     entries, when they were fetched, and whether they are [stale].
+ *  - [Failed]     the fetch failed and there is NO previous list to fall back on.
+ *
+ * ## Stale retention
+ *
+ * A REFRESH that fails keeps the previous good list, marked [Loaded.stale], rather than
+ * replacing it with [Failed]. A server that is briefly unreachable while the user
+ * refreshes should not empty the list they were reading; [Failed] is reserved for a
+ * first fetch that never succeeded, where there is genuinely nothing to show.
+ */
+internal sealed interface ModelCatalogState {
+
+    data object NotLoaded : ModelCatalogState
+
+    data object Loading : ModelCatalogState
+
+    /**
+     * @param stale true when a later refresh failed and these entries are the last good
+     *   ones rather than a fresh result.
+     * @param degradedReason set alongside [stale] to say what went wrong, for display.
+     */
+    data class Loaded(
+        val entries: List<ModelEntry>,
+        val showStates: ModelShowStates,
+        val fetchedAtMillis: Long,
+        val stale: Boolean = false,
+        val degradedReason: String? = null
+    ) : ModelCatalogState {
+        /** Entries whose `/api/show` has not answered yet. */
+        val pending: List<ModelEntry>
+            get() = entries.filter { showStates[it.name] == ModelShowState.PENDING }
+    }
+
+    data class Failed(val reason: String, val failedAtMillis: Long) : ModelCatalogState
+}
+
+private val lenientJson = Json { ignoreUnknownKeys = true; isLenient = true }
+
+/** Normalised Ollama base: trailing slash and `/v1`, `/api` suffixes removed. */
+internal fun ollamaBaseUrl(raw: String): String {
+    var b = raw.trim().removeSuffix("/")
+    if (b.endsWith("/v1")) b = b.removeSuffix("/v1")
+    if (b.endsWith("/api")) b = b.removeSuffix("/api")
+    return b
+}
+
+/**
+ * Parses `GET /api/tags`.
+ *
+ * A model with no `capabilities` key yields `capabilities = null`; a model whose key is
+ * an empty array yields `emptySet()`. Malformed input yields an empty list rather than
+ * throwing — a broken server must not take the screen down.
+ */
+internal fun parseTagsModels(body: String): List<ModelEntry> {
+    val root = runCatching { lenientJson.parseToJsonElement(body).jsonObject }.getOrNull()
+        ?: return emptyList()
+    val models = root["models"] as? JsonArray ?: return emptyList()
+    return models.mapNotNull { element ->
+        val obj = element as? JsonObject ?: return@mapNotNull null
+        val name = (obj["name"] ?: obj["model"])?.jsonPrimitive?.contentOrNull
+            ?: return@mapNotNull null
+        val details = obj["details"] as? JsonObject
+        ModelEntry(
+            name = name,
+            capabilities = parseCapabilities(obj["capabilities"]),
+            parameterSize = details?.string("parameter_size"),
+            quantization = details?.string("quantization_level"),
+            // `/api/tags` has no first-class context field. A few builds echo one inside
+            // `details`; read it if present, since /api/show still wins in the merge and
+            // this only helps when show fails.
+            contextLength = details?.long("context_length"),
+            sizeBytes = obj.long("size")
+        )
+    }
+}
+
+/**
+ * Parses `GET /v1/models`, the OpenAI-compatible endpoint `fetchModels` already tries
+ * second. It carries an id and nothing else, so every optional field stays null — in
+ * particular `capabilities` stays null (NOT reported), never empty.
+ */
+internal fun parseOpenAiModels(body: String): List<ModelEntry> {
+    val root = runCatching { lenientJson.parseToJsonElement(body).jsonObject }.getOrNull()
+        ?: return emptyList()
+    val data = root["data"] as? JsonArray ?: return emptyList()
+    return data.mapNotNull { element ->
+        val obj = element as? JsonObject ?: return@mapNotNull null
+        val id = obj["id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+        ModelEntry(
+            name = id, capabilities = null, parameterSize = null, quantization = null,
+            contextLength = null, sizeBytes = null
+        )
+    }
+}
+
+/**
+ * Parses `POST /api/show` for one model.
+ *
+ * The response carries no name, so [name] comes from the request. Capabilities are the
+ * top-level `capabilities`; context length is the single arch-prefixed
+ * `model_info["<arch>.context_length"]`, which cannot be matched positionally.
+ */
+internal fun parseShowModel(body: String, name: String): ModelEntry? {
+    val root = runCatching { lenientJson.parseToJsonElement(body).jsonObject }.getOrNull()
+        ?: return null
+    // `{}` is a well-formed body that resolved nothing. Treating it as a successful
+    // enrichment would mark the model RESOLVED while every field fell back to tags,
+    // which is how "pending" is supposed to be avoided but is really a silent failure.
+    // A real /api/show always carries at least one of these.
+    if (root.keys.none { it == "capabilities" || it == "details" || it == "model_info" }) {
+        return null
+    }
+    val details = root["details"] as? JsonObject
+    return ModelEntry(
+        name = name,
+        capabilities = parseCapabilities(root["capabilities"]),
+        parameterSize = details?.string("parameter_size"),
+        quantization = details?.string("quantization_level"),
+        contextLength = contextLengthFromModelInfo(root["model_info"]),
+        sizeBytes = null // `/api/show` has no size; tags owns it.
+    )
+}
+
+/**
+ * Merges a tags entry with its `/api/show` enrichment.
+ *
+ * `show` wins FIELD BY FIELD wherever it carries a value; `tags` fills the gaps — most
+ * importantly `sizeBytes`, which only tags has, and `contextLength` when show failed or
+ * omitted it. A null `show` (the call failed) returns `tags` unchanged, which is what
+ * keeps one model's failure from costing the whole list.
+ */
+internal fun mergeModelEntry(tags: ModelEntry, show: ModelEntry?): ModelEntry =
+    if (show == null) tags else tags.copy(
+        capabilities = show.capabilities ?: tags.capabilities,
+        parameterSize = show.parameterSize ?: tags.parameterSize,
+        quantization = show.quantization ?: tags.quantization,
+        contextLength = show.contextLength ?: tags.contextLength,
+        sizeBytes = show.sizeBytes ?: tags.sizeBytes
+    )
+
+/** Human-readable byte size, binary units: 9608350718 -> "9.6 GB". */
+internal fun formatModelSize(bytes: Long): String {
+    if (bytes < 0) return ""
+    if (bytes < 1024) return "$bytes B"
+    val units = listOf("KB", "MB", "GB", "TB", "PB")
+    var value = bytes.toDouble() / 1024.0
+    var unit = 0
+    while (value >= 1024.0 && unit < units.lastIndex) {
+        value /= 1024.0
+        unit++
+    }
+    val rounded = if (value >= 100) {
+        String.format(java.util.Locale.US, "%.0f", value)
+    } else {
+        String.format(java.util.Locale.US, "%.1f", value)
+    }
+    return "$rounded ${units[unit]}"
+}
+
+/** Compact context length: 8192 -> "8K", 131072 -> "131K", 1048576 -> "1M". */
+internal fun formatContextLength(contextLength: Long): String = when {
+    contextLength <= 0 -> ""
+    contextLength >= 1_048_576 -> trimUnit(contextLength.toDouble() / 1_048_576.0, "M")
+    contextLength >= 1024 -> trimUnit(contextLength.toDouble() / 1024.0, "K")
+    else -> contextLength.toString()
+}
+
+private fun trimUnit(value: Double, suffix: String): String {
+    val rounded = if (value >= 10) {
+        String.format(java.util.Locale.US, "%.0f", value)
+    } else {
+        String.format(java.util.Locale.US, "%.1f", value)
+    }
+    return if (rounded.endsWith(".0")) rounded.dropLast(2) + suffix else "$rounded$suffix"
+}
+
+/**
+ * The spec line under a model name: only the fields the server actually reported, so a
+ * missing context length never renders as "0" and never leaves a dangling separator.
+ */
+internal fun modelSpecLine(entry: ModelEntry): String = listOfNotNull(
+    entry.parameterSize,
+    entry.quantization,
+    entry.contextLength
+        ?.let(::formatContextLength)
+        ?.takeIf(String::isNotBlank)
+        ?.let { "$it ctx" },
+    entry.sizeBytes?.let(::formatModelSize)
+).joinToString(" · ")
+
+/**
+ * The badges a models list shows. `COMPLETION` is deliberately absent: every chat model
+ * reports it, so a badge for it carries no information. An unreported model gets no
+ * badges; a reported-but-empty model is labelled by the caller instead.
+ */
+internal fun deriveCapabilityBadges(entry: ModelEntry): List<ModelCapability> =
+    entry.capabilities.orEmpty().filterNot { it == ModelCapability.COMPLETION }
+
+/**
+ * Chat-pick sort: embedding-only models last, then favorites, then name.
+ *
+ * Embedding-only sorts last but is never removed. Favorites outrank name so the order
+ * matches what the persona picker shows.
+ */
+internal fun compareForChatPicker(
+    a: ModelEntry,
+    b: ModelEntry,
+    favoriteNames: Set<String>
+): Int {
+    if (a.isEmbeddingOnly != b.isEmbeddingOnly) return if (a.isEmbeddingOnly) 1 else -1
+    val aFav = a.name in favoriteNames
+    val bFav = b.name in favoriteNames
+    if (aFav != bFav) return if (aFav) -1 else 1
+    return a.name.compareTo(b.name, ignoreCase = true)
+}
+
+private fun parseCapabilities(element: JsonElement?): Set<ModelCapability>? {
+    val array = element as? JsonArray ?: return null
+    // Distinct: a server listing a capability twice is not reporting two of them.
+    return array.mapNotNull { item ->
+        item.jsonPrimitive.contentOrNull?.let(ModelCapability::fromWire)
+    }.toSet()
+}
+
+private fun contextLengthFromModelInfo(element: JsonElement?): Long? {
+    val obj = element as? JsonObject ?: return null
+    // Arch-prefixed ("gemma3.context_length", "nomic-bert.context_length"), so select by
+    // suffix. The `general.*` and `tokenizer.*` blocks never carry one; should a future
+    // build add more than one, the first in document order wins deterministically.
+    return obj.entries
+        .firstOrNull { it.key.endsWith(".context_length") }
+        ?.value?.jsonPrimitive?.longOrNull
+}
+
+private fun JsonObject.string(key: String): String? =
+    this[key]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+
+private fun JsonObject.long(key: String): Long? =
+    (this[key] as? JsonPrimitive)?.longOrNull

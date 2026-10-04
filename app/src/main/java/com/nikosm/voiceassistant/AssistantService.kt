@@ -610,6 +610,17 @@ class AssistantService : Service() {
     internal val _isLoadingModels = MutableStateFlow(false)
     val isLoadingModels = _isLoadingModels.asStateFlow()
 
+    /**
+     * Model catalog per server URL, for the models screen (step 1). Keyed by URL
+     * deliberately: that is the one server identifier already unique-enforced (name is
+     * not), so it survives a rename without a migration.
+     *
+     * Runs BESIDE the existing `_fetchedLocalModels`/`availableModels` pair, which stay
+     * exactly as they are; step 4 retires those in favour of this.
+     */
+    internal val _modelCatalog = MutableStateFlow<Map<String, ModelCatalogState>>(emptyMap())
+    internal val modelCatalog = _modelCatalog.asStateFlow()
+
     // B3 (chat): concurrent model fetches must not let one finishing call leave
     // _isLoadingModels=false while another is still in flight. A single boolean can't
     // represent that; track the number of in-flight fetches instead and only clear the
