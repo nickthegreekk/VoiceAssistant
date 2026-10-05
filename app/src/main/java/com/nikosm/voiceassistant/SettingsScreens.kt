@@ -1151,6 +1151,19 @@ Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
     if (modelsServer != null) {
         // A server deleted elsewhere must not strand the selection.
         LaunchedEffect(ollama) { if (modelsServerUrl != null && modelsServer == null) modelsServerUrl = null }
+        // KNOWN ISSUE (found by screenshot review on a real device, deliberately NOT fixed):
+        // Servers -> Models draws TWO back arrows, stacked vertically in the header. One is
+        // SettingsCategoryScreen's own ("Back to Settings", SettingsScreens.kt:525); the other
+        // is ModelsHeader's inside ModelsScreen ("Back to servers", ModelScreens.kt:193). Both
+        // are composed at once because this screen is used as the CONTENT of the Servers
+        // category page, so the category header never goes away underneath the detail header.
+        // Screenshot: /tmp/shots/30-models-doubled-arrow.png.
+        //
+        // Not fixed here because either fix changes navigation the picker work did not touch:
+        // drop ModelsHeader's arrow and let the category arrow do both jobs (it already does),
+        // or stop hosting the detail inside the category page. Both are a deliberate call for
+        // whoever owns settings navigation; until then it is cosmetic only -- both arrows go
+        // back to the same server list, and system back is bound to the same onBack.
         ModelsScreen(
             server = modelsServer,
             state = catalog[modelsServer.url] ?: ModelCatalogState.NotLoaded,

@@ -2,6 +2,7 @@ package com.nikosm.voiceassistant
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -233,4 +234,196 @@ class ModelCatalogScreenLogicTest {
         assertEquals(5, FILTERABLE_CAPABILITIES.size)
         assertEquals("Vision", capabilityLabel(ModelCapability.VISION))
     }
+
+
+// ================================================================ step 4: the picker
+
+    private val SERVER = "5800x"
+
+    /** The picker's rows, by name, for server 5800x. */
+    private fun picker(
+        entries: List<ModelEntry>,
+        favorites: Set<String> = emptySet(),
+        favoritesOnly: Boolean = false,
+        current: String? = null
+    ) = selectPickerModels(entries, SERVER, favorites, favoritesOnly, current).map { it.name }
+
+    @Test
+    fun `the picker keeps the models screen's favorites-first order`() {
+        val entries = listOf(entry("zebra", chat), entry("alpha", chat), entry("mid", chat))
+        assertEquals(listOf("mid", "alpha", "zebra"), picker(entries, setOf("[5800x] mid")))
+    }
+
+    @Test
+    fun `the picker sorts embedding-only last and never removes it`() {
+        val entries = listOf(entry("embed", setOf(ModelCapability.EMBEDDING)), entry("chat", chat))
+        assertEquals(listOf("chat", "embed"), picker(entries))
+    }
+
+    @Test
+    fun `favorites-only narrows the picker to the favorites`() {
+        val entries = listOf(entry("a", chat), entry("b", chat), entry("c", chat))
+        assertEquals(listOf("b"), picker(entries, setOf("[5800x] b"), favoritesOnly = true))
+    }
+    @Test
+    fun `another server's favorite does not leak into this picker`() {
+        val entries = listOf(entry("a", chat), entry("b", chat))
+        // "[Other] b" is not a favorite of 5800x, so favorites-only shows nothing at all.
+        // It must never be mistaken for one and drag "b" into the list.
+        assertEquals(emptyList<String>(), picker(entries, setOf("[Other] b"), favoritesOnly = true))
+        assertEquals(
+            listOf("a", "b"),
+            picker(entries, setOf("[Other] b"), favoritesOnly = false)
+        )
+    }
+
+// ------------------------------------------- the current model is always listed
+
+    @Test
+    fun `a current model the server does not list is still listed`() {
+        val entries = listOf(entry("present", chat))
+        assertEquals(listOf("deleted-model", "present"), picker(entries, current = "deleted-model"))
+    }
+
+    @Test
+    fun `a current model is listed even when it is not a favorite`() {
+        val entries = listOf(entry("fav", chat), entry("current", chat))
+        // Favorites-only would otherwise drop it entirely, leaving a picker that cannot show
+        // what the persona is actually using.
+        assertEquals(
+            listOf("fav", "current"),
+            picker(entries, setOf("[5800x] fav"), favoritesOnly = true, current = "current")
+        )
+    }
+
+    @Test
+    fun `a current model the server DOES list keeps its real row, not a stand-in`() {
+        val entries = listOf(
+            entry("gemma4:26b", setOf(ModelCapability.COMPLETION, ModelCapability.VISION))
+        )
+        val rows = selectPickerModels(entries, SERVER, emptySet(), false, "gemma4:26b")
+        assertEquals(1, rows.size)
+        // The real entry, so its chips and spec line survive.
+        assertEquals(
+            setOf(ModelCapability.COMPLETION, ModelCapability.VISION),
+            rows.single().capabilities
+        )
+        assertEquals("8.0B", rows.single().parameterSize)
+        assertEquals(131072L, rows.single().contextLength)
+    }
+
+    @Test
+    fun `a nonfavorite current model keeps its real row in favorites-only mode`() {
+        // The favorites-only filter drops the current model because it is not a favorite, but
+        // the catalog still knows it. A blank stand-in here would show "current" as a bare
+        // name with no chips and no spec line, while the models screen shows it fully enriched
+        // — the two surfaces must not disagree about the model actually in use.
+        val entries = listOf(
+            entry("fav", chat),
+            entry("gemma4:26b", setOf(ModelCapability.COMPLETION, ModelCapability.VISION))
+        )
+        val rows = selectPickerModels(
+            entries, SERVER, setOf("[5800x] fav"), favoritesOnly = true,
+            currentModelName = "gemma4:26b"
+        )
+        assertEquals(listOf("fav", "gemma4:26b"), rows.map { it.name })
+        val current = rows.last()
+        assertEquals(
+            setOf(ModelCapability.COMPLETION, ModelCapability.VISION),
+            current.capabilities
+        )
+        assertEquals("8.0B", current.parameterSize)
+        assertEquals(131072L, current.contextLength)
+    }
+
+    @Test
+    fun `a current model missing from the catalog is still a blank stand-in in favorites-only mode`() {
+        // Nothing to preserve here — the server never reported it, so no chips may be invented.
+        val entries = listOf(entry("fav", chat))
+        val rows = selectPickerModels(
+            entries, SERVER, setOf("[5800x] fav"), favoritesOnly = true,
+            currentModelName = "deleted"
+        )
+        assertEquals(listOf("fav", "deleted"), rows.map { it.name })
+        assertNull(rows.last().capabilities)
+        assertNull(rows.last().parameterSize)
+        assertNull(rows.last().contextLength)
+    }
+
+    @Test
+    fun `no current model means no invented row`() {
+        val entries = listOf(entry("a", chat))
+        assertEquals(listOf("a"), picker(entries, current = null))
+        assertEquals(listOf("a"), picker(entries, current = ""))
+        assertEquals(listOf("a"), picker(entries, current = "   "))
+    }
+
+    @Test
+    fun `an unreachable server with no entries still lists the current model`() {
+        // What Failed/NotLoaded look like to the picker: an empty entry list.
+        assertEquals(listOf("llama3"), picker(emptyList(), current = "llama3"))
+    }
+
+    // ------------------------------------------------------- the strings written
+
+    @Test
+    fun `the qualified name is the exact string favorites and personas store`() {
+        assertEquals("[5800x] gemma4:26b", qualifiedModelName("5800x", "gemma4:26b"))
+        assertEquals("weird", bareModelName(qualifiedModelName("5800x", "weird"), "5800x"))
+        assertEquals("gemma4:26b", bareModelName("[5800x] gemma4:26b", "5800x"))
+    }
+
+    @Test
+    fun `bareModelName only strips its own server's prefix`() {
+        // A cloud persona's plain model name is passed through untouched.
+        assertEquals("gpt-4o-mini", bareModelName("gpt-4o-mini", "5800x"))
+        // Another Ollama server's model is NOT this server's.
+        assertEquals("[Other] llama3", bareModelName("[Other] llama3", "5800x"))
+    }
+
+    @Test
+    fun `favoriteNamesFor strips only this server's prefix`() {
+        assertEquals(
+            setOf("a", "b"),
+            favoriteNamesFor("5800x", setOf("[5800x] a", "[5800x] b", "[Other] c"))
+        )
+        assertEquals(emptySet<String>(), favoriteNamesFor("5800x", setOf("[Other] c")))
+        assertTrue(serverHasFavorites("5800x", setOf("[5800x] a")))
+        assertFalse(serverHasFavorites("5800x", setOf("[Other] a")))
+    }
+
+    // ------------------------------------------------------ shared state wording
+
+    @Test
+    fun `the stale note is shared between the two surfaces`() {
+        assertEquals(
+            "This server looks unreachable. Showing the last models loaded.",
+            staleModelNote(null, unreachable = true)
+        )
+        assertEquals(
+            "This server looks unreachable. Showing the last models loaded.",
+            staleModelNote("connection refused", unreachable = true)
+        )
+        assertEquals("Showing the last models loaded.", staleModelNote(null, unreachable = false))
+        assertEquals(
+            "Showing the last models loaded (connection refused).",
+            staleModelNote("connection refused", unreachable = false)
+        )
+        assertEquals("Unreachable — reported by this server", UNREACHABLE_LABEL)
+    }
+    @Test
+    fun `a stand-in claims nothing the server did not report`() {
+        val rows = selectPickerModels(emptyList(), SERVER, emptySet(), false, "gone:1b")
+        assertEquals(1, rows.size)
+        val e = rows.single()
+        assertEquals("gone:1b", e.name)
+        assertEquals(null, e.capabilities)
+        assertEquals(null, e.parameterSize)
+        assertEquals(null, e.quantization)
+        assertEquals(null, e.contextLength)
+        assertEquals(null, e.sizeBytes)
+        assertFalse("we were not told, so it is not embedding-only", e.isEmbeddingOnly)
+    }
+
+
 }

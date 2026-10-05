@@ -15,6 +15,15 @@
 #                                                     # run at an override, always restore
 #
 # "Physical" means: what the hardware reports once overrides are cleared.
+#
+# ## Why runtime permissions and app-ops are in here too
+#
+# A screenshot session that has to get past a permission dialog runs `pm grant`, and any
+# manual app-op fiddling (`cmd appops set ...`) leaves a mode behind. Both outlive the
+# session and are asserted on by the instrumentation suite: a leftover READ_PHONE_STATE mode
+# of `ignore` makes PhoneCallGuardInstrumentedTest fail, with an assertion that has nothing
+# to do with the code under test. So `save`/`restore` cover them alongside the display, and
+# `restore` puts every permission and app-op back exactly as it was found.
 
 set -euo pipefail
 
@@ -26,7 +35,18 @@ fi
 
 STATE_FILE="${DEVICE_DISPLAY_STATE:-${TMPDIR:-/tmp}/voiceassistant-device-display.state}"
 
+# The package whose permissions and app-ops this script guards. Overridable so the script is
+# reusable, but it defaults to the app under test.
+PKG="${DEVICE_DISPLAY_PKG:-com.nikosm.voiceassistant}"
+
 adbd() { adb shell "$@" 2>/dev/null | tr -d '\r'; }
+
+# True once the package is actually installed: before the first install there is no UID, so
+# `cmd appops get` errors and every read below would record noise.
+package_installed() {
+    adb shell pm list packages "$PKG" 2>/dev/null | grep -q "^package:$PKG$"
+}
+
 
 # --- reading -----------------------------------------------------------------
 
@@ -65,6 +85,17 @@ current_font_scale() {
 
 # --- writing -----------------------------------------------------------------
 
+current_permissions() {
+    adbd dumpsys package "$PKG" \
+        | grep -oE 'android\.permission\.[A-Z_]+: granted=(true|false)' \
+        | sed 's/^android\.permission\.//; s/: granted=/=/'
+}
+
+current_appops() {
+    package_installed || return 0
+    adbd cmd appops get "$PKG" | grep -oE '^[A-Z_]+: [a-z_]+' | tr -d ' ' | tr ':' '='
+}
+
 clear_overrides() {
     adbd wm density reset >/dev/null || true
     adbd wm size reset >/dev/null || true
@@ -80,12 +111,44 @@ save() {
         echo "size_physical=$(current_size_physical)"
         echo "size_override=$(current_size_override)"
         echo "font_scale=$(current_font_scale)"
+        # Kept in sibling files so a failure while applying one group cannot abandon the other.
+        current_permissions > "${STATE_FILE}.perms" || true
+        current_appops > "${STATE_FILE}.appops" || true
     } >"$STATE_FILE"
     echo "recorded device display state -> $STATE_FILE"
     cat "$STATE_FILE"
+    echo "perms  : $(wc -l < "${STATE_FILE}.perms" 2>/dev/null || echo 0) recorded"
+    echo "app-ops: $(tr '\n' ' ' < "${STATE_FILE}.appops" 2>/dev/null || true)"
 }
 
 field() { grep "^$1=" "$STATE_FILE" 2>/dev/null | cut -d= -f2- || true; }
+
+# Put every recorded permission and app-op back. Best-effort per line: one that the OS
+# refuses (a permission it will not let a script flip) must not abandon the rest.
+restore_permissions() {
+    local perms="${STATE_FILE}.perms" ops="${STATE_FILE}.appops" name value
+    # NOTE the `</dev/null` on every adb call below. `adb` inherits this loop's stdin — the
+    # redirected state file — and reads whatever is left of it, so without that redirect the
+    # FIRST line is acted on and every later one is swallowed. That fails silently: the loop
+    # just ends early, and the caller sees a restore that reported success.
+    if [[ -s "$perms" ]]; then
+        while IFS='=' read -r name value; do
+            [[ -n "$name" ]] || continue
+            if [[ "$value" == "true" ]]; then
+                adbd pm grant "$PKG" "android.permission.$name" >/dev/null 2>&1 </dev/null || true
+            else
+                adbd pm revoke "$PKG" "android.permission.$name" >/dev/null 2>&1 </dev/null || true
+            fi
+        done < "$perms"
+    fi
+    if [[ -s "$ops" ]] && package_installed; then
+        while IFS='=' read -r name value; do
+            [[ -n "$name" ]] || continue
+            adbd cmd appops set "$PKG" "$name" "$value" >/dev/null 2>&1 </dev/null || true
+        done < "$ops"
+    fi
+    rm -f "$perms" "$ops"
+}
 
 restore() {
     if [[ ! -f "$STATE_FILE" ]]; then
@@ -113,8 +176,12 @@ restore() {
             && "$(current_size_override)" == "$s_override" ]] && break
         sleep 0.5
     done
+    # Display first, then permissions and app-ops: a `pm revoke` restarts nothing, but a
+    # failing one must not stop the app-ops from being put back.
+    restore_permissions
+
     rm -f "$STATE_FILE"
-    echo "restored device display state"
+    echo "restored device display, permission and app-op state"
     show
 }
 
@@ -123,6 +190,10 @@ show() {
     echo "size   : physical=$(current_size_physical) override=$(current_size_override)"
     echo "density: physical=$(current_density_physical) override=$(current_density_override)"
     echo "font   : font_scale=$(current_font_scale) display_density_forced=$(adbd settings get system display_density_forced)"
+    if package_installed; then
+        echo "perms  : $(current_permissions | grep -c '=true' || true) granted, $(current_permissions | grep -c '=false' || true) not"
+        echo "app-ops: $(current_appops | tr '\n' ' ')"
+    fi
     if [[ -f "$STATE_FILE" ]]; then
         echo "recorded: $(tr '\n' ' ' <"$STATE_FILE")"
     else

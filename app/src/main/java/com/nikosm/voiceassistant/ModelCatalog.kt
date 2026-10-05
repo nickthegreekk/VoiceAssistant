@@ -435,8 +435,7 @@ internal fun selectModels(
     favoritesOnly: Boolean,
     sort: ModelSort
 ): List<ModelEntry> {
-    val prefix = "[$serverName] "
-    val mine = favoriteNames.filter { it.startsWith(prefix) }.map { it.removePrefix(prefix) }.toSet()
+    val mine = favoriteNamesFor(serverName, favoriteNames)
 
     return entries
         .filter { matchesCapabilityFilters(it, filters) }
@@ -459,6 +458,109 @@ internal fun selectModels(
 /** Does this server have any favorites at all? Decides the toggle's default. */
 internal fun serverHasFavorites(serverName: String, favoriteNames: Set<String>): Boolean =
     favoriteNames.any { it.startsWith("[$serverName] ") }
+
+/**
+ * This server's favorites, as the BARE model names the catalog is keyed by.
+ *
+ * Favorites are stored as the qualified `"[ServerName] model"` string (that is the form
+ * `toggleFavoriteModel` takes and the form in `favorite_models_v2`), while catalog entries
+ * carry the bare name, so the prefix has to come off before the two can be compared.
+ * Splitting it here keeps the models screen and the persona picker from disagreeing about
+ * what "favorited" means.
+ */
+internal fun favoriteNamesFor(serverName: String, favoriteNames: Set<String>): Set<String> {
+    val prefix = "[$serverName] "
+    return favoriteNames.filter { it.startsWith(prefix) }.map { it.removePrefix(prefix) }.toSet()
+}
+
+/** The `"[ServerName] model"` string a star toggles and a persona stores, for one entry. */
+internal fun qualifiedModelName(serverName: String, modelName: String): String =
+    "[$serverName] $modelName"
+
+/**
+ * The bare model name inside a stored `"[ServerName] model"` string.
+ *
+ * Returns the input unchanged when it carries no `[Name] ` prefix, so a cloud persona's
+ * `"gpt-4o-mini"` or a hand-typed value is never mangled into something else.
+ */
+internal fun bareModelName(stored: String, serverName: String): String {
+    val prefix = "[$serverName] "
+    return if (stored.startsWith(prefix)) stored.removePrefix(prefix) else stored
+}
+
+/**
+ * A stand-in entry for a model the catalog does not contain.
+ *
+ * Every field is null on purpose. The persona editor must still be able to SHOW and re-select
+ * the model a persona already uses when the server has deleted it or cannot be reached, and
+ * inventing capabilities, a size or a context length for it would be a claim nobody made.
+ * `capabilities = null` renders "capabilities not reported by this server" and matches no
+ * capability filter — which is the truth here.
+ */
+internal fun placeholderModelEntry(name: String): ModelEntry =
+    ModelEntry(name, null, null, null, null, null)
+
+/**
+ * The persona picker's rows for one connection.
+ *
+ * Unlike [selectModels] this has no capability filters and no size sort: a picker is a short
+ * list the user picks a CHAT model from, and the requirement is that it keeps the same
+ * "favorites first, embedding-only last" order as the models screen. So it is
+ * `compareForChatPicker` and nothing else.
+ *
+ * ## The current model is always present
+ *
+ * [currentModelName] is the persona's stored model, already stripped of its `[Server] `
+ * prefix. It is appended when the catalog does not list it — a model deleted on the server,
+ * or a server that is unreachable and therefore has no entries at all — and it is never
+ * dropped by `favoritesOnly`, because hiding the model a persona is currently using would
+ * make the picker unable to show what is actually selected. When the server DOES list it,
+ * the real entry is kept and no stand-in is added, so the row keeps its real chips and spec
+ * line rather than being blanked out.
+ *
+ * A null or blank [currentModelName] adds nothing: a brand-new persona has no current model,
+ * and the picker must not invent a row for it.
+ */
+internal fun selectPickerModels(
+    entries: List<ModelEntry>,
+    serverName: String,
+    favoriteNames: Set<String>,
+    favoritesOnly: Boolean,
+    currentModelName: String?
+): List<ModelEntry> {
+    val mine = favoriteNamesFor(serverName, favoriteNames)
+    val wants = currentModelName?.takeIf { it.isNotBlank() }
+
+    val base = entries.filter { !favoritesOnly || it.name in mine }
+    val rows = if (wants != null && base.none { it.name == wants }) {
+        // Prefer the catalog's REAL entry over a stand-in. In favorites-only mode the current
+        // model is filtered out of `base` precisely because it is not a favorite — but the
+        // catalog still knows it, and a blank placeholder would throw away the very chips and
+        // spec line the models screen shows for the model this persona is using right now.
+        // The stand-in is only for a model the catalog genuinely does not have.
+        base + (entries.firstOrNull { it.name == wants } ?: placeholderModelEntry(wants))
+    } else {
+        base
+    }
+    return rows.sortedWith { a, b -> compareForChatPicker(a, b, mine) }
+}
+
+/**
+ * The line shown above a list that is being served from cache rather than the server.
+ *
+ * Shared by the models screen and the persona picker so the two cannot drift into telling
+ * the user different things about the same staleness. Unreachable outranks a reason: if the
+ * server cannot be reached, that is what the user needs to know, and the underlying HTTP
+ * failure is noise.
+ */
+internal fun staleModelNote(reason: String?, unreachable: Boolean): String = when {
+    unreachable -> "This server looks unreachable. Showing the last models loaded."
+    reason != null -> "Showing the last models loaded ($reason)."
+    else -> "Showing the last models loaded."
+}
+
+/** The unreachable marker, worded exactly as the models screen's header words it. */
+internal const val UNREACHABLE_LABEL: String = "Unreachable — reported by this server"
 
 /**
  * The row's spoken label: name, what the server reported, and whether it is a favorite.

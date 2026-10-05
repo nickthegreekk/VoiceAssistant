@@ -203,7 +203,7 @@ private fun ModelsHeader(
                 )
                 // Informational only: the health dot never hides or disables anything here.
                 Text(
-                    text = if (unreachable) "Unreachable — reported by this server" else "Online",
+                    text = if (unreachable) UNREACHABLE_LABEL else "Online",
                     style = MaterialTheme.typography.labelSmall,
                     color = if (unreachable) MaterialTheme.colorScheme.error
                     else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
@@ -223,7 +223,7 @@ private fun ModelsHeader(
 }
 
 @Composable
-private fun LoadingRow() {
+internal fun LoadingRow() {
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
         CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
         Text("Loading models…", style = MaterialTheme.typography.bodySmall)
@@ -231,22 +231,17 @@ private fun LoadingRow() {
 }
 
 @Composable
-private fun StaleNote(reason: String?, unreachable: Boolean) {
-    val text = when {
-        unreachable -> "This server looks unreachable. Showing the last models loaded."
-        reason != null -> "Showing the last models loaded ($reason)."
-        else -> "Showing the last models loaded."
-    }
+internal fun StaleNote(reason: String?, unreachable: Boolean) {
     LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
     Text(
-        text = text,
+        text = staleModelNote(reason, unreachable),
         style = MaterialTheme.typography.labelSmall,
         color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
     )
 }
 
 @Composable
-private fun EmptyNote(text: String) {
+internal fun EmptyNote(text: String) {
     Text(
         text = text,
         style = MaterialTheme.typography.bodySmall,
@@ -285,80 +280,130 @@ private fun ModelRow(
             modifier = Modifier.padding(12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        text = displayModelName(entry.name),
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f, fill = false)
-                    )
-                    val tag = modelTag(entry.name)
-                    if (tag.isNotEmpty()) {
-                        Spacer(Modifier.width(6.dp))
-                        Text(
-                            text = tag,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f),
-                            maxLines = 1
-                        )
-                    }
-                }
-                // The full name is always available, never clipped.
+            ModelRowBody(
+                entry = entry,
+                showState = showState,
+                accentColor = accentColor,
+                modifier = Modifier.weight(1f)
+            )
+            FavoriteStar(
+                isFavorite = isFavorite,
+                entryName = entry.name,
+                serverName = serverName,
+                onToggleFavorite = onToggleFavorite
+            )
+        }
+    }
+}
+
+/**
+ * The name/chips/spec body of a model row, shared by the models screen and the persona
+ * picker.
+ *
+ * Extracted so the two render a model identically BY CONSTRUCTION rather than by two
+ * copies agreeing: the split name, the quiet tag, the full name on its own line, the
+ * pending placeholder and the spec line are all decided here once. The picker's requirement
+ * is "the same capability chips and the spec line as the models screen", and this is what
+ * makes that a property instead of a promise.
+ */
+@Composable
+internal fun ModelRowBody(
+    entry: ModelEntry,
+    showState: ModelShowState,
+    accentColor: Color,
+    modifier: Modifier = Modifier,
+    trailing: (@Composable () -> Unit)? = null
+) {
+    Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = displayModelName(entry.name),
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f, fill = false)
+            )
+            val tag = modelTag(entry.name)
+            if (tag.isNotEmpty()) {
+                Spacer(Modifier.width(6.dp))
                 Text(
-                    text = entry.name,
+                    text = tag,
                     style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f),
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f),
+                    maxLines = 1
                 )
-
-                // While /api/show is in flight, a placeholder holds the chips' place so they
-                // do not flip from tags values to show values under the reader.
-                if (showState == ModelShowState.PENDING) {
-                    PendingBadge()
-                } else {
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(4.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        if (entry.isEmbeddingOnly) {
-                            // "Embedding only" IS the embedding statement; repeating it as a
-                            // plain "Embedding" chip beside it says the same thing twice.
-                            CapabilityChip("Embedding only", accentColor)
-                        }
-                        deriveCapabilityBadges(entry)
-                            .filterNot { it == ModelCapability.EMBEDDING && entry.isEmbeddingOnly }
-                            .forEach { capability ->
-                                CapabilityChip(capabilityLabel(capability), accentColor)
-                            }
-                    }
-                }
-
-                val spec = modelSpecLine(entry)
-                if (spec.isNotEmpty()) {
-                    Text(
-                        text = spec,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
             }
-            IconButton(onClick = onToggleFavorite, modifier = Modifier.size(48.dp)) {
-                Icon(
-                    if (isFavorite) Icons.Default.Star else Icons.Default.StarBorder,
-                    // The row itself carries the full spoken label; the star adds only what
-                    // its own action is, so TalkBack never reads the same sentence twice.
-                    contentDescription = "Toggle favorite ${entry.name} on $serverName",
-                    tint = if (isFavorite) Color.Yellow else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f),
-                    modifier = Modifier.size(22.dp)
-                )
+            trailing?.invoke()
+        }
+        // The full name is always available, never clipped.
+        Text(
+            text = entry.name,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f),
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis
+        )
+
+        // While /api/show is in flight, a placeholder holds the chips' place so they
+        // do not flip from tags values to show values under the reader.
+        if (showState == ModelShowState.PENDING) {
+            PendingBadge()
+        } else {
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                if (entry.isEmbeddingOnly) {
+                    // "Embedding only" IS the embedding statement; repeating it as a
+                    // plain "Embedding" chip beside it says the same thing twice.
+                    CapabilityChip("Embedding only", accentColor)
+                }
+                deriveCapabilityBadges(entry)
+                    .filterNot { it == ModelCapability.EMBEDDING && entry.isEmbeddingOnly }
+                    .forEach { capability ->
+                        CapabilityChip(capabilityLabel(capability), accentColor)
+                    }
             }
         }
+
+        val spec = modelSpecLine(entry)
+        if (spec.isNotEmpty()) {
+            Text(
+                text = spec,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+}
+
+/**
+ * The star control, shared by both surfaces.
+ *
+ * Labelled with its own action rather than left null: a bare `StarBorder` icon is
+ * indistinguishable from decoration to a screen reader, and this is the one control in a
+ * row that changes saved state.
+ */
+@Composable
+internal fun FavoriteStar(
+    isFavorite: Boolean,
+    entryName: String,
+    serverName: String,
+    onToggleFavorite: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    IconButton(onClick = onToggleFavorite, modifier = modifier.size(40.dp)) {
+        Icon(
+            if (isFavorite) Icons.Default.Star else Icons.Default.StarBorder,
+            // The row itself carries the full spoken label; the star adds only what
+            // its own action is, so TalkBack never reads the same sentence twice.
+            contentDescription = "Toggle favorite $entryName on $serverName",
+            tint = if (isFavorite) Color.Yellow else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f),
+            modifier = Modifier.size(20.dp)
+        )
     }
 }
 

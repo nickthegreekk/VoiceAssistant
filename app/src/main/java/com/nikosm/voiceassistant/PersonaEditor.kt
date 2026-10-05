@@ -304,6 +304,14 @@ fun PersonaEditor(
     var favorites by remember { mutableStateOf<List<String>>(emptyList()) }
     var fetchedCloudModels by remember { mutableStateOf<Map<String, List<String>>>(emptyMap()) }
 
+    // Step 4, additive: the shared model catalog and the per-server health status, so an
+    // Ollama connection's picker can read the same cache the models screen fills. Purely
+    // additional collectors — nothing below reads them except the picker, and neither is
+    // part of the persona snapshot, so the debounce and dispose-flush commit logic are
+    // untouched.
+    var modelCatalog by remember { mutableStateOf<Map<String, ModelCatalogState>>(emptyMap()) }
+    var serverStatusMap by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
+
     LaunchedEffect(service) {
         launch { service.availableModels.collect { availableModels = it } }
         launch { service.customCloudApis.collect { customCloudApis = it } }
@@ -311,6 +319,8 @@ fun PersonaEditor(
         launch { service.ollamaBaseUrls.collect { ollamaBases = it } }
         launch { service.favoriteModels.collect { favorites = it } }
         launch { service.fetchedCloudModels.collect { fetchedCloudModels = it } }
+        launch { service.modelCatalog.collect { modelCatalog = it } }
+        launch { service.serverStatus.collect { serverStatusMap = it } }
     }
     
     val allConnections = remember(cloudApis, customCloudApis, ollamaBases) {
@@ -666,26 +676,52 @@ fun PersonaEditor(
                 }
             )
             DropdownMenu(expanded = modelExpanded, onDismissRequest = { modelExpanded = false }, modifier = Modifier.fillMaxWidth(0.8f)) {
-                if (filteredModels.isEmpty()) {
-                    DropdownMenuItem(text = { Text("No models found for this connection") }, onClick = { })
-                }
-                filteredModels.forEach { m ->
-                    DropdownMenuItem(
-                        text = { 
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Text(m, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-                                IconButton(onClick = { service.toggleFavoriteModel(m) }, modifier = Modifier.size(32.dp)) {
-                                    Icon(
-                                        if (m in favorites) Icons.Default.Star else Icons.Default.StarBorder,
-                                        null,
-                                        tint = if (m in favorites) Color.Yellow else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f),
-                                        modifier = Modifier.size(18.dp)
-                                    )
-                                }
-                            }
-                        },
-                        onClick = { model = m; modelExpanded = false }
+                // Step 4: an Ollama connection reads the shared catalog, so its rows carry the
+                // same capability chips and spec line the models screen shows. Everything else
+                // — cloud connections, the empty-list wording, and every string written below —
+                // is exactly as it was.
+                val ollamaForConnection = ollamaBases.firstOrNull { it.name == selectedConnection }
+                if (ollamaForConnection != null) {
+                    OllamaModelPicker(
+                        server = ollamaForConnection,
+                        state = modelCatalog[ollamaForConnection.url] ?: ModelCatalogState.NotLoaded,
+                        healthStatus = serverStatusMap[ollamaForConnection.url],
+                        favoriteModels = favorites,
+                        currentModel = model,
+                        onRefresh = { service.fetchModelCatalog(ollamaForConnection, force = true) },
+                        onToggleFavorite = { service.toggleFavoriteModel(it) },
+                        // The qualified string the old inline row wrote, unchanged.
+                        onSelect = { model = it; modelExpanded = false },
+                        accentColor = themeColor
+                        // No height cap here on purpose. The DropdownMenu already bounds its
+                        // own viewport and scrolls its content; a `heightIn` on the child caps
+                        // the CONTENT instead, so the menu's scroller measures 380.dp of
+                        // "content" inside a taller viewport, concludes there is nothing to
+                        // scroll, and silently clips every row past the third — unreachable
+                        // and unstarable. Capping the viewport is the menu's job, not ours.
                     )
+                } else {
+                    if (filteredModels.isEmpty()) {
+                        DropdownMenuItem(text = { Text("No models found for this connection") }, onClick = { })
+                    }
+                    filteredModels.forEach { m ->
+                        DropdownMenuItem(
+                            text = {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(m, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                                    IconButton(onClick = { service.toggleFavoriteModel(m) }, modifier = Modifier.size(32.dp)) {
+                                        Icon(
+                                            if (m in favorites) Icons.Default.Star else Icons.Default.StarBorder,
+                                            null,
+                                            tint = if (m in favorites) Color.Yellow else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f),
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    }
+                                }
+                            },
+                            onClick = { model = m; modelExpanded = false }
+                        )
+                    }
                 }
             }
         }
