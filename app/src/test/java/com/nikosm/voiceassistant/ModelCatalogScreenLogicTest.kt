@@ -440,6 +440,7 @@ class ModelCatalogScreenLogicTest {
             is ModelListOutcome.Listed ->
                 if (outcome.entries.isEmpty()) "listed-empty" else "listed-models"
             is ModelListOutcome.HttpError -> "http-${outcome.status}"
+            ModelListOutcome.Malformed -> "malformed"
             ModelListOutcome.Unreachable -> "unreachable"
         }
         assertEquals("listed-empty", classify(ModelListOutcome.Listed(emptyList())))
@@ -449,6 +450,9 @@ class ModelCatalogScreenLogicTest {
         )
         assertEquals("http-500", classify(ModelListOutcome.HttpError(500)))
         assertEquals("unreachable", classify(ModelListOutcome.Unreachable))
+        // A 200 that is not a model list is its own branch, which is what stops it being
+        // counted as an empty server.
+        assertEquals("malformed", classify(ModelListOutcome.Malformed))
     }
     @Test
     fun `a stand-in claims nothing the server did not report`() {

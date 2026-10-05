@@ -2713,17 +2713,27 @@ private fun authorized(builder: Request.Builder, target: ServerConfig): Request.
  * the user looking at the network instead of at the error the server actually reported.
  */
 private fun AssistantService.requestModels(base: String, target: ServerConfig): ModelListOutcome {
-    val tags = requestModelList("$base/api/tags", target) { parseTagsModels(it) }
+    val tags = requestModelList("$base/api/tags", target) { parseTagsModelsOrNull(it) }
+    // A successful LIST is final, INCLUDING an empty one -- that is a server with nothing
+    // installed. A Malformed body is not a list at all, so the other endpoint still gets
+    // its turn (a gateway answers 404 here anyway, which falls through the same way).
     if (tags is ModelListOutcome.Listed) return tags
 
     // The /v1/models shape carries ids only, so those come back with capabilities NULL
     // (not reported) rather than empty, and /api/show then fills them in.
-    val openAi = requestModelList("$base/v1/models", target) { parseOpenAiModels(it) }
+    val openAi = requestModelList("$base/v1/models", target) { parseOpenAiModelsOrNull(it) }
     if (openAi is ModelListOutcome.Listed) return openAi
 
-    // Both attempts failed. Prefer a status we were actually given over "unreachable".
+    // Both attempts failed. Rank what they told us, most informative first:
+    //   1. a status from /api/tags -- the primary endpoint answering with an error;
+    //   2. a 200 that was not a model list -- a real anomaly, and more telling than the
+    //      404 that /v1/models gives on any server that is not an OpenAI-shaped gateway;
+    //   3. a status from /v1/models;
+    //   4. unreachable -- only when NEITHER produced any HTTP response at all.
     return when {
         tags is ModelListOutcome.HttpError -> tags
+        tags is ModelListOutcome.Malformed || openAi is ModelListOutcome.Malformed ->
+            ModelListOutcome.Malformed
         openAi is ModelListOutcome.HttpError -> openAi
         else -> ModelListOutcome.Unreachable
     }
@@ -2732,20 +2742,26 @@ private fun AssistantService.requestModels(base: String, target: ServerConfig): 
 /**
  * One endpoint attempt, classified.
  *
- * A non-2xx status keeps its code; anything that threw (refused, DNS, timeout) is
+ * A non-2xx status keeps its code; a 2xx whose body will not parse as a model list is
+ * [ModelListOutcome.Malformed]; anything that threw (refused, DNS, timeout) is
  * [ModelListOutcome.Unreachable]. The catch-all matches what the previous `runCatching`
- * over this call swallowed, minus the swallowing: it used to turn both into an empty list.
+ * over this call swallowed, minus the swallowing: it used to turn all three into an empty
+ * list, which then read as "this server has no models".
  */
 private fun AssistantService.requestModelList(
     url: String,
     target: ServerConfig,
-    parse: (String) -> List<ModelEntry>
+    parse: (String) -> List<ModelEntry>?
 ): ModelListOutcome = runCatching {
     modelShowClient.newCall(
         authorized(Request.Builder().url(url).get(), target).build()
     ).execute().use { response ->
-        if (response.isSuccessful) ModelListOutcome.Listed(parse(response.body.string()))
-        else ModelListOutcome.HttpError(response.code)
+        if (!response.isSuccessful) {
+            ModelListOutcome.HttpError(response.code)
+        } else {
+            val entries = parse(response.body.string())
+            if (entries == null) ModelListOutcome.Malformed else ModelListOutcome.Listed(entries)
+        }
     }
 }.getOrElse { ModelListOutcome.Unreachable }
 
@@ -2810,6 +2826,10 @@ internal fun AssistantService.fetchModelCatalog(target: ServerConfig, force: Boo
                 is ModelListOutcome.Listed -> outcome.entries
                 is ModelListOutcome.HttpError -> {
                     failFetch(httpErrorReason(outcome.status))
+                    return@launch
+                }
+                ModelListOutcome.Malformed -> {
+                    failFetch(UNEXPECTED_RESPONSE_REASON)
                     return@launch
                 }
                 ModelListOutcome.Unreachable -> {

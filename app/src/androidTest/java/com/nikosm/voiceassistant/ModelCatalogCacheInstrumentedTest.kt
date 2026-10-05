@@ -426,4 +426,87 @@ class ModelCatalogCacheInstrumentedTest {
             assertEquals(listOf("gw-model-a"), after.entries.map { it.name })
         }
     }
+
+    @Test
+    fun `a_200_that_is_not_a_model_list_never_empties_a_good_list`() {
+        bind()
+        // A 2xx is not evidence of a good answer. Each of these is a server that answered
+        // with something that is not a model list, and each must keep the previous list
+        // rather than replacing it with an empty one -- which is what the old code did,
+        // because all three parsed to "no models".
+        val bodies = mapOf(
+            "an html login page" to "<html><body>Sign in to continue</body></html>",
+            "truncated json" to """{"models":[{"name":"half:1b",""",
+            "an object with no models key" to "{}"
+        )
+        for ((what, body) in bodies) {
+            ModelCatalogStub(tagsJson, mapOf("good:8b" to goodShow)).use { stub ->
+                val server = serverFor(stub)
+                service.fetchModelCatalog(server)
+                val first = awaitCatalog(stub.url) {
+                    it is ModelCatalogState.Loaded && it.showStates.values.none { s -> s == ModelShowState.PENDING }
+                } as ModelCatalogState.Loaded
+                assertEquals("precondition for $what", 2, first.entries.size)
+
+                // Same server, same URL, now answering 200 with something else entirely.
+                stub.tagsBodyOverride = body
+                service.fetchModelCatalog(server, force = true)
+
+                val after = awaitCatalog(stub.url) { it is ModelCatalogState.Loaded && it.stale }
+                assertTrue("$what must not replace the list with Failed", after is ModelCatalogState.Loaded)
+                after as ModelCatalogState.Loaded
+                assertEquals(
+                    "$what must be reported as an unexpected response",
+                    UNEXPECTED_RESPONSE_REASON,
+                    after.degradedReason
+                )
+                assertEquals(
+                    "$what must keep the last good list",
+                    listOf("good:8b", "bad:1b"),
+                    after.entries.map { it.name }
+                )
+            }
+        }
+    }
+
+    @Test
+    fun `a_200_that_is_not_a_model_list_is_never_reported_as_an_empty_server`() {
+        bind()
+        // Cold, with nothing to fall back on: this must still not read as "No models on this
+        // server", which is what an empty Loaded means and what the user would act on.
+        ModelCatalogStub("""{"not_models":true}""").use { stub ->
+            service.fetchModelCatalog(serverFor(stub))
+            val state = awaitCatalog(stub.url) { it is ModelCatalogState.Failed }
+            assertTrue("expected Failed, was $state", state is ModelCatalogState.Failed)
+            assertEquals(
+                UNEXPECTED_RESPONSE_REASON,
+                (state as ModelCatalogState.Failed).reason
+            )
+            assertTrue(
+                "the wording must not claim the server reported no models",
+                !state.reason.contains("no models")
+            )
+        }
+    }
+
+    @Test
+    fun `a_malformed_tags_still_lets_the_gateway_endpoint_answer`() {
+        bind()
+        // /api/tags serves HTML, /v1/models speaks the OpenAI shape: the fallback must
+        // still work, because Malformed falls through where an empty success does not.
+        ModelCatalogStub(
+            "<html>not ollama</html>",
+            openAiModelsBody = """{"data":[{"id":"gw-only:1b"}]}"""
+        ).use { stub ->
+            service.fetchModelCatalog(serverFor(stub))
+            val state = awaitCatalog(stub.url) {
+                it is ModelCatalogState.Loaded && it.showStates.values.none { s -> s == ModelShowState.PENDING }
+            }
+            assertTrue("expected Loaded, was $state", state is ModelCatalogState.Loaded)
+            assertEquals(
+                listOf("gw-only:1b"),
+                (state as ModelCatalogState.Loaded).entries.map { it.name }
+            )
+        }
+    }
 }

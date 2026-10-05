@@ -48,6 +48,13 @@ internal class ModelCatalogStub(
      */
     @Volatile var emptyTagsNow: Boolean = false
 
+    /**
+     * Flip mid-test to simulate a server that answers 200 with something that is not a
+     * model list at all: an HTML login portal, half a JSON document, a `{}`. The status
+     * stays 200, which is the whole point -- a success code is not a model list.
+     */
+    @Volatile var tagsBodyOverride: String? = null
+
     /** Count of models whose /api/show is currently in flight, for concurrency checks. */
     val showCalls = ConcurrentHashMap<String, Int>()
 
@@ -108,7 +115,7 @@ internal class ModelCatalogStub(
             if (failTagsNow) return 500 to "{\"error\":\"server is down\"}"
             if (tagsStatus != 200) return tagsStatus to "{\"error\":\"nope\"}"
             if (emptyTagsNow) return 200 to "{\"models\":[]}"
-            return 200 to tagsBody
+            return 200 to (tagsBodyOverride ?: tagsBody)
         }
         if (path.endsWith("/v1/models") && method == "GET") {
             // Null body == this stub is not an OpenAI-shaped gateway, which is the 404 the

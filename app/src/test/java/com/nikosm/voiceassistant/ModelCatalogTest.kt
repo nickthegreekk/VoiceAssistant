@@ -130,6 +130,42 @@ class ModelCatalogTest {
     }
 
     @Test
+    fun `a 2xx body that is not a model list is told apart from an empty server`() {
+        // The distinction the catalog fetch turns on: an Ollama with nothing installed really
+        // answers {"models":[]}, while these three are a success status carrying something that
+        // is not a model list at all. Reported together, the last three wiped a good list.
+        assertEquals(
+            "an empty models array is a real, empty answer",
+            emptyList<ModelEntry>(),
+            parseTagsModelsOrNull("""{"models":[]}""")
+        )
+        listOf(
+            "an html login page" to "<html><body>Sign in to continue</body></html>",
+            "truncated json" to """{"models":[{"name":"half:1b",""",
+            "an object with no models key" to "{}",
+            "a models key of the wrong type" to """{"models":"nope"}""",
+            "a bare array" to "[1,2,3]",
+            "empty body" to ""
+        ).forEach { (what, body) ->
+            assertNull("$what must not read as an empty server", parseTagsModelsOrNull(body))
+        }
+    }
+
+    @Test
+    fun `a models array whose entries are all unreadable is not an empty server`() {
+        // The array is there and non-empty, so "no models" would be a claim about the
+        // server that its own response contradicts.
+        assertNull(parseTagsModelsOrNull("""{"models":["a","b"]}"""))
+        assertNull(parseTagsModelsOrNull("""{"models":[{"size":1},{"details":{}}]}"""))
+        assertNull(parseOpenAiModelsOrNull("""{"data":[{"object":"model"}]}"""))
+        // ...while a mix still yields the readable sibling.
+        assertEquals(
+            listOf("kept:1b"),
+            parseTagsModelsOrNull("""{"models":[{"size":1},{"name":"kept:1b"}]}""")?.map { it.name }
+        )
+    }
+
+    @Test
     fun `a model without a name is skipped but its siblings survive`() {
         val body = """{"models":[{"size":1},{"name":"kept:1b","size":2}]}"""
         assertEquals(listOf("kept:1b"), parseTagsModels(body).map { it.name })

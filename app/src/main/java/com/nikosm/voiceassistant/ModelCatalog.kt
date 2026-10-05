@@ -131,6 +131,10 @@ internal typealias ModelShowStates = Map<String, ModelShowState>
  *   models, so it replaces the list instead of being retried or marked stale.
  * - [HttpError] the server answered, with a non-2xx status. More specific than
  *   [Unreachable] whenever it applies, and it carries the status for display.
+ * - [Malformed] a 2xx whose body is not a model list at all: a login portal serving HTML,
+ *   a proxy returning half a document, a `{}` with no `models` key. A success status is
+ *   not evidence of a good answer, so this must never be read as "this server has no
+ *   models" — doing so replaced a good list with an empty one.
  * - [Unreachable] no HTTP response at all: connection refused, DNS failure, timeout.
  */
 internal sealed interface ModelListOutcome {
@@ -138,6 +142,8 @@ internal sealed interface ModelListOutcome {
     data class Listed(val entries: List<ModelEntry>) : ModelListOutcome
 
     data class HttpError(val status: Int) : ModelListOutcome
+
+    data object Malformed : ModelListOutcome
 
     data object Unreachable : ModelListOutcome
 }
@@ -147,6 +153,14 @@ internal const val UNREACHABLE_REASON: String = "Couldn't reach this server"
 
 /** The wording for [ModelListOutcome.HttpError]; the status is always part of it. */
 internal fun httpErrorReason(status: Int): String = "This server returned an error (HTTP $status)"
+
+/**
+ * The wording for [ModelListOutcome.Malformed].
+ *
+ * Deliberately does NOT say "no models": the server never said that, and the whole point
+ * of this case is that a 200 here is not an answer about models.
+ */
+internal const val UNEXPECTED_RESPONSE_REASON: String = "Unexpected response from this server"
 
 /**
  * One server's catalog state in the service-level cache, keyed by server URL.
@@ -201,17 +215,22 @@ internal fun ollamaBaseUrl(raw: String): String {
 }
 
 /**
- * Parses `GET /api/tags`.
+ * Parses `GET /api/tags`, or null when this body is not a model list at all.
  *
- * A model with no `capabilities` key yields `capabilities = null`; a model whose key is
- * an empty array yields `emptySet()`. Malformed input yields an empty list rather than
- * throwing — a broken server must not take the screen down.
+ * The null is the whole point. [parseTagsModels] answers null and empty list identically,
+ * and the catalog fetch needs them apart: an Ollama with nothing installed really does answer
+ * `{"models":[]}`, while a login portal answering `200 <html>`, a proxy returning half a
+ * document, or a `{}` with no `models` key are all failures wearing a success status. Told
+ * apart, the first empties the picker truthfully and the others keep the last good list.
+ *
+ * So: no parseable JSON object, no `models` ARRAY, or an array of entries none of which can
+ * be read, are null. A present-but-empty `models` array is a real, empty answer.
  */
-internal fun parseTagsModels(body: String): List<ModelEntry> {
+internal fun parseTagsModelsOrNull(body: String): List<ModelEntry>? {
     val root = runCatching { lenientJson.parseToJsonElement(body).jsonObject }.getOrNull()
-        ?: return emptyList()
-    val models = root["models"] as? JsonArray ?: return emptyList()
-    return models.mapNotNull { element ->
+        ?: return null
+    val models = root["models"] as? JsonArray ?: return null
+    val parsed = models.mapNotNull { element ->
         val obj = element as? JsonObject ?: return@mapNotNull null
         val name = (obj["name"] ?: obj["model"])?.jsonPrimitive?.contentOrNull
             ?: return@mapNotNull null
@@ -228,18 +247,32 @@ internal fun parseTagsModels(body: String): List<ModelEntry> {
             sizeBytes = obj.long("size")
         )
     }
+    // An array that exists but yields nothing readable is not an empty server; it is a list
+    // we failed to understand, and treating it as "no models" would delete a good list.
+    if (parsed.isEmpty() && models.isNotEmpty()) return null
+    return parsed
 }
 
 /**
- * Parses `GET /v1/models`, the OpenAI-compatible endpoint `fetchModels` already tries
- * second. It carries an id and nothing else, so every optional field stays null — in
- * particular `capabilities` stays null (NOT reported), never empty.
+ * Parses `GET /api/tags`.
+ *
+ * A model with no `capabilities` key yields `capabilities = null`; a model whose key is
+ * an empty array yields `emptySet()`. Malformed input yields an empty list rather than
+ * throwing — a broken server must not take the screen down. Callers that need to tell
+ * "empty server" from "not a model list" must use [parseTagsModelsOrNull].
  */
-internal fun parseOpenAiModels(body: String): List<ModelEntry> {
+internal fun parseTagsModels(body: String): List<ModelEntry> =
+    parseTagsModelsOrNull(body) ?: emptyList()
+
+/**
+ * Parses `GET /v1/models`, or null when this body is not a model list — see
+ * [parseTagsModelsOrNull] for why that distinction is needed.
+ */
+internal fun parseOpenAiModelsOrNull(body: String): List<ModelEntry>? {
     val root = runCatching { lenientJson.parseToJsonElement(body).jsonObject }.getOrNull()
-        ?: return emptyList()
-    val data = root["data"] as? JsonArray ?: return emptyList()
-    return data.mapNotNull { element ->
+        ?: return null
+    val data = root["data"] as? JsonArray ?: return null
+    val parsed = data.mapNotNull { element ->
         val obj = element as? JsonObject ?: return@mapNotNull null
         val id = obj["id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
         ModelEntry(
@@ -247,7 +280,17 @@ internal fun parseOpenAiModels(body: String): List<ModelEntry> {
             contextLength = null, sizeBytes = null
         )
     }
+    if (parsed.isEmpty() && data.isNotEmpty()) return null
+    return parsed
 }
+
+/**
+ * Parses `GET /v1/models`, the OpenAI-compatible endpoint `fetchModels` already tries
+ * second. It carries an id and nothing else, so every optional field stays null — in
+ * particular `capabilities` stays null (NOT reported), never empty.
+ */
+internal fun parseOpenAiModels(body: String): List<ModelEntry> =
+    parseOpenAiModelsOrNull(body) ?: emptyList()
 
 /**
  * Parses `POST /api/show` for one model.
