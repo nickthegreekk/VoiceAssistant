@@ -411,6 +411,45 @@ class ModelCatalogScreenLogicTest {
         )
         assertEquals("Unreachable — reported by this server", UNREACHABLE_LABEL)
     }
+
+    @Test
+    fun `the two failure reasons are distinct and the http one names its status`() {
+        // The whole point of the split: these two must never read alike, because they send
+        // the user to different places. The old single empty-list path produced one string
+        // for both, and it was "server reported no models".
+        assertEquals("Couldn't reach this server", UNREACHABLE_REASON)
+        assertEquals("This server returned an error (HTTP 500)", httpErrorReason(500))
+        assertEquals("This server returned an error (HTTP 503)", httpErrorReason(503))
+        assertTrue(
+            "an HTTP failure must not read as an unreachable server",
+            !httpErrorReason(500).contains("reach")
+        )
+        assertTrue(
+            "and neither reason may claim the server reported no models",
+            !UNREACHABLE_REASON.contains("no models") && !httpErrorReason(500).contains("no models")
+        )
+    }
+
+    @Test
+    fun `an empty successful list is distinct from either failure`() {
+        // Listed(emptyList()) is its own case, not a failure dressed up as one: it is what
+        // a server with nothing installed returns, and it must read as the truth. The
+        // `when` is the point -- the three outcomes are distinct branches, so nothing that
+        // classifies an outcome has to guess.
+        fun classify(outcome: ModelListOutcome): String = when (outcome) {
+            is ModelListOutcome.Listed ->
+                if (outcome.entries.isEmpty()) "listed-empty" else "listed-models"
+            is ModelListOutcome.HttpError -> "http-${outcome.status}"
+            ModelListOutcome.Unreachable -> "unreachable"
+        }
+        assertEquals("listed-empty", classify(ModelListOutcome.Listed(emptyList())))
+        assertEquals(
+            "listed-models",
+            classify(ModelListOutcome.Listed(listOf(ModelEntry("a", null, "8B", "Q4", 8192L, 1L))))
+        )
+        assertEquals("http-500", classify(ModelListOutcome.HttpError(500)))
+        assertEquals("unreachable", classify(ModelListOutcome.Unreachable))
+    }
     @Test
     fun `a stand-in claims nothing the server did not report`() {
         val rows = selectPickerModels(emptyList(), SERVER, emptySet(), false, "gone:1b")

@@ -320,10 +320,20 @@ class ModelsScreenComposeTest {
 
     @Test
     fun aStaleListIsKeptWhileRefreshing() {
-        state = state.asLoaded(stale = true, degradedReason = "server reported no models")
+        // A real reason string, as the service now produces one: an empty answer is not a
+        // failure, so the only reasons that can reach this note are the two real failures.
+        state = state.asLoaded(stale = true, degradedReason = UNREACHABLE_REASON)
         render()
-        assertShown("Showing the last models loaded (server reported no models).")
+        assertShown("Showing the last models loaded (Couldn't reach this server).")
         // ...and the list itself is still there, not blanked.
+        assertShown("gemma4:26b")
+    }
+
+    @Test
+    fun aStaleListCarriesTheHttpStatusThatBrokeIt() {
+        state = state.asLoaded(stale = true, degradedReason = httpErrorReason(503))
+        render()
+        assertShown("Showing the last models loaded (This server returned an error (HTTP 503)).")
         assertShown("gemma4:26b")
     }
 

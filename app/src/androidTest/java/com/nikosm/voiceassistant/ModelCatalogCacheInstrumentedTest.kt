@@ -286,4 +286,144 @@ class ModelCatalogCacheInstrumentedTest {
             )
         }
     }
+
+    // -------------------------------------------------- what "no models" actually means
+    //
+    // These pin the distinction the old code threw away: it mapped a refused connection,
+    // an HTTP error and a genuinely empty server onto one empty list, then reported all
+    // three as "server reported no models" -- so a user whose Ollama was down was told
+    // their server simply had nothing installed on it.
+
+    /** A port nothing is listening on: the transport-failure case. */
+    private fun closedPortUrl(): String {
+        val s = java.net.ServerSocket(0, 1, java.net.InetAddress.getByName("127.0.0.1"))
+        val port = s.localPort
+        s.close()
+        return "http://127.0.0.1:$port"
+    }
+
+    @Test
+    fun `a_closed_port_is_unreachable_not_an_empty_server`() {
+        bind()
+        val url = closedPortUrl()
+        service.fetchModelCatalog(ServerConfig("ClosedPort", url))
+        val state = awaitCatalog(url) { it is ModelCatalogState.Failed }
+        assertTrue("expected Failed, was $state", state is ModelCatalogState.Failed)
+        assertEquals(
+            "a refused connection must not be reported as an empty server",
+            UNREACHABLE_REASON,
+            (state as ModelCatalogState.Failed).reason
+        )
+    }
+
+    @Test
+    fun `an_http_500_is_reported_with_its_status_and_not_as_unreachable`() {
+        bind()
+        ModelCatalogStub(tagsJson, failTags = true).use { stub ->
+            service.fetchModelCatalog(serverFor(stub))
+            val state = awaitCatalog(stub.url) { it is ModelCatalogState.Failed }
+            assertTrue("expected Failed, was $state", state is ModelCatalogState.Failed)
+            val reason = (state as ModelCatalogState.Failed).reason
+            assertEquals("the status must survive into the wording", httpErrorReason(500), reason)
+            assertTrue("the wording must name the status: $reason", reason.contains("500"))
+            assertTrue(
+                "a server that answers 500 is not unreachable: $reason",
+                !reason.contains("reach")
+            )
+            assertTrue(
+                "the fallback endpoint must still be consulted",
+                stub.requests.any { it.path.endsWith("/v1/models") }
+            )
+        }
+    }
+
+    @Test
+    fun `a_successful_empty_list_is_an_answer_and_is_never_stale`() {
+        bind()
+        ModelCatalogStub("""{"models":[]}""").use { stub ->
+            service.fetchModelCatalog(serverFor(stub))
+            val state = awaitCatalog(stub.url) { it is ModelCatalogState.Loaded }
+            assertTrue("expected Loaded, was $state", state is ModelCatalogState.Loaded)
+            state as ModelCatalogState.Loaded
+            assertTrue("an empty answer is not stale: it is the truth", !state.stale)
+            assertNull("and it carries no failure reason", state.degradedReason)
+            assertTrue("the list really is empty", state.entries.isEmpty())
+            // The evidence for treating a successful empty /api/tags as final: the second
+            // endpoint is never consulted to overrule a first one that plainly worked.
+            assertTrue(
+                "a 200 on /api/tags must not fall through to /v1/models",
+                stub.requests.none { it.path.endsWith("/v1/models") }
+            )
+        }
+    }
+
+    @Test
+    fun `an_empty_answer_over_a_good_list_empties_it_rather_than_going_stale`() {
+        bind()
+        ModelCatalogStub(tagsJson, mapOf("good:8b" to goodShow)).use { stub ->
+            val server = serverFor(stub)
+            service.fetchModelCatalog(server)
+            val first = awaitCatalog(stub.url) {
+                it is ModelCatalogState.Loaded && it.showStates.values.none { s -> s == ModelShowState.PENDING }
+            } as ModelCatalogState.Loaded
+            assertEquals(2, first.entries.size)
+
+            // Same server, same URL, now reporting zero models: the user deleted them all.
+            stub.emptyTagsNow = true
+            service.fetchModelCatalog(server, force = true)
+
+            val after = awaitCatalog(stub.url) { it is ModelCatalogState.Loaded && it.entries.isEmpty() }
+            after as ModelCatalogState.Loaded
+            assertTrue(
+                "an empty answer is not a failure, so it must not be marked stale",
+                !after.stale
+            )
+            assertNull("nor carry a failure reason", after.degradedReason)
+        }
+    }
+
+    @Test
+    fun `the_v1_models_fallback_still_serves_a_gateway_with_no_api_tags`() {
+        bind()
+        // 404 on /api/tags, models on /v1/models: the case the fallback exists for.
+        ModelCatalogStub(
+            tagsJson,
+            tagsStatus = 404,
+            openAiModelsBody = """{"data":[{"id":"gw-model-a"},{"id":"gw-model-b"}]}"""
+        ).use { stub ->
+            service.fetchModelCatalog(serverFor(stub))
+            val state = awaitCatalog(stub.url) {
+                it is ModelCatalogState.Loaded && it.showStates.values.none { s -> s == ModelShowState.PENDING }
+            }
+            assertTrue("expected Loaded, was $state", state is ModelCatalogState.Loaded)
+            assertEquals(
+                listOf("gw-model-a", "gw-model-b"),
+                (state as ModelCatalogState.Loaded).entries.map { it.name }
+            )
+        }
+    }
+
+    @Test
+    fun `a_failed_refresh_after_a_gateway_load_keeps_the_list_and_says_unreachable`() {
+        bind()
+        ModelCatalogStub(
+            tagsJson,
+            tagsStatus = 404,
+            openAiModelsBody = """{"data":[{"id":"gw-model-a"}]}"""
+        ).use { stub ->
+            val server = serverFor(stub)
+            service.fetchModelCatalog(server)
+            awaitCatalog(stub.url) {
+                it is ModelCatalogState.Loaded && it.showStates.values.none { s -> s == ModelShowState.PENDING }
+            }
+            // Now BOTH endpoints fail at transport level: the stub stops answering.
+            stub.close()
+            service.fetchModelCatalog(server, force = true)
+
+            val after = awaitCatalog(stub.url) { it is ModelCatalogState.Loaded && it.stale }
+            after as ModelCatalogState.Loaded
+            assertEquals(UNREACHABLE_REASON, after.degradedReason)
+            assertEquals(listOf("gw-model-a"), after.entries.map { it.name })
+        }
+    }
 }

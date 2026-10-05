@@ -118,6 +118,37 @@ internal enum class ModelShowState { PENDING, RESOLVED, FAILED }
 internal typealias ModelShowStates = Map<String, ModelShowState>
 
 /**
+ * What one attempt to LIST a server's models actually produced.
+ *
+ * These are kept apart because they are different events and the user needs to be told
+ * which one happened. They used to collapse into one empty list, so a server that was
+ * refusing connections and a server that genuinely had nothing installed both reported
+ * "server reported no models" — telling someone whose Ollama was down that their server
+ * simply had no models on it.
+ *
+ * - [Listed] the server answered. [Listed.entries] may be EMPTY, and an empty [Listed] is
+ *   a real answer, not a failure: 200 with `{"models":[]}` means this server has no
+ *   models, so it replaces the list instead of being retried or marked stale.
+ * - [HttpError] the server answered, with a non-2xx status. More specific than
+ *   [Unreachable] whenever it applies, and it carries the status for display.
+ * - [Unreachable] no HTTP response at all: connection refused, DNS failure, timeout.
+ */
+internal sealed interface ModelListOutcome {
+
+    data class Listed(val entries: List<ModelEntry>) : ModelListOutcome
+
+    data class HttpError(val status: Int) : ModelListOutcome
+
+    data object Unreachable : ModelListOutcome
+}
+
+/** The wording for [ModelListOutcome.Unreachable], shown in a stale note or a failure. */
+internal const val UNREACHABLE_REASON: String = "Couldn't reach this server"
+
+/** The wording for [ModelListOutcome.HttpError]; the status is always part of it. */
+internal fun httpErrorReason(status: Int): String = "This server returned an error (HTTP $status)"
+
+/**
  * One server's catalog state in the service-level cache, keyed by server URL.
  *
  * The states the models screen has to render, and nothing else:

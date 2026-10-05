@@ -2694,27 +2694,60 @@ private fun authorized(builder: Request.Builder, target: ServerConfig): Request.
     return builder
 }
 
-/** `GET {base}/api/tags`, then `GET {base}/v1/models` - same endpoint order as fetchModels. */
-private fun AssistantService.requestModels(base: String, target: ServerConfig): List<ModelEntry> {
-    val tags = runCatching {
-        modelShowClient.newCall(
-            authorized(Request.Builder().url("$base/api/tags").get(), target).build()
-        ).execute().use { response ->
-            if (response.isSuccessful) parseTagsModels(response.body.string()) else emptyList()
-        }
-    }.getOrDefault(emptyList())
-    if (tags.isNotEmpty()) return tags
+/**
+ * `GET {base}/api/tags`, then `GET {base}/v1/models` — same endpoint order as `fetchModels`.
+ *
+ * The two attempts are reported apart ([ModelListOutcome]) because they fail differently and
+ * the reason reaches the user.
+ *
+ * **A SUCCESSFUL `/api/tags` is the answer, including an empty one.** `200` with
+ * `{"models":[]}` means this server has no models, so it is returned as `Listed(emptyList())`
+ * and `/v1/models` is NOT consulted: that endpoint exists for a gateway that speaks only the
+ * OpenAI shape, and such a gateway does not have `/api/tags` at all — it answers 404, which
+ * is the case that falls through. Falling through on an empty success would mean letting a
+ * second, differently-shaped endpoint overrule a first one that plainly worked.
+ *
+ * **Unreachable only when BOTH fail at transport level.** If either produced an HTTP
+ * response, that response is the more specific answer and its status is reported: a server
+ * answering 500 is not an unreachable server, and saying "couldn't reach" about one sends
+ * the user looking at the network instead of at the error the server actually reported.
+ */
+private fun AssistantService.requestModels(base: String, target: ServerConfig): ModelListOutcome {
+    val tags = requestModelList("$base/api/tags", target) { parseTagsModels(it) }
+    if (tags is ModelListOutcome.Listed) return tags
 
     // The /v1/models shape carries ids only, so those come back with capabilities NULL
     // (not reported) rather than empty, and /api/show then fills them in.
-    return runCatching {
-        modelShowClient.newCall(
-            authorized(Request.Builder().url("$base/v1/models").get(), target).build()
-        ).execute().use { response ->
-            if (response.isSuccessful) parseOpenAiModels(response.body.string()) else emptyList()
-        }
-    }.getOrDefault(emptyList())
+    val openAi = requestModelList("$base/v1/models", target) { parseOpenAiModels(it) }
+    if (openAi is ModelListOutcome.Listed) return openAi
+
+    // Both attempts failed. Prefer a status we were actually given over "unreachable".
+    return when {
+        tags is ModelListOutcome.HttpError -> tags
+        openAi is ModelListOutcome.HttpError -> openAi
+        else -> ModelListOutcome.Unreachable
+    }
 }
+
+/**
+ * One endpoint attempt, classified.
+ *
+ * A non-2xx status keeps its code; anything that threw (refused, DNS, timeout) is
+ * [ModelListOutcome.Unreachable]. The catch-all matches what the previous `runCatching`
+ * over this call swallowed, minus the swallowing: it used to turn both into an empty list.
+ */
+private fun AssistantService.requestModelList(
+    url: String,
+    target: ServerConfig,
+    parse: (String) -> List<ModelEntry>
+): ModelListOutcome = runCatching {
+    modelShowClient.newCall(
+        authorized(Request.Builder().url(url).get(), target).build()
+    ).execute().use { response ->
+        if (response.isSuccessful) ModelListOutcome.Listed(parse(response.body.string()))
+        else ModelListOutcome.HttpError(response.code)
+    }
+}.getOrElse { ModelListOutcome.Unreachable }
 
 /** `POST {base}/api/show` for one model. Returns null on any failure. */
 private fun AssistantService.requestShow(
@@ -2756,11 +2789,14 @@ internal fun AssistantService.fetchModelCatalog(target: ServerConfig, force: Boo
     serviceScope.launch(Dispatchers.IO) {
         try {
             val base = ollamaBaseUrl(target.url)
-            val listed = runCatching { requestModels(base, target) }.getOrElse { error ->
-                // Keep the last good list if there is one; report Failed only cold.
-                val reason = error.message ?: "Could not connect to server"
+
+            // Only a FAILURE keeps the last good list, marked stale. A successful empty
+            // answer is not a failure and replaces the list, so un-installing or deleting
+            // the last model on a server empties the picker rather than leaving models that
+            // are no longer there on screen with a "couldn't reach" note attached.
+            suspend fun failFetch(reason: String) {
                 val previous = modelCatalogFor(url)
-                if (generation != generationFor(url)) return@launch
+                if (generation != generationFor(url)) return
                 updateCatalog(url) {
                     if (previous is ModelCatalogState.Loaded) {
                         previous.copy(stale = true, degradedReason = reason)
@@ -2768,20 +2804,31 @@ internal fun AssistantService.fetchModelCatalog(target: ServerConfig, force: Boo
                         ModelCatalogState.Failed(reason, System.currentTimeMillis())
                     }
                 }
-                return@launch
+            }
+
+            val listed: List<ModelEntry> = when (val outcome = requestModels(base, target)) {
+                is ModelListOutcome.Listed -> outcome.entries
+                is ModelListOutcome.HttpError -> {
+                    failFetch(httpErrorReason(outcome.status))
+                    return@launch
+                }
+                ModelListOutcome.Unreachable -> {
+                    failFetch(UNREACHABLE_REASON)
+                    return@launch
+                }
             }
 
             if (listed.isEmpty()) {
-                // Same guard as the failure branch above: a server deleted or re-pointed
-                // while this fetch was on the wire must not be resurrected here.
+                // The server answered, and its answer was "no models". Same generation
+                // guard as the failure branch: a server deleted or re-pointed while this
+                // fetch was on the wire must not be resurrected here.
                 if (generation != generationFor(url)) return@launch
-                val previous = modelCatalogFor(url)
                 updateCatalog(url) {
-                    if (previous is ModelCatalogState.Loaded) {
-                        previous.copy(stale = true, degradedReason = "server reported no models")
-                    } else {
-                        ModelCatalogState.Failed("No models reported", System.currentTimeMillis())
-                    }
+                    ModelCatalogState.Loaded(
+                        emptyList(),
+                        emptyMap(),
+                        System.currentTimeMillis()
+                    )
                 }
                 return@launch
             }
