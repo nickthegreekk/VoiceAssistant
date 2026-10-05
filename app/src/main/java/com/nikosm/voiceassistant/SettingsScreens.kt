@@ -553,9 +553,40 @@ private fun SettingsCategoryScreen(
     }
 }
 
+/**
+ * Which row of the Personas list a shortcut target names.
+ *
+ * The header icon does not carry an index — it carries a NAME, because that is all the chat
+ * header has (it knows `currentPersona`, not the list's ordering, which the user can change
+ * with the reordering arrows). Persona names are unique, so the name resolves to exactly one
+ * row.
+ *
+ * Pure and separate from the composable for the same reason as the row-summary helpers: what
+ * the shortcut does is unit-testable without a device, without a composition and without a
+ * service. Returns null when the persona is gone — the caller then does NOTHING at all rather
+ * than opening the list or, worse, landing the editor on whichever persona shifted into that
+ * slot.
+ */
+internal fun personaEditorIndex(personas: List<Persona>, name: String?): Int? {
+    if (name.isNullOrBlank()) return null
+    val index = personas.indexOfFirst { it.name == name }
+    return if (index >= 0) index else null
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsDialog(service: AssistantService?, onDismiss: () -> Unit, personaColor: Color) {
+fun SettingsDialog(
+    service: AssistantService?,
+    onDismiss: () -> Unit,
+    personaColor: Color,
+    /**
+     * Name of the persona whose editor should already be open when this dialog appears — the
+     * chat header's persona icon. One-shot: consumed via [onOpenPersonaEditorConsumed] and
+     * never re-read, so a rotation cannot reopen the editor behind the user's back.
+     */
+    openPersonaEditorFor: String? = null,
+    onOpenPersonaEditorConsumed: () -> Unit = {}
+) {
     val context = LocalContext.current
     // Drill-down navigation, one level above the Personas/Rooms list-then-editor pattern:
     // which category screen is showing, null = the flat top-level list.
@@ -564,6 +595,15 @@ fun SettingsDialog(service: AssistantService?, onDismiss: () -> Unit, personaCol
     // SettingsManager) so Settings always opens on the flat list, and no navigation state
     // is persisted across app restarts.
     var activeCategory by remember { mutableStateOf<SettingsCategory?>(null) }
+    // "This dialog was opened by the chat header's persona icon", as the persona it targets.
+    // `rememberSaveable` because it is the one piece of this dialog's state that a rotation
+    // MUST keep: it is what makes leaving return to the chat rather than strand the user on the
+    // flat Settings list. The OPEN REQUEST itself stays ephemeral — see [editRequestDone].
+    var shortcutPersonaName by rememberSaveable { mutableStateOf<String?>(null) }
+    // One-shot latch for the open request. Plain `remember` on purpose, for the same reason the
+    // request is: it must not outlive the composition, or a rotation re-opens the editor.
+    var editRequestDone by remember { mutableStateOf(false) }
+    var pendingEditIndex by remember { mutableStateOf<Int?>(null) }
 
     var totalCost by remember { mutableDoubleStateOf(0.0) }
     var serverBases by remember { mutableStateOf<List<ServerConfig>>(emptyList()) }
@@ -594,6 +634,45 @@ fun SettingsDialog(service: AssistantService?, onDismiss: () -> Unit, personaCol
     if (service == null) return
 
     val svc = service
+
+    val personasCategory = remember { SETTINGS_CATEGORIES.first { it.title == "Personas" } }
+
+    // The header-icon shortcut, resolved ONCE.
+    //
+    // Keyed on the persona list as well as the request, because `personas` starts empty and
+    // fills from the service's flow a frame or two later — resolving on the first composition
+    // would find nothing and (had the latch not been there) silently do nothing forever.
+    // The `editRequestDone` latch is what makes "keyed on personas" safe: the second pass
+    // cannot re-resolve.
+    //
+    // A persona that has been deleted consumes the request and does nothing, exactly like
+    // `applySpontaneousDeepLink`'s rule: leaving it pending would ambush the NEXT tap.
+    LaunchedEffect(openPersonaEditorFor, personas, editRequestDone) {
+        if (editRequestDone) return@LaunchedEffect
+        val name = openPersonaEditorFor ?: return@LaunchedEffect
+        if (personas.isEmpty()) return@LaunchedEffect
+        val index = personaEditorIndex(personas, name)
+        editRequestDone = true
+        onOpenPersonaEditorConsumed()
+        if (index == null) return@LaunchedEffect
+        activeCategory = personasCategory
+        shortcutPersonaName = name
+        pendingEditIndex = index
+    }
+
+    // `activeCategory` is deliberately ephemeral (see above), so after a rotation it is a
+    // fresh null. A dialog opened by the shortcut restores its category from the SAVED flag
+    // instead — that is what keeps the editor on screen across the rotation instead of
+    // dropping the user back on the flat list. A dialog opened the normal way has no flag and
+    // behaves exactly as it always has.
+    val shownCategory = activeCategory ?: shortcutPersonaName?.let { personasCategory }
+
+    // Leaving a shortcut-opened dialog returns to the CHAT: the user came from the chat to
+    // edit one persona, so "back" means back, not "here is the whole Settings list". Opened
+    // the normal way, back still pops one level and then closes, exactly as today.
+    val leaveCategory: () -> Unit = {
+        if (shortcutPersonaName != null) onDismiss() else activeCategory = null
+    }
 
     // Every category row's second line, computed from what is already collected above. This is
     // derived state, so it is computed once per change and passed down: the list composable
@@ -627,17 +706,18 @@ fun SettingsDialog(service: AssistantService?, onDismiss: () -> Unit, personaCol
             tonalElevation = 6.dp
         ) {
             Column(modifier = Modifier.fillMaxSize()) {
-                // System back/gesture: pop the category screen before dismissing Settings,
+                // System back/gesture: leave the category screen before dismissing Settings,
                 // matching the header arrow. On the flat list it falls through to the
-                // dialog's own onDismissRequest.
-                BackHandler(enabled = activeCategory != null) {
-                    activeCategory = null
+                // dialog's own onDismissRequest. A shortcut-opened dialog leaves all the way
+                // out (see leaveCategory), so back from the editor lands on the chat.
+                BackHandler(enabled = shownCategory != null) {
+                    leaveCategory()
                 }
 
                 // Crossfade between the flat list and the active category screen. Replaces
                 // the accordion's expand/shrink: exactly one of the two is ever on screen.
                 AnimatedContent(
-                    targetState = activeCategory,
+                    targetState = shownCategory,
                     transitionSpec = {
                         fadeIn(animationSpec = tween(220)) togetherWith
                             fadeOut(animationSpec = tween(150))
@@ -655,7 +735,7 @@ fun SettingsDialog(service: AssistantService?, onDismiss: () -> Unit, personaCol
                         SettingsCategoryScreen(
                             category = category,
                             accentColor = personaColor,
-                            onBack = { activeCategory = null }
+                            onBack = leaveCategory
                         ) {
                             when (category.title) {
                                 "General" -> GeneralSettings(
@@ -677,7 +757,9 @@ fun SettingsDialog(service: AssistantService?, onDismiss: () -> Unit, personaCol
                                 "Personas" -> PersonaSettings(
                                     service = svc,
                                     personas = personas,
-                                    currentThemeColor = personaColor
+                                    currentThemeColor = personaColor,
+                                    initialEditingIndex = pendingEditIndex,
+                                    onInitialEditConsumed = { pendingEditIndex = null }
                                 )
                                 "Rooms" -> RoomSettings(
                                     service = svc,

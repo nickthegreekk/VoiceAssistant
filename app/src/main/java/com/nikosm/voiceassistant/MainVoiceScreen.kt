@@ -40,6 +40,8 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -327,6 +329,12 @@ fun MainScreen(
     // Activity recreation (e.g. device rotation), which discards plain remember state.
     var showSettings by rememberSaveable { mutableStateOf(false) }
     var showPersonaPicker by rememberSaveable { mutableStateOf(false) }
+    // Persona editor shortcut (the header icon). Plain `remember`, deliberately NOT
+    // rememberSaveable: this request must be consumed exactly once, and any state that
+    // SURVIVES recreation would re-fire it — the same shape as the deep-link bug fixed in
+    // MainActivity.handleSpontaneousDeepLink, where a retained intent re-ran a switchPersona
+    // on every rotation. Dropping it on recreation is the whole point.
+    var editPersonaRequest by remember { mutableStateOf<String?>(null) }
     var textInput by rememberSaveable { mutableStateOf("") }
     var textModeOpen by rememberSaveable { mutableStateOf(false) }
     var revealedChars by remember { mutableIntStateOf(Int.MAX_VALUE) }
@@ -795,6 +803,15 @@ fun MainScreen(
                         currentPersona = currentPersona,
                         sessionUsage = sessionUsage,
                         onPersonaClick = { showPersonaPicker = true },
+                        // Only UI state: it names the persona, opens Settings on the
+                        // Personas category with that editor, and writes nothing. No
+                        // switchPersona, no stopEverything, nothing touched in an in-flight
+                        // turn. Both halves matter — `SettingsDialog` only composes while
+                        // `showSettings` is true, so the request alone would be inert.
+                        onPersonaIconClick = {
+                            editPersonaRequest = currentPersona.name
+                            showSettings = true
+                        },
                         onEarpieceToggle = { service?.toggleEarpieceMode() },
                         isEarpieceMode = isEarpieceMode,
                         onSettingsClick = { showSettings = true },
@@ -1082,7 +1099,9 @@ fun MainScreen(
         SettingsDialog(
             service = service,
             onDismiss = { showSettings = false },
-            personaColor = personaColor
+            personaColor = personaColor,
+            openPersonaEditorFor = editPersonaRequest,
+            onOpenPersonaEditorConsumed = { editPersonaRequest = null }
         )
     }
 
@@ -1176,11 +1195,41 @@ fun RoomHeader(
     }
 }
 
+/**
+ * ONE place the chat header's tappable regions are wired.
+ *
+ * The icon ("Edit <persona>") and the name ("Switch persona") are deliberately different
+ * actions, but they are built from this single helper so that changing HOW a header target
+ * reacts — a long-press, a double-tap, a gesture modifier — is one edit here rather than a
+ * hunt through the header's markup. Both targets also get their semantics from here, which is
+ * why the accessibility label cannot drift away from the click handler.
+ *
+ * `mergeDescendants` means TalkBack announces one label for the whole region instead of
+ * walking the logo's glyph and both text lines separately.
+ */
+@Composable
+private fun HeaderTarget(
+    contentDescription: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    content: @Composable () -> Unit
+) {
+    Box(
+        modifier = modifier
+            .clip(MaterialTheme.shapes.small)
+            .clickable(onClick = onClick)
+            .semantics(mergeDescendants = true) { this.contentDescription = contentDescription },
+        contentAlignment = Alignment.Center
+    ) { content() }
+}
+
 @Composable
 fun Header(
     currentPersona: Persona,
     sessionUsage: UsageInfo,
     onPersonaClick: () -> Unit,
+    /** Persona icon: open the editor for [currentPersona] (Settings > Personas > that row). */
+    onPersonaIconClick: () -> Unit,
     onEarpieceToggle: () -> Unit,
     isEarpieceMode: Boolean,
     onSettingsClick: () -> Unit,
@@ -1210,40 +1259,54 @@ fun Header(
             }
             
             Row(
-                modifier = Modifier
-                    .weight(1f)
-                    .clip(MaterialTheme.shapes.small)
-                    .clickable { onPersonaClick() }
-                    .padding(8.dp), 
+                modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                ProviderLogo(icon = currentPersona.providerIcon, isCloud = currentPersona.isCloud, imagePath = currentPersona.iconImageUri)
+                // Persona icon: opens the EDITOR for the current persona.
+                HeaderTarget(
+                    contentDescription = "Edit ${currentPersona.name}",
+                    onClick = onPersonaIconClick,
+                    modifier = Modifier.size(48.dp)
+                ) {
+                    ProviderLogo(icon = currentPersona.providerIcon, isCloud = currentPersona.isCloud, imagePath = currentPersona.iconImageUri)
+                }
+                // 12dp of dead space between the two targets, so a tap aimed at the icon
+                // can never land on the name (and vice versa).
                 Spacer(modifier = Modifier.width(12.dp))
-                Column(modifier = Modifier.fillMaxWidth()) {
-                    val displayName = if (currentPersona.name.length > 20) currentPersona.name.take(20) + "..." else currentPersona.name
-                    
-                    Box(modifier = Modifier.fillMaxWidth().graphicsLayer(compositingStrategy = CompositingStrategy.Offscreen).drawWithContent {
-                        drawContent()
-                        if (currentPersona.name.length > 15) {
-                            drawRect(
-                                brush = Brush.horizontalGradient(
-                                    0.7f to Color.Black,
-                                    1.0f to Color.Transparent
-                                ),
-                                blendMode = BlendMode.DstIn
+                // Persona name + usage line: still opens the switcher, exactly as it did when the
+                // whole row was one target. Routed through the SAME HeaderTarget as the icon
+                // so the gesture handling lives in one place and the two labels cannot drift.
+                HeaderTarget(
+                    contentDescription = "Switch persona",
+                    onClick = onPersonaClick,
+                    modifier = Modifier.weight(1f).padding(vertical = 8.dp)
+                ) {
+                    Column(modifier = Modifier.fillMaxWidth()) {
+                        val displayName = if (currentPersona.name.length > 20) currentPersona.name.take(20) + "..." else currentPersona.name
+
+                        Box(modifier = Modifier.fillMaxWidth().graphicsLayer(compositingStrategy = CompositingStrategy.Offscreen).drawWithContent {
+                            drawContent()
+                            if (currentPersona.name.length > 15) {
+                                drawRect(
+                                    brush = Brush.horizontalGradient(
+                                        0.7f to Color.Black,
+                                        1.0f to Color.Transparent
+                                    ),
+                                    blendMode = BlendMode.DstIn
+                                )
+                            }
+                        }) {
+                            Text(
+                                text = displayName,
+                                color = MaterialTheme.colorScheme.onBackground,
+                                style = MaterialTheme.typography.titleMedium,
+                                maxLines = 1,
+                                softWrap = false
                             )
                         }
-                    }) {
-                        Text(
-                            text = displayName, 
-                            color = MaterialTheme.colorScheme.onBackground, 
-                            style = MaterialTheme.typography.titleMedium, 
-                            maxLines = 1,
-                            softWrap = false
-                        )
+
+                        Text(text = if (currentPersona.isCloud) "session: $${String.format(java.util.Locale.US, "%.5f", sessionUsage.cost)}" else "free / local", color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.4f), style = MaterialTheme.typography.labelSmall)
                     }
-                    
-                    Text(text = if (currentPersona.isCloud) "session: $${String.format(java.util.Locale.US, "%.5f", sessionUsage.cost)}" else "free / local", color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.4f), style = MaterialTheme.typography.labelSmall)
                 }
             }
 

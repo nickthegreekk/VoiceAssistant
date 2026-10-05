@@ -228,9 +228,26 @@ private val EditingPersonaSaver = Saver<Pair<Int, Persona>?, String>(
 fun PersonaSettings(
     service: AssistantService,
     personas: List<Persona>,
-    currentThemeColor: Color
+    currentThemeColor: Color,
+    /**
+     * Row to open the editor on as soon as this screen appears — the chat header's persona icon.
+     * One-shot: reported through [onInitialEditConsumed] and never re-applied, so a rotation
+     * cannot re-open an editor the user has already closed.
+     */
+    initialEditingIndex: Int? = null,
+    onInitialEditConsumed: () -> Unit = {}
 ) {
     var editingPersona by rememberSaveable(stateSaver = EditingPersonaSaver) { mutableStateOf<Pair<Int, Persona>?>(null) }
+
+    // The shortcut's open request, honoured exactly once. Keyed on the request itself, so the
+    // normal path (null, and null again after the latch has fired) does nothing at all.
+    LaunchedEffect(initialEditingIndex) {
+        val index = initialEditingIndex ?: return@LaunchedEffect
+        // Consume BEFORE acting: an index the list no longer has must still be spent, or it
+        // would re-fire on the next recomposition and ambush whatever opened next.
+        onInitialEditConsumed()
+        personas.getOrNull(index)?.let { editingPersona = index to it }
+    }
 
     // One-shot staleness guard: when the Activity is recreated while the editor is open,
     // the restored snapshot can be older than the service's copy (edits are debounced
