@@ -18,3 +18,4 @@ build/
 app/.cxx/
 .idea/
 app/release/baselineProfiles/
+.kotlin/
