@@ -5,7 +5,6 @@ import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.os.IBinder
-import android.os.SystemClock
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.rememberScrollState
@@ -18,6 +17,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import kotlinx.coroutines.runBlocking
@@ -109,19 +109,6 @@ class PersonaEditorEmptyListsInstrumentedTest {
         }
         connection?.let { runCatching { context.unbindService(it) } }
         connection = null
-    }
-
-    private fun storedPersona(): Persona? =
-        service.settingsManager.getPersonas().orEmpty().firstOrNull { it.name == PERSONA }
-
-    private fun awaitStoredPersona(predicate: (Persona) -> Boolean): Persona? {
-        val deadline = SystemClock.uptimeMillis() + 15_000
-        while (SystemClock.uptimeMillis() < deadline) {
-            val p = storedPersona()
-            if (p != null && predicate(p)) return p
-            Thread.sleep(25)
-        }
-        return storedPersona()
     }
 
     private fun installFixtures() {

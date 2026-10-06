@@ -12,6 +12,11 @@
 #
 # Exits nonzero if ANY run failed, so a caller cannot mistake a partial pass for a clean one.
 #
+# Every run starts from a FRESH INSTALL: the app and its test APK are uninstalled before gradle
+# reinstalls them, so a device that held real user data (a restored backup's servers, personas
+# and favorites) cannot make clean-device tests fail for reasons unrelated to the code under
+# test. Each run says so in its own output.
+#
 # Env:
 #   ANDROID_SERIAL   required when more than one device is attached; exported to gradle so
 #                    every run targets the same device
@@ -36,6 +41,10 @@ cd "$REPO_ROOT"
 
 GRADLEW="$REPO_ROOT/gradlew"
 RESULTS_REL="app/build/outputs/androidTest-results/connected/debug"
+# Packages uninstalled before every run so each one starts from a clean install regardless of
+# what the device held (see the fresh-install step in the run loop). Overridable for forks.
+APP_PACKAGE="${APP_PACKAGE:-com.nikosm.voiceassistant}"
+TEST_PACKAGE="${TEST_PACKAGE:-com.nikosm.voiceassistant.test}"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 OUT="${DEVICE_SUITE_OUT:-${TMPDIR:-/tmp}/device-suite-$STAMP}"
 mkdir -p "$OUT"
@@ -132,6 +141,15 @@ for ((run = 1; run <= N; run++)); do
     LOG="$OUT/run${run}.log"
     echo ""
     echo "===== run $run/$N -> $LOG ====="
+
+    # FRESH INSTALL every run: uninstall the app AND its test APK first, so whatever the device
+    # held — real user data, a previous run's leftovers — cannot decide whether this run passes.
+    # Gradle reinstalls both from scratch in the task below. (Learned the hard way: a device
+    # restored from a backup, carrying its own Ollama servers and favorites, made clean-device
+    # tests fail for reasons that had nothing to do with the code under test.)
+    echo "fresh install: uninstalling $APP_PACKAGE and $TEST_PACKAGE"
+    adb -s "$ANDROID_SERIAL" uninstall "$APP_PACKAGE" >/dev/null 2>&1 || true
+    adb -s "$ANDROID_SERIAL" uninstall "$TEST_PACKAGE" >/dev/null 2>&1 || true
 
     # --rerun-tasks: without it gradle calls a second identical run UP-TO-DATE and never
     # executes the tests, which would make N runs into one run and N-1 no-ops.
