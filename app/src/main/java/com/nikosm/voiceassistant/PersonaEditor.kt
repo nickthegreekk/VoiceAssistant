@@ -80,6 +80,7 @@ import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -125,6 +126,133 @@ fun SettingsSection(content: @Composable () -> Unit) {
             content()
         }
     }
+}
+
+/**
+ * Everything the persona editor's TWO commit paths read from its local field state.
+ *
+ * Bundling it is what lets ONE function build the Persona for both the debounced auto-save and
+ * the dispose-time flush, so they can never diverge. They used to: the debounce derived
+ * `isCloud`/`providerIcon` from the model string while the flush preserved the values of the
+ * persona as it was opened, so closing the editor inside the 500ms debounce window persisted
+ * the stale pair.
+ */
+internal data class PersonaEditorFields(
+    val name: String,
+    val model: String,
+    val systemPrompt: String,
+    val themeColor: Color,
+    val iconImageUri: String?,
+    val backgroundImageUri: String?,
+    val temperature: Float,
+    val topP: Float,
+    val topK: Int,
+    val repeatPenalty: Float,
+    val maxTokens: Int,
+    val numCtx: Int,
+    val enableThinking: Boolean,
+    val webSearchEnabled: Boolean,
+    val ragEnabled: Boolean,
+    val allowGatewayFailover: Boolean,
+    val isTranslator: Boolean,
+    val isImageGenerator: Boolean,
+    val targetLanguage: String,
+    val voiceMode: VoiceMode,
+    val voiceEngine: String,
+    val kokoroVoice: String,
+    val backendUrl: String,
+    val enabledSkillIds: List<String>,
+    val spontaneousEnabled: Boolean,
+    val spontaneousInstruction: String,
+    val spontaneousGapMinutes: Int,
+    val spontaneousWindowStartMin: Int?,
+    val spontaneousWindowEndMin: Int?
+)
+
+/** The `[Provider]` prefix of [model], or "" — the same parse every router performs. */
+internal fun personaEditorProviderName(model: String): String {
+    val m = model.trim()
+    return if (m.startsWith("[") && m.contains("] ")) m.substring(1, m.indexOf("]")) else ""
+}
+
+/** Is [providerName] one of the configured cloud providers (fixed list OR custom)? */
+internal fun personaEditorIsCloudModel(providerName: String, cloudProviderNames: Set<String>): Boolean =
+    providerName.isNotEmpty() && providerName in cloudProviderNames
+
+/** The provider badge glyph, derived from the model. */
+internal fun personaEditorProviderIcon(
+    trimmedModel: String,
+    providerName: String,
+    customProviderNames: Set<String>,
+    isTranslator: Boolean,
+    isImageGenerator: Boolean
+): String = when {
+    trimmedModel.startsWith("[Anthropic]") -> "A"
+    trimmedModel.startsWith("[OpenAI]") -> "O"
+    trimmedModel.startsWith("[Google]") -> "G"
+    trimmedModel.startsWith("[DeepSeek]") -> "D"
+    trimmedModel.startsWith("[Cline]") -> "CL"
+    providerName in customProviderNames || trimmedModel.startsWith("[OpenAI-Compatible]") -> "C"
+    trimmedModel.contains("Translator") || isTranslator -> "T"
+    isImageGenerator -> "IMG"
+    else -> "O" // Local Ollama
+}
+
+/**
+ * THE builder both commit paths use: [fields] applied to [this], with [isCloudModel] and
+ * `spontaneousAllowed` decided by the caller from the LIVE server lists.
+ *
+ * `providerColor` and `spontaneousMaxPerDay` are deliberately NOT set — the editor has no
+ * control for them, and a `copy` that does not mention a field preserves the persona's value.
+ * Pure, so the local→cloud commit is unit-tested without a device.
+ */
+internal fun Persona.withEditorFields(
+    fields: PersonaEditorFields,
+    isCloudModel: Boolean,
+    customProviderNames: Set<String>,
+    spontaneousAllowed: Boolean
+): Persona {
+    val trimmedModel = fields.model.trim()
+    return copy(
+        name = fields.name,
+        model = trimmedModel,
+        systemPrompt = fields.systemPrompt,
+        themeColor = fields.themeColor,
+        isCloud = isCloudModel,
+        providerIcon = personaEditorProviderIcon(
+            trimmedModel = trimmedModel,
+            providerName = personaEditorProviderName(trimmedModel),
+            customProviderNames = customProviderNames,
+            isTranslator = fields.isTranslator,
+            isImageGenerator = fields.isImageGenerator
+        ),
+        iconImageUri = fields.iconImageUri,
+        backgroundImageUri = fields.backgroundImageUri,
+        temperature = fields.temperature,
+        topP = fields.topP,
+        topK = fields.topK,
+        repeatPenalty = fields.repeatPenalty,
+        maxTokens = fields.maxTokens,
+        numCtx = fields.numCtx,
+        enableThinking = fields.enableThinking,
+        webSearchEnabled = fields.webSearchEnabled,
+        ragEnabled = fields.ragEnabled,
+        allowGatewayFailover = fields.allowGatewayFailover,
+        isTranslator = fields.isTranslator,
+        isImageGenerator = fields.isImageGenerator,
+        targetLanguage = fields.targetLanguage,
+        voiceMode = fields.voiceMode,
+        voiceEngine = fields.voiceEngine,
+        kokoroVoice = fields.kokoroVoice,
+        backendUrl = fields.backendUrl,
+        enabledSkillIds = fields.enabledSkillIds,
+        // Gated (plan location #2): never commit an opt-in the persona could not honour.
+        spontaneousEnabled = fields.spontaneousEnabled && spontaneousAllowed,
+        spontaneousInstruction = fields.spontaneousInstruction,
+        spontaneousGapMinutes = fields.spontaneousGapMinutes,
+        spontaneousWindowStartMin = fields.spontaneousWindowStartMin,
+        spontaneousWindowEndMin = fields.spontaneousWindowEndMin
+    )
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -252,43 +380,10 @@ fun PersonaEditor(
     )
     val spontaneousAllowed = spontaneousEligibility is RoomEligibility.Eligible
 
-    val disposeSnapshotRef = remember { mutableStateOf(persona) }
-    disposeSnapshotRef.value = persona.copy(
-        name = name,
-        model = model.trim(),
-        systemPrompt = systemPrompt,
-        themeColor = themeColor,
-        isCloud = persona.isCloud,
-        providerIcon = persona.providerIcon,
-        iconImageUri = iconImageUri,
-        backgroundImageUri = backgroundImageUri,
-        temperature = temp,
-        topP = topP,
-        topK = topK,
-        repeatPenalty = repeatPenalty,
-        maxTokens = maxTokens,
-        numCtx = numCtx,
-        enableThinking = enableThinking,
-        webSearchEnabled = webSearchEnabled,
-        ragEnabled = ragEnabled,
-        allowGatewayFailover = allowGatewayFailover,
-        isTranslator = isTranslator,
-        isImageGenerator = isImageGenerator,
-        targetLanguage = targetLanguage,
-        voiceMode = voiceMode,
-        voiceEngine = voiceEngine,
-        kokoroVoice = kokoroVoice,
-        backendUrl = backendUrl,
-        enabledSkillIds = enabledSkillIds,
-        // Gated (plan location #2): never commit an opt-in the persona could not honour.
-        // The remaining spontaneous fields ride through unchanged, so a half-finished setup
-        // is preserved rather than cleared if the model is switched back.
-        spontaneousEnabled = spontaneousEnabled && spontaneousAllowed,
-        spontaneousInstruction = spontaneousInstruction,
-        spontaneousGapMinutes = spontaneousGapMinutes,
-        spontaneousWindowStartMin = spontaneousWindowStartMin,
-        spontaneousWindowEndMin = spontaneousWindowEndMin
-    )
+    // `disposeSnapshotRef` — the close-time flush's snapshot — is built further down, once the
+    // cloud-provider lists it derives `isCloud`/`providerIcon` from have been collected. Both
+    // commit paths go through the ONE shared builder (`withEditorFields`), so they cannot
+    // diverge; see the `editorFields` block below.
 
     val initialConnection = remember(persona) {
         if (model.startsWith("[") && model.contains("] ")) {
@@ -322,7 +417,65 @@ fun PersonaEditor(
         launch { service.modelCatalog.collect { modelCatalog = it } }
         launch { service.serverStatus.collect { serverStatusMap = it } }
     }
-    
+
+    // ---- The ONE builder both commit paths use --------------------------------
+    // Everything the editor owns, in a form the single pure function `Persona.withEditorFields`
+    // turns into a Persona. The debounced auto-save and the dispose-time flush BOTH call it, so
+    // the two can no longer disagree — they used to: the debounce derived `isCloud`/`providerIcon`
+    // from the model while the flush preserved the opened persona's values, so closing the editor
+    // inside the 500ms debounce window persisted the STALE pair.
+    val editorFields = PersonaEditorFields(
+        name = name,
+        model = model,
+        systemPrompt = systemPrompt,
+        themeColor = themeColor,
+        iconImageUri = iconImageUri,
+        backgroundImageUri = backgroundImageUri,
+        temperature = temp,
+        topP = topP,
+        topK = topK,
+        repeatPenalty = repeatPenalty,
+        maxTokens = maxTokens,
+        numCtx = numCtx,
+        enableThinking = enableThinking,
+        webSearchEnabled = webSearchEnabled,
+        ragEnabled = ragEnabled,
+        allowGatewayFailover = allowGatewayFailover,
+        isTranslator = isTranslator,
+        isImageGenerator = isImageGenerator,
+        targetLanguage = targetLanguage,
+        voiceMode = voiceMode,
+        voiceEngine = voiceEngine,
+        kokoroVoice = kokoroVoice,
+        backendUrl = backendUrl,
+        enabledSkillIds = enabledSkillIds,
+        spontaneousEnabled = spontaneousEnabled,
+        spontaneousInstruction = spontaneousInstruction,
+        spontaneousGapMinutes = spontaneousGapMinutes,
+        spontaneousWindowStartMin = spontaneousWindowStartMin,
+        spontaneousWindowEndMin = spontaneousWindowEndMin
+    )
+    val editorProviderName = personaEditorProviderName(model)
+    // Cloud inputs come from the SERVICE's already-loaded state, exactly like the spontaneous
+    // gate above — NEVER from this editor's collected copies alone, which start EMPTY and fill in
+    // a frame or two later. Deriving from an empty first frame would commit `isCloud=false` and
+    // the local badge for a cloud persona the instant the editor closed inside that window. The
+    // collected lists are unioned in only so a list EDITED while the editor is open re-derives.
+    val customProviderNames = remember(service, customCloudApis) {
+        service.customCloudApis.value.mapTo(mutableSetOf()) { it.name }
+            .apply { addAll(customCloudApis.map { it.name }) }
+    }
+    val editorIsCloudModel = personaEditorIsCloudModel(
+        providerName = editorProviderName,
+        cloudProviderNames = service.cloudProviderNames() +
+            cloudApis.map { it.name } +
+            customCloudApis.map { it.name }
+    )
+
+    val disposeSnapshotRef = remember { mutableStateOf(persona) }
+    disposeSnapshotRef.value =
+        persona.withEditorFields(editorFields, editorIsCloudModel, customProviderNames, spontaneousAllowed)
+
     val allConnections = remember(cloudApis, customCloudApis, ollamaBases) {
         val list = mutableListOf<String>()
         list.addAll(cloudApis.map { it.name })
@@ -342,60 +495,14 @@ fun PersonaEditor(
     }
 
     // Auto-save logic
-    LaunchedEffect(name, model, systemPrompt, themeColor, temp, topP, topK, repeatPenalty, maxTokens, numCtx, enableThinking, webSearchEnabled, ragEnabled, allowGatewayFailover, isTranslator, isImageGenerator, targetLanguage, voiceMode, voiceEngine, kokoroVoice, backendUrl, enabledSkillIds, iconImageUri, backgroundImageUri, spontaneousEnabled, spontaneousInstruction, spontaneousGapMinutes, spontaneousWindowStartMin, spontaneousWindowEndMin) {
+    LaunchedEffect(name, model, systemPrompt, themeColor, temp, topP, topK, repeatPenalty, maxTokens, numCtx, enableThinking, webSearchEnabled, ragEnabled, allowGatewayFailover, isTranslator, isImageGenerator, targetLanguage, voiceMode, voiceEngine, kokoroVoice, backendUrl, enabledSkillIds, iconImageUri, backgroundImageUri, spontaneousEnabled, spontaneousInstruction, spontaneousGapMinutes, spontaneousWindowStartMin, spontaneousWindowEndMin, editorIsCloudModel, customProviderNames, spontaneousAllowed) {
         // Skip initial evaluation if needed? No, persona change will trigger it once, which is fine.
         delay(500)
-        val trimmedModel = model.trim()
-        val providerName = if (trimmedModel.startsWith("[") && trimmedModel.contains("] ")) {
-            trimmedModel.substring(1, trimmedModel.indexOf("]"))
-        } else ""
-        
-        val isCloudModel = cloudApis.any { it.name == providerName } || 
-                           customCloudApis.any { it.name == providerName }
-
-        val updated = persona.copy(
-            name = name, 
-            model = trimmedModel, 
-            systemPrompt = systemPrompt, 
-            themeColor = themeColor,
-            isCloud = isCloudModel,
-            providerIcon = when {
-                trimmedModel.startsWith("[Anthropic]") -> "A"
-                trimmedModel.startsWith("[OpenAI]") -> "O"
-                trimmedModel.startsWith("[Google]") -> "G"
-                trimmedModel.startsWith("[DeepSeek]") -> "D"
-                trimmedModel.startsWith("[Cline]") -> "CL"
-                customCloudApis.any { it.name == providerName } || trimmedModel.startsWith("[OpenAI-Compatible]") -> "C"
-                trimmedModel.contains("Translator") || isTranslator -> "T"
-                isImageGenerator -> "IMG"
-                else -> "O" // Local Ollama
-            },
-            temperature = temp,
-            topP = topP,
-            topK = topK,
-            repeatPenalty = repeatPenalty,
-            maxTokens = maxTokens,
-            numCtx = numCtx,
-            enableThinking = enableThinking,
-            webSearchEnabled = webSearchEnabled,
-            ragEnabled = ragEnabled,
-            allowGatewayFailover = allowGatewayFailover,
-            isTranslator = isTranslator,
-            isImageGenerator = isImageGenerator,
-            targetLanguage = targetLanguage,
-            voiceMode = voiceMode,
-            voiceEngine = voiceEngine,
-            kokoroVoice = kokoroVoice,
-            backendUrl = backendUrl,
-            iconImageUri = iconImageUri,
-            backgroundImageUri = backgroundImageUri,
-            enabledSkillIds = enabledSkillIds,
-            // Same gate as the dispose snapshot above — see the shared eligibility note.
-            spontaneousEnabled = spontaneousEnabled && spontaneousAllowed,
-            spontaneousInstruction = spontaneousInstruction,
-            spontaneousGapMinutes = spontaneousGapMinutes,
-            spontaneousWindowStartMin = spontaneousWindowStartMin,
-            spontaneousWindowEndMin = spontaneousWindowEndMin
+        // The SAME single builder as the dispose flush (see `editorFields` above), so a save from
+        // the debounce and one from the close-time flush can never produce different personas for
+        // the same field state — the divergence that used to persist a stale `isCloud`/`providerIcon`.
+        val updated = persona.withEditorFields(
+            editorFields, editorIsCloudModel, customProviderNames, spontaneousAllowed
         )
 
         if (updated != persona) {
@@ -668,7 +775,7 @@ fun PersonaEditor(
                 onValueChange = { model = it },
                 label = { Text("Model") },
                 placeholder = { Text("Choose a model") },
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.fillMaxWidth().testTag("personaModelField"),
                 trailingIcon = {
                     IconButton(onClick = { modelExpanded = true }) {
                         Icon(Icons.Default.ArrowDropDown, null)
