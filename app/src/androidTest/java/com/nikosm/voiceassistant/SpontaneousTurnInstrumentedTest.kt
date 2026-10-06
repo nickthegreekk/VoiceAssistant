@@ -51,6 +51,8 @@ class SpontaneousTurnInstrumentedTest {
         const val MODEL = "probe-model"
         const val LOCAL_MODEL = "[$LOCAL_SERVER] $MODEL"
         const val MAKE_MESSAGE = "Hello from the other side."
+        /** A reply that echoes the `[date time]` stamp the app showed it — must be stored clean. */
+        const val STAMPED_ECHO = "[Oct 3, 2026 12:29] " + MAKE_MESSAGE
         const val PROBE_USER = "nikos"
         const val PROBE_PASSWORD = "s3cret"
     }
@@ -141,7 +143,7 @@ class SpontaneousTurnInstrumentedTest {
     // ------------------------------------------------------------------ the turn
 
     @Test fun `turn lands in that personas history only`() {
-        OllamaSuggestionStub(chatContent = MAKE_MESSAGE).use { stub ->
+        OllamaSuggestionStub(chatContent = STAMPED_ECHO).use { stub ->
             registerProbeServer(stub.url)
             mainSync { service.addPersona(localPersona("ProbeTurn", enabled = true)) }
             val historyBefore = roster("ProbeTurn")
@@ -158,7 +160,12 @@ class SpontaneousTurnInstrumentedTest {
             )
             val landed = historyAfter.last()
             assertEquals("assistant", landed.role)
-            assertEquals(MAKE_MESSAGE, landed.text)
+            // The stub echoed a `[date time]` stamp; the stored text must be the bare reply — the
+            // same strip the streaming chat path applies before storing.
+            assertEquals(
+                "the model's echoed stamp must not reach the user's chat: [${landed.text}]",
+                MAKE_MESSAGE, landed.text
+            )
             assertFalse(landed.isError)
             // Nothing touched the single-chat author's transcript from underneath it.
             assertEquals(sharedBefore, service._messages.value)
@@ -210,6 +217,12 @@ class SpontaneousTurnInstrumentedTest {
                     localPersona("ProbeFramed", enabled = true)
                         .copy(spontaneousInstruction = "only ever ask about the garden")
                 )
+                // Seed one already-stamped turn, so the wire payload can be checked for the
+                // per-message `[date time]` prefixes a Direct-Ollama persona gets.
+                service.settingsManager.savePersonaMessages(
+                    "ProbeFramed",
+                    listOf(ChatMessage("user", "we talked about the trip", timestamp = 1_700_000_000_000L))
+                )
             }
 
             runBlocking { service.runSpontaneousTurn(stored("ProbeFramed")) }
@@ -217,6 +230,14 @@ class SpontaneousTurnInstrumentedTest {
             val body = JSONObject(stub.requests.single().body)
             assertFalse("there is no bubble to stream into", body.getBoolean("stream"))
             val messages = body.getJSONArray("messages")
+            // History rides as an ordinary message, stamped exactly like the streaming path.
+            val historyTurn = messages.getJSONObject(1)
+            assertEquals("user", historyTurn.getString("role"))
+            assertTrue(
+                "spontaneous history must carry a [date time] prefix: " +
+                    historyTurn.getString("content"),
+                historyTurn.getString("content").endsWith("] we talked about the trip")
+            )
             // First is the system prompt — the persona's own governs, framing rides after.
             val system = messages.getJSONObject(0)
             assertEquals("system", system.getString("role"))

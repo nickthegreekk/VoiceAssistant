@@ -136,4 +136,29 @@ class SpontaneousTurnTest {
             parseSpontaneousReply("I was silent for a while, sorry — how are you?")
         )
     }
+
+    // ------------------------------------------------------------------ stamping
+
+    @Test fun `a model reply that echoes the stamp is stored clean`() {
+        assertEquals("hello there", spontaneousReplyText("[Oct 3, 2026 14:32] hello there"))
+        // A stamp wrapping the sentinel must not hide silence.
+        assertNull(spontaneousReplyText("[Oct 3, 2026 14:32] $SPONTANEOUS_SILENCE_SENTINEL"))
+    }
+
+    @Test fun `an unstamped reply is untouched`() {
+        assertEquals("Hey — how did the trip go?", spontaneousReplyText("Hey — how did the trip go?"))
+    }
+
+    @Test fun `history is stamped only when the persona stamps`() {
+        val history = listOf(
+            ChatMessage("user", "hi", timestamp = 1_700_000_000_000L),
+            ChatMessage("assistant", "hello", timestamp = 1_700_000_060_000L)
+        )
+        // A non-stamping persona gets byte-identical history.
+        assertEquals(history, spontaneousHistoryForRequest(history, stampsHistory = false))
+        // A stamping persona gets each turn prefixed with its `[date time]`.
+        val stamped = spontaneousHistoryForRequest(history, stampsHistory = true)
+        assertTrue(stamped[0].text.endsWith("] hi"))
+        assertTrue(stamped[1].text.endsWith("] hello"))
+    }
 }

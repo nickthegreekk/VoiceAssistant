@@ -124,6 +124,32 @@ internal fun parseSpontaneousReply(raw: String): String? {
     return trimmed
 }
 
+/**
+ * The text a spontaneous turn STORES, or null for silence.
+ *
+ * Runs the model's raw reply through the SAME leading-stamp strip the streaming chat path
+ * applies before storing ([stripLeadingModelStamps]), so a local model shown `[Oct 3, 2026
+ * 14:32]` history — which will sometimes echo the format — cannot put a stamp into the user's
+ * chat, and a stamp wrapping the silence sentinel cannot hide it from [parseSpontaneousReply].
+ * Pure, so the contract is unit-tested without a device.
+ */
+internal fun spontaneousReplyText(raw: String): String? =
+    parseSpontaneousReply(stripLeadingModelStamps(raw))
+
+/**
+ * The request history a spontaneous Direct-Ollama turn sends.
+ *
+ * Applies the SAME per-message `[date time]` stamps the streaming builder injects, gated on the
+ * SAME rule ([Persona.stampsHistoryWithTimestamps]) — the caller passes the verdict in so this
+ * stays pure and JVM-testable. Applied BEFORE the budget pass at the call site, so the prefixes
+ * are counted by the same token estimate as the text they prefix.
+ */
+internal fun spontaneousHistoryForRequest(
+    history: List<ChatMessage>,
+    stampsHistory: Boolean
+): List<ChatMessage> =
+    if (stampsHistory) history.map { it.copy(text = it.historyTextWithTimestamp()) } else history
+
 // ---------------------------------------------------------------- the sink
 
 /**
@@ -267,7 +293,14 @@ private suspend fun AssistantService.performSpontaneousOllamaCall(
         systemPrompt = systemPrompt,
         modelText = turnInstruction
     )
-    val trimmed = budgetedHistory(history, budget)
+    // The SAME per-message `[date time]` stamps the streaming Direct-Ollama builder injects,
+    // gated on the same rule and applied BEFORE the budget pass so each prefix is counted by
+    // the token estimate exactly like the words it prefixes (rather than added after trimming).
+    val stampedHistory = spontaneousHistoryForRequest(
+        history = history,
+        stampsHistory = persona.stampsHistoryWithTimestamps(ollamaServerNames(), cloudProviderNames())
+    )
+    val trimmed = budgetedHistory(stampedHistory, budget)
 
     val messages = JSONArray()
         .put(JSONObject().put("role", "system").put("content", systemPrompt))
@@ -578,7 +611,7 @@ internal suspend fun AssistantService.runSpontaneousTurn(persona: Persona): Spon
     )
     val responseTimeMs = System.currentTimeMillis() - startedAt
 
-    val text = parseSpontaneousReply(content)
+    val text = spontaneousReplyText(content)
     if (text == null) {
         android.util.Log.i("AssistantService", "Spontaneous turn for '${persona.name}' chose silence — nothing sent")
         return SpontaneousTurnOutcome.Silent
