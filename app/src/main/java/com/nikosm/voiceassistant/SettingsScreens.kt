@@ -608,6 +608,12 @@ fun SettingsDialog(
     var totalCost by remember { mutableDoubleStateOf(0.0) }
     var serverBases by remember { mutableStateOf<List<ServerConfig>>(emptyList()) }
     var ollamaBases by remember { mutableStateOf<List<ServerConfig>>(emptyList()) }
+    // Whether the Ollama list has been DELIVERED at least once. An empty list means two very
+    // different things — "the collector has not run yet" (the first frame of every composition,
+    // and what a `rememberSaveable` models-screen selection sees after a rotation) versus "the
+    // list loaded and really is empty" (the last server was deleted) — and only the second may
+    // clear the selection. Tracking delivery is what tells them apart.
+    var ollamaLoaded by remember { mutableStateOf(false) }
     var imageGenBases by remember { mutableStateOf<List<ServerConfig>>(emptyList()) }
     var cloudApis by remember { mutableStateOf<List<CloudApiSetting>>(emptyList()) }
     // The Cloud row's summary counts custom providers too, and they live in their own flow.
@@ -621,7 +627,7 @@ fun SettingsDialog(
         if (service != null) {
             launch { service.totalCost.collect { totalCost = it } }
             launch { service.serverBases.collect { serverBases = it } }
-            launch { service.ollamaBaseUrls.collect { ollamaBases = it } }
+            launch { service.ollamaBaseUrls.collect { ollamaBases = it; ollamaLoaded = true } }
             launch { service.imageGenBases.collect { imageGenBases = it } }
             launch { service.cloudApis.collect { cloudApis = it } }
             launch { service.customCloudApis.collect { customCloudApis = it } }
@@ -747,6 +753,7 @@ fun SettingsDialog(
                                     service = svc,
                                     gateways = serverBases,
                                     ollama = ollamaBases,
+                                    ollamaLoaded = ollamaLoaded,
                                     imageGen = imageGenBases,
                                     currentThemeColor = personaColor
                                 )
@@ -1193,6 +1200,33 @@ Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
 }
 
 /**
+ * The models-screen selection after the Ollama list has (or has not) loaded.
+ *
+ * `modelsServerUrl` is `rememberSaveable`, so it survives an Activity recreation, while the
+ * collected list it is validated against starts EMPTY on the first frame of every composition.
+ * An empty list therefore means two very different things, and [loaded] is what tells them
+ * apart:
+ *
+ *  - `loaded == false` — the collector has not delivered yet: KEEP the selection (clearing here
+ *    would strand a restored selection before the list had any chance to arrive).
+ *  - `loaded == true` — the list really is the server list: KEEP the URL if it is present, and
+ *    CLEAR it if it is absent — including when the list is now EMPTY because the LAST server was
+ *    deleted.
+ *
+ * Pure, so the rotation case (not loaded, restored URL), the delete case (loaded, URL gone) and
+ * the delete-the-last-server case (loaded, empty) are all unit-tested without a device.
+ */
+internal fun modelsServerUrlAfterListLoad(
+    selectedUrl: String?,
+    servers: List<ServerConfig>,
+    loaded: Boolean
+): String? {
+    if (selectedUrl == null) return null
+    if (!loaded) return selectedUrl
+    return if (servers.any { it.url == selectedUrl }) selectedUrl else null
+}
+
+/**
  * Servers category screen: local gateways, Ollama, image-gen endpoints, external
  * services and the knowledge base. Body of [SettingsCategoryScreen]; every list keeps
  * its add/edit/reorder/delete/test-connection behaviour unchanged.
@@ -1202,6 +1236,8 @@ fun ServerSettings(
     service: AssistantService,
     gateways: List<ServerConfig>,
     ollama: List<ServerConfig>,
+    /** Whether [ollama] has been delivered at least once — see `modelsServerUrlAfterListLoad`. */
+    ollamaLoaded: Boolean,
     imageGen: List<ServerConfig>,
     currentThemeColor: Color
 ) {
@@ -1230,9 +1266,17 @@ Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
     // Detail view for one server's models. Plain Column, no nested scroller: the category
     // page's LazyColumn remains the single scroller, exactly as RoomEditor/SkillEditor do.
     val modelsServer = modelsServerUrl?.let { url -> ollama.firstOrNull { it.url == url } }
+    // A server deleted (or re-pointed) elsewhere must not strand the selection. This MUST live
+    // OUTSIDE the `modelsServer != null` branch below — inside it the `modelsServer == null`
+    // test can never be true, which made the guard dead code (kotlinc: "Condition is always
+    // 'false'"). The decision is the pure `modelsServerUrlAfterListLoad`, which uses `ollamaLoaded`
+    // to tell "the collector has not delivered yet" (keep the selection) from "the list loaded
+    // and no longer has this URL" (clear it — including when the LAST server was deleted).
+    LaunchedEffect(ollama, modelsServerUrl, ollamaLoaded) {
+        val settled = modelsServerUrlAfterListLoad(modelsServerUrl, ollama, ollamaLoaded)
+        if (settled != modelsServerUrl) modelsServerUrl = settled
+    }
     if (modelsServer != null) {
-        // A server deleted elsewhere must not strand the selection.
-        LaunchedEffect(ollama) { if (modelsServerUrl != null && modelsServer == null) modelsServerUrl = null }
         // KNOWN ISSUE (found by screenshot review on a real device, deliberately NOT fixed):
         // Servers -> Models draws TWO back arrows, stacked vertically in the header. One is
         // SettingsCategoryScreen's own ("Back to Settings", SettingsScreens.kt:525); the other

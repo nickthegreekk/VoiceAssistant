@@ -400,9 +400,11 @@ internal fun Persona.requestRouting(
  * buy nothing the model was not already told by the system prompt's "Current date and time",
  * and gateway-routed personas send no history at all.
  *
- * The caller is [AssistantService]'s Direct-Ollama request builder, which is the ONLY place
- * this is consulted — so the exclusion is structural (cloud requests never reach the code),
- * not a flag some future caller could forget to pass.
+ * Consulted by BOTH Direct-Ollama request builders: the streaming chat builder
+ * (`performDirectOllamaChat`) and the spontaneous-message builder
+ * (`performSpontaneousOllamaCall`). Cloud and gateway requests never reach either call site,
+ * so the exclusion stays structural (a builder that never asks cannot get them by forgetting a
+ * flag). It is deliberately NOT read by the cloud/gateway builders.
  */
 internal fun Persona.stampsHistoryWithTimestamps(
     ollamaServerNames: Set<String>,
@@ -654,11 +656,14 @@ fun eligibleRoomMembers(
  *    "unresolved" state is deliberately NOT repaired here — re-pointing the selection is a
  *    policy decision with history side effects, and it belongs to a caller that can perform
  *    the switch, not to a pure lookup.
- *  - A duplicated name resolves to the FIRST occurrence, deterministically. Nothing enforces
- *    persona name uniqueness (unlike server configs, which reject duplicate URLs), so this is
- *    a real possibility; making both consumers agree on the first match is still strictly
- *    better than the previous arrangement, where the UI could display one same-named persona
- *    while the service resolved to another.
+ *  - A duplicated name resolves to the FIRST occurrence, deterministically. Persona name
+ *    uniqueness IS enforced at every write path (`addPersona`/`updatePersona` and
+ *    `SettingsManager.savePersonas`, the personas chokepoint — see the KDoc on `addPersona`),
+ *    so a duplicate should not be reachable through the app; it can still be restored from a
+ *    pre-guard backup that `importBackup` is deliberately not allowed to edit. Making both
+ *    consumers agree on the first match is still strictly better than the previous
+ *    arrangement, where the UI could display one same-named persona while the service
+ *    resolved to another.
  */
 internal fun resolveCurrentPersona(name: String?, personas: List<Persona>): Persona? =
     name?.let { wanted -> personas.find { it.name == wanted } }

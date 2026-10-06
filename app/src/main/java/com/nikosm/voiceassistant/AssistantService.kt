@@ -1462,11 +1462,14 @@ class AssistantService : Service() {
         // this, a server added and a persona saved inside one debounce window would be
         // judged against the previous ollama list and could silently strip a valid flag.
         settingsManager.saveOllamaBases(_ollamaBaseUrls.value)
-        settingsManager.savePersonas(_personas.value)
-        // The shared skill library rides the same debounced save. Written before the persona
+        // The shared skill library rides the same debounced save. Written BEFORE the persona
         // list so a restore/export snapshot always sees skills and referencing personas in a
         // consistent pair, never a persona pointing at a library entry that wasn't saved.
+        // (A crash between the two writes would otherwise leave personas referencing skill
+        // ids that were never persisted, which the load path would drop as dangling and
+        // silently disable every enabled skill.)
         settingsManager.saveSkills(_skills.value)
+        settingsManager.savePersonas(_personas.value)
         // Rooms ride the same debounced save as everything else. Their transcripts do
         // NOT — those go through saveRoomHistory(), because a room transcript belongs to
         // no persona and must never be keyed off the single-chat owner bookkeeping below.

@@ -284,8 +284,12 @@ class SkillUiInstrumentedTest {
     @Test
     fun capturePersonaSkillSection() {
         installFixtures()
+        // Read the fixture persona BEFORE setContent: reading a StateFlow's `.value` inside a
+        // composition does not observe it (lint's StateFlowValueCalledInComposition), and this
+        // capture needs a fixed snapshot anyway.
+        val bob = service.personas.value.first { it.name == "Bob" }
         composeRule.setContent {
-            PersonaEditorScreen(open = true, snapshot = service.personas.value.first { it.name == "Bob" })
+            PersonaEditorScreen(open = true, snapshot = bob)
         }
         composeRule.waitForIdle()
 
