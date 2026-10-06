@@ -612,7 +612,7 @@ class SettingsManager(context: Context) {
     private fun newArtworkFile(slot: String): File {
         val dir = artworkDir().apply { mkdirs() }
         val unique = java.util.UUID.randomUUID().toString().take(8)
-        return File(dir, "${slot}_${System.currentTimeMillis()}_$unique.jpg")
+        return File(dir, artworkFileName(slot, System.currentTimeMillis(), unique))
     }
 
     // Two-pass decode. The first pass reads only the image header to learn the
@@ -695,6 +695,35 @@ class SettingsManager(context: Context) {
             Log.e("SettingsManager", "Failed to save message image", e)
             null
         }
+    }
+
+    // The path a pending composer attachment is SENT as.
+    //
+    // The share target materializes an incoming URI when it arrives, so the composer's
+    // attachment already points at one of our own msg_*.jpg files. Re-encoding that here
+    // would write a SECOND file and strand the first on every shared-image send, so an
+    // attachment that is already ours is reused untouched: it is downsampled to
+    // MESSAGE_IMAGE_MAX_DIM already, which is exactly what saveMessageImage would have
+    // produced. Anything else (the photo picker's content:// URI) is copied in as before,
+    // so the transcript still owns a file that survives the picker's grant.
+    fun messageImagePath(source: Uri): String? = ownedMessageImagePath(source) ?: saveMessageImage(source)
+
+    // Deletes the file behind a pending attachment when it is ours — the composer's remove
+    // button. A photo-picker URI is not ours, so removing one is a no-op by design: the
+    // user's own photo is never touched. Goes through deleteArtworkFile, the single
+    // deletion choke point.
+    fun discardMessageImage(source: Uri) {
+        deleteArtworkFile(ownedMessageImagePath(source))
+    }
+
+    // source's path when it names an EXISTING message image of ours, else null. Existence is
+    // what separates "reuse/delete this file" from "copy it in": a path of ours that is
+    // already gone (deleted between the share and the send) must be re-materialized rather
+    // than handed on as a dangling imagePath.
+    private fun ownedMessageImagePath(source: Uri): String? {
+        val path = source.path ?: return null
+        if (!isMaterializedMessageImagePath(path, artworkDir().absolutePath)) return null
+        return File(path).takeIf { it.isFile }?.absolutePath
     }
 
     // Deletes one app-owned artwork file. This is the single choke point every
@@ -1213,3 +1242,51 @@ data class PersonaArtwork(
     val icon: String? = null,        // base64 JPEG, written to an "icon" file on restore
     val background: String? = null   // base64 JPEG, written to a "background" file
 )
+
+// ---------------------------------------------------------------------------
+// Message images: the naming and ownership rules shared by the materializer
+// above and the send/remove paths that consume its output.
+//
+// A shared image is materialized on arrival (saveMessageImage) so the composer
+// has an app-owned file it can preview and send. That file is the only copy:
+// the send path REUSES it rather than re-encoding it, and the remove button
+// DELETES it. Both decisions turn on "is this path one of ours?", which is the
+// predicate below — deliberately pure (string shape only, no filesystem) so it
+// is pinned by a JVM test instead of only ever being exercised on a device.
+// ---------------------------------------------------------------------------
+
+/** Slot [SettingsManager.newArtworkFile] files materialized message images under. */
+internal const val MESSAGE_IMAGE_SLOT = "msg"
+
+/**
+ * The filename slot-based artwork is written under: `<slot>_<stamp>_<unique>.jpg`.
+ *
+ * Extracted from the writer so the ownership predicate below can be tested against the SAME
+ * naming the writer produces. A pattern copied into the test would drift the moment either side
+ * changed, and the failure mode of that drift is silent: a stale pattern simply stops matching,
+ * which turns "reuse the attachment's file" back into "write a second file" without a sound.
+ */
+internal fun artworkFileName(slot: String, stampMillis: Long, unique: String): String =
+    "${slot}_${stampMillis}_$unique.jpg"
+
+/**
+ * Whether [path] names a file this app materialized for a pending message image: a DIRECT child
+ * of [imagesDirPath] whose name carries the [MESSAGE_IMAGE_SLOT] prefix.
+ *
+ * This gates both destructive decisions — reusing a file instead of copying it, and deleting it
+ * when the user drops the attachment — so it must accept nothing else. A photo-picker
+ * `content://` URI (path `/external/images/media/…`), a persona icon or background, a `msg_*`
+ * file in a subdirectory, and a `..` traversal all have to come back false. Existence is
+ * deliberately NOT checked here (that needs the filesystem, and this stays pure): the callers
+ * that write or delete look at the file itself.
+ */
+internal fun isMaterializedMessageImagePath(path: String?, imagesDirPath: String?): Boolean {
+    if (path.isNullOrBlank() || imagesDirPath.isNullOrBlank()) return false
+    val file = File(path)
+    // `parent` and not `parentFile`: string-only, no canonicalization, no symlinks, no throw.
+    // Writer and predicate are fed the same directory string (artworkDir().absolutePath), so a
+    // plain comparison is also the exact one.
+    if (file.parent?.trimEnd('/') != imagesDirPath.trimEnd('/')) return false
+    return file.name.startsWith("${MESSAGE_IMAGE_SLOT}_")
+}
+

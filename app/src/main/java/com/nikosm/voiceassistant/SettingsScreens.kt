@@ -1,11 +1,14 @@
 package com.nikosm.voiceassistant
 
 import android.Manifest
+import android.app.StatusBarManager
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.drawable.Icon
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -815,6 +818,47 @@ internal fun adaptiveThemeDescription(sdkInt: Int): String =
             "API $sdkInt, so the standard theme is used instead."
 
 /**
+ * "Add to Quick Settings" — the tile is otherwise invisible to users, so offer the
+ * system's own placement prompt. [android.app.StatusBarManager.requestAddTileService]
+ * arrived in API 33; below that the tile is added by editing the panel by hand, so this
+ * row is absent rather than dead.
+ *
+ * The prompt is best-effort: a device that refuses it (OEM policy, repeated denials)
+ * must not crash the settings screen, hence the `runCatching`.
+ */
+@Composable
+private fun QuickSettingsTileRow() {
+    val context = LocalContext.current
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text("Quick Settings tile", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "Add Celeste to your Quick Settings panel for one-tap voice.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+            )
+        }
+        TextButton(onClick = {
+            val manager = context.getSystemService(StatusBarManager::class.java) ?: return@TextButton
+            runCatching {
+                manager.requestAddTileService(
+                    ComponentName(context, CelesteTileService::class.java),
+                    context.getString(R.string.tile_celeste_label),
+                    Icon.createWithResource(context, R.drawable.ic_tile_celeste),
+                    context.mainExecutor
+                ) { /* result ignored: the panel is the source of truth */ }
+            }
+        }) {
+            Text("Add")
+        }
+    }
+}
+
+/**
  * General category screen: appearance, chat font, cost, location, history, backup.
  *
  * Body of [SettingsCategoryScreen] — a whole category's content, not an embeddable
@@ -971,6 +1015,13 @@ Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
                 )
             }
         }
+    }
+
+    // Tile discoverability. The API (requestAddTileService) arrived in API 33; below that the
+    // tile is added by editing the Quick Settings panel, so the row is hidden rather than dead.
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        SettingsSectionHeader(title = "Shortcuts", icon = Icons.Default.Add)
+        SettingsSection { QuickSettingsTileRow() }
     }
 
     SettingsSectionHeader(title = "Data & Usage", icon = Icons.Default.Analytics)

@@ -683,7 +683,9 @@ internal fun AssistantService.sendTextMessageToServer(inputText: String, current
     val turnContext = turnContextWithSkills(inputText, currentPersona, turnContext)
 
     serviceScope.launch {
-        val imagePath = imageUri?.let { saveMessageImage(it) }
+        // Reuse-or-copy: a shared image is already an app-owned file here (the share target
+        // materialized it on arrival), so this must not re-encode it into a second file.
+        val imagePath = imageUri?.let { messageImagePath(it) }
 
         // Phase 0: this turn's transcript writes (the user turn, the error bubbles, the
         // streamed partial and the final assistant message) all go through one sink, so a

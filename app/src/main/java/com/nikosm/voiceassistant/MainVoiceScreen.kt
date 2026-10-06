@@ -8,6 +8,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -40,6 +41,7 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
@@ -320,7 +322,22 @@ fun MainScreen(
      */
     deepLinkPersona: String? = null,
     /** Called exactly once per [deepLinkPersona] value, after it has been honoured. */
-    onDeepLinkHandled: () -> Unit = {}
+    onDeepLinkHandled: () -> Unit = {},
+    /**
+     * One-shot: the Quick Settings tile asked for a voice turn (`MainActivity` relays
+     * `EXTRA_CELESTE_START_VOICE` here). Honoured only when the assistant is IDLE and
+     * RECORD_AUDIO is granted; otherwise the app is simply brought forward.
+     */
+    startVoiceRequest: Boolean = false,
+    /** Called exactly once per [startVoiceRequest] once it has been considered. */
+    onStartVoiceHandled: () -> Unit = {},
+    /**
+     * One-shot: a share payload (`MainActivity` relays `ACTION_SEND` here). Lands in the
+     * current persona's composer; never auto-sent.
+     */
+    sharedRequest: SharedRequest? = null,
+    /** Called exactly once per [sharedRequest] value, after it has landed. */
+    onSharedHandled: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val focusManager = LocalFocusManager.current
@@ -469,6 +486,90 @@ fun MainScreen(
         // screen.
         bound.applySpontaneousDeepLink(target)
         onDeepLinkHandled()
+    }
+
+    // ------------------------------------------------------------- QS tile: start a voice turn
+    // The tile never touches the service; it just opens the app. Here — where the state and the
+    // permission are knowable — the request becomes exactly the mic button's action, and ONLY
+    // when a turn can legitimately begin. Anything else simply leaves the app in front (the
+    // "otherwise change nothing" contract), and nothing here calls stopEverything().
+    LaunchedEffect(service, startVoiceRequest) {
+        if (!startVoiceRequest) return@LaunchedEffect
+        // Keep the request pending until the service is bound (cold start from the tile).
+        val bound = service ?: return@LaunchedEffect
+        onStartVoiceHandled()
+        val micGranted = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
+        if (state != AssistantState.IDLE || !micGranted) return@LaunchedEffect
+        // Voice mode, never text mode — that is what the tile is for.
+        textModeOpen = false
+        // Rooms are text-only, so leave one first (the same move the persona picker makes).
+        if (activeRoomId != null) bound.leaveRoom()
+        // Exactly what the mic button does when IDLE.
+        bound.startRecording()
+    }
+
+    // ------------------------------------------------------------------- share target: land it
+    // The image branch's materialization is NOT owned by the effect below. Consuming the request
+    // (`onSharedHandled()`) changes one of the effect's own keys, so the effect is cancelled the
+    // moment it reaches its first suspension point — which is exactly `saveMessageImage`. The IO
+    // then ran to completion (a real `msg_*.jpg` was written) but the resume threw
+    // CancellationException, the attachment was never set, and the user got the failure toast
+    // instead. A composition-scoped coroutine is not tied to the effect, so it survives the
+    // effect's restart; the one-shot contract still holds because the request is consumed first.
+    //
+    // That scope is the COMPOSITION's, so a recreation (rotation, "don't keep activities")
+    // landing inside the read cancels it. Accepted, not overlooked: the request is already
+    // consumed and the launch intent's extras are already gone, so the attachment is lost and
+    // the user shares again. The window is one downsample + JPEG write wide (tens of ms, and
+    // zero on a locked-orientation device), and the alternative — hoisting the pending
+    // attachment out of the composition into the service so it survives — cannot deliver:
+    // a path published after the new composition exists still cannot reach the state object
+    // `rememberSaveable` has already restored. A cancel is never reported as a failed read
+    // (see below), so the user sees nothing rather than a lie.
+    val shareScope = rememberCoroutineScope()
+    LaunchedEffect(service, sharedRequest, isFirstRun) {
+        // The first-run welcome owns the screen; keep the share pending until it is up.
+        if (isFirstRun) return@LaunchedEffect
+        val request = sharedRequest ?: return@LaunchedEffect
+        val bound = service ?: return@LaunchedEffect
+        onSharedHandled()
+        // The content goes to the current persona's normal chat, in text mode.
+        textModeOpen = true
+        if (activeRoomId != null) bound.leaveRoom()
+        when (request) {
+            is SharedRequest.Text -> {
+                val landed = appendSharedTextToDraft(textInput, request.text)
+                textInput = landed.draft
+                if (landed.truncated) {
+                    Toast.makeText(
+                        context,
+                        "Shared text was trimmed to $MAX_SHARED_TEXT_CHARS characters",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            }
+            is SharedRequest.Image -> shareScope.launch {
+                // A shared URI carries only a temporary read grant, so read + downsample it on IO
+                // NOW (through the existing pipeline) and keep the resulting file, never the URI.
+                val path = try {
+                    bound.saveMessageImage(request.uri)
+                } catch (e: CancellationException) {
+                    // A cancel is not an unreadable image. Rethrowing keeps it out of the fallback
+                    // below, so a composition going away under a share can never tell the user the
+                    // image could not be read — and it is what makes the try/catch, rather than
+                    // runCatching, load-bearing here.
+                    throw e
+                } catch (e: Exception) {
+                    null
+                }
+                if (path != null) {
+                    attachedImage = Uri.fromFile(File(path))
+                } else {
+                    Toast.makeText(context, "Couldn't read that image", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
     }
 
     val listState = rememberLazyListState()
@@ -1009,7 +1110,14 @@ fun MainScreen(
                         )) },
                         onImageAttachClick = { imageLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) },
                         onRemoveAttachment = { attachedFiles = attachedFiles - it },
-                        onRemoveImage = { attachedImage = null },
+                        onRemoveImage = {
+                            // Removing the attachment removes its file: the copy is ours, and
+                            // nothing else references it (a SENT message is handed the same file
+                            // rather than a duplicate), so dropping the state alone would leak one
+                            // msg_*.jpg per attachment the user thought better of.
+                            service?.discardMessageImage(attachedImage)
+                            attachedImage = null
+                        },
                         onSendClick = {
                             // Defensive copy: the composition's attachedFiles is a
                             // state-backed mutable list. We snapshot it BEFORE clearing the
@@ -1563,14 +1671,14 @@ fun ControlBar(
                         }
                     }
                     attachedImage?.let { uri ->
-                        Box(modifier = Modifier.size(50.dp).clip(MaterialTheme.shapes.small)) {
+                        Box(modifier = Modifier.size(50.dp).clip(MaterialTheme.shapes.small).testTag(COMPOSER_ATTACHMENT_TAG)) {
                             AsyncImage(
                                 model = uri,
                                 contentDescription = null,
                                 contentScale = ContentScale.Crop,
                                 modifier = Modifier.fillMaxSize()
                             )
-                            IconButton(onClick = onRemoveImage, modifier = Modifier.size(16.dp).align(Alignment.TopEnd).background(Color.Black.copy(alpha = 0.5f), CircleShape)) {
+                            IconButton(onClick = onRemoveImage, modifier = Modifier.size(16.dp).align(Alignment.TopEnd).background(Color.Black.copy(alpha = 0.5f), CircleShape).testTag(COMPOSER_ATTACHMENT_REMOVE_TAG)) {
                                 Icon(Icons.Default.Close, null, tint = Color.White, modifier = Modifier.size(10.dp))
                             }
                         }
@@ -1907,7 +2015,7 @@ fun TextInputRow(
         OutlinedTextField(
             value = textInput,
             onValueChange = onTextInputChange,
-            modifier = Modifier.weight(1f).focusRequester(focusRequester),
+            modifier = Modifier.weight(1f).focusRequester(focusRequester).testTag(COMPOSER_DRAFT_TAG),
             placeholder = { Text(if (isImageGenerator) "Describe the image you want..." else "Type something...", style = MaterialTheme.typography.bodyMedium) },
             shape = RoundedCornerShape(24.dp),
             leadingIcon = {
@@ -1954,6 +2062,7 @@ fun TextInputRow(
                     },
                     modifier = Modifier
                         .size(40.dp)
+                        .testTag(COMPOSER_ACTION_TAG)
                         .background(
                             if (hasContent || isListening || state == AssistantState.SPEAKING) personaColor.copy(alpha = 0.1f) else Color.Transparent, 
                             CircleShape

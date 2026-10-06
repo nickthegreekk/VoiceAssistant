@@ -10,6 +10,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.speech.RecognizerIntent
+import android.util.Log
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -100,6 +101,15 @@ private val EditingPersonaSaver = Saver<Pair<Int, Persona>?, String>(
      * `onNewIntent` fires with no recomposition of its own.
      */
     private var deepLinkPersona by mutableStateOf<String?>(null)
+
+    /**
+     * One-shot: the Quick Settings tile asked for a voice turn. `MutableState` for the same
+     * reason as [deepLinkPersona] (an `onNewIntent` tap must recompose).
+     */
+    private var voiceStartRequest by mutableStateOf(false)
+
+    /** One-shot: an `ACTION_SEND` payload arrived. */
+    private var sharedRequest by mutableStateOf<SharedRequest?>(null)
     private val connection = object : android.content.ServiceConnection {
         override fun onServiceConnected(name: android.content.ComponentName?, service: android.os.IBinder?) {
             val binder = service as AssistantService.AssistantBinder
@@ -150,12 +160,17 @@ private val EditingPersonaSaver = Saver<Pair<Int, Persona>?, String>(
                 MainScreen(
                     service = svc,
                     deepLinkPersona = deepLinkPersona,
-                    onDeepLinkHandled = { deepLinkPersona = null }
+                    onDeepLinkHandled = { deepLinkPersona = null },
+                    startVoiceRequest = voiceStartRequest,
+                    onStartVoiceHandled = { voiceStartRequest = false },
+                    sharedRequest = sharedRequest,
+                    onSharedHandled = { sharedRequest = null }
                 )
             }
         }
         // O3: a cold start from a notification tap arrives via onCreate, not onNewIntent.
         handleSpontaneousDeepLink(intent)
+        handleCelesteRequests(intent)
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -165,6 +180,7 @@ private val EditingPersonaSaver = Saver<Pair<Int, Persona>?, String>(
         super.onNewIntent(intent)
         setIntent(intent)
         handleSpontaneousDeepLink(intent)
+        handleCelesteRequests(intent)
     }
 
     /**
@@ -188,6 +204,48 @@ private val EditingPersonaSaver = Saver<Pair<Int, Persona>?, String>(
         // F3: consume the extra so no recreation of this Activity can re-read it.
         intent?.removeExtra(EXTRA_TARGET_PERSONA_NAME)
         if (target != null) deepLinkPersona = target
+    }
+
+    /**
+     * The Quick Settings tile's voice-start extra and an `ACTION_SEND` share, both read into
+     * one-shot state exactly like [handleSpontaneousDeepLink]: the extras are REMOVED on read, so
+     * a recreation (rotation, dark-mode, "don't keep activities") redelivers an intent with
+     * nothing left to re-fire, and an `onNewIntent` from recents carries neither anyway.
+     */
+    private fun handleCelesteRequests(intent: Intent?) {
+        if (intent == null) return
+        // Relaunched from history (recents) must never re-fire a request.
+        if (intent.flags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY != 0) return
+
+        val wantsVoice = intent.getBooleanExtra(EXTRA_CELESTE_START_VOICE, false)
+        intent.removeExtra(EXTRA_CELESTE_START_VOICE)
+        if (wantsVoice) voiceStartRequest = true
+
+        val stream: Uri? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
+        } else {
+            @Suppress("DEPRECATION") intent.getParcelableExtra(Intent.EXTRA_STREAM)
+        }
+        val parsed = parseSharedIntent(
+            action = intent.action,
+            type = intent.type,
+            extraText = intent.getStringExtra(Intent.EXTRA_TEXT),
+            extraSubject = intent.getStringExtra(Intent.EXTRA_SUBJECT),
+            hasStream = stream != null
+        )
+        // Consume the payload so no recreation can re-read it.
+        intent.removeExtra(Intent.EXTRA_TEXT)
+        intent.removeExtra(Intent.EXTRA_SUBJECT)
+        intent.removeExtra(Intent.EXTRA_STREAM)
+        // S4: never log shared content outside DEBUG builds.
+        if (BuildConfig.DEBUG) {
+            Log.d("Celeste", "share/tile intent handled: ${parsed?.let { it::class.simpleName } ?: "nothing"}")
+        }
+        when (parsed) {
+            is SharedIntentContent.Text -> sharedRequest = SharedRequest.Text(parsed.text)
+            SharedIntentContent.Image -> stream?.let { sharedRequest = SharedRequest.Image(it) }
+            null -> Unit
+        }
     }
 
     override fun onResume() {

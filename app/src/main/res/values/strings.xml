@@ -1,3 +1,4 @@
 <resources>
     <string name="app_name">Celeste</string>
+    <string name="tile_celeste_label">Celeste</string>
 </resources>

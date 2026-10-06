@@ -2284,8 +2284,27 @@ class AssistantService : Service() {
     suspend fun savePersonaImage(uri: Uri, slot: String): String? =
         withContext(Dispatchers.IO) { settingsManager.savePersonaImage(uri, slot) }
 
+    // Materializes [uri] into a NEW app-owned message image. This is the share target's
+    // arrival path, where the URI belongs to whoever sent it (a gallery, a browser) and the
+    // only way to keep it is to copy it before the grant dies.
     suspend fun saveMessageImage(uri: Uri): String? =
         withContext(Dispatchers.IO) { settingsManager.saveMessageImage(uri) }
+
+    // What a pending composer attachment is SENT as. An image the share target already
+    // materialized on arrival is reused rather than re-encoded, so one shared image costs
+    // exactly one file for its whole life; anything else (the picker's URI) is copied in.
+    suspend fun messageImagePath(uri: Uri): String? =
+        withContext(Dispatchers.IO) { settingsManager.messageImagePath(uri) }
+
+    // The composer's remove button. Fire-and-forget on the service scope: the UI must not
+    // wait on IO to drop an attachment, the deletion is idempotent, and this is the one
+    // deletion that has to survive the composer going away (it is not the composer's file).
+    fun discardMessageImage(uri: Uri?) {
+        val target = uri ?: return
+        serviceScope.launch {
+            withContext(Dispatchers.IO) { settingsManager.discardMessageImage(target) }
+        }
+    }
     fun importBackup(json: String): Boolean {
         // F2: the persona names that could currently be holding an armed spontaneous chain.
         // Snapshotted BEFORE the import because the restore rewrites the stored list and
