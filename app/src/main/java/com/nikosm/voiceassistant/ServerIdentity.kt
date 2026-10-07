@@ -70,6 +70,47 @@ internal fun rewritePersonasServerPrefix(
 }
 
 /**
+ * Repoint the personas that address a server by its URL at an edited URL.
+ *
+ * A persona addresses its **image-gen** server and its **gateway** through [Persona.backendUrl],
+ * which the persona editor sets to the entry's URL (`backendUrl = cfg.url`). Editing that entry's
+ * URL therefore used to leave every persona pointing at the OLD address: the resolver found no
+ * matching entry, and the request went out to the stale address WITHOUT credentials — a 401 while
+ * "Test Connection" (which reads the saved entry directly) succeeded. Rewriting the references
+ * here, at the same chokepoint as the Ollama rename migration, keeps the persona and the entry in
+ * step.
+ *
+ * Matching is EXACT on the NORMALIZED URL (trim + trailing slashes), so a persona saved as
+ * `http://host:7860/` still follows an edit of `http://host:7860`, and a URL that merely shares a
+ * prefix does NOT.
+ *
+ * [forImageGenerators] selects WHICH references this edit may touch, and is what keeps the two
+ * registries from clobbering each other:
+ *  - an image-gen URL edit rewrites only image-generator personas ([forImageGenerators] = true);
+ *  - a gateway URL edit rewrites only non-image-generator (gateway/translator) personas
+ *    ([forImageGenerators] = false).
+ * A persona whose backendUrl happens to equal a DIFFERENT server type's URL is therefore left
+ * alone — the gateway and image-gen lists are independent, and the same host can back both.
+ */
+internal fun rewritePersonasBackendUrl(
+    personas: List<Persona>,
+    oldUrl: String,
+    newUrl: String,
+    forImageGenerators: Boolean
+): List<Persona> {
+    if (oldUrl == newUrl) return personas
+    val oldNorm = normalizeGatewayUrl(oldUrl)
+    if (oldNorm.isEmpty()) return personas
+    return personas.map { p ->
+        if (p.isImageGenerator == forImageGenerators && normalizeGatewayUrl(p.backendUrl) == oldNorm) {
+            p.copy(backendUrl = newUrl)
+        } else p
+    }
+}
+
+
+
+/**
  * Is [candidate] already used as a server or cloud-provider name?
  *
  * Trimmed and case-insensitive, because "main" and "Main " are indistinguishable inside a

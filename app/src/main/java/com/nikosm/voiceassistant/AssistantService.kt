@@ -1290,11 +1290,10 @@ class AssistantService : Service() {
         }
     }
 
-    private fun buildHealthCheckUrl(target: ServerConfig, isGateway: Boolean, isImageGen: Boolean = false): String {
+    private fun buildHealthCheckUrl(target: ServerConfig, isGateway: Boolean): String {
         val base = target.url.trim().removeSuffix("/")
         return when {
             isGateway -> "$base/"
-            isImageGen -> "$base/sdapi/v1/sd-models"
             else -> {
                 var b = base
                 if (b.endsWith("/v1")) b = b.removeSuffix("/v1")
@@ -1304,9 +1303,21 @@ class AssistantService : Service() {
         }
     }
 
+    /**
+     * The one place a probe request to a server is built WITH its credentials. Image-gen
+     * servers (including the Test Connection probe, GET /sdapi/v1/sd-models, and the
+     * passive health re-check) go through [imageGenRequestBuilder], which resolves the
+     * auth header through the shared `effectiveAuthType` helper; every other server keeps
+     * the health-check URL plus [buildAuthorizationHeader].
+     */
+    private fun buildServerRequest(target: ServerConfig, isGateway: Boolean, isImageGen: Boolean): Request.Builder {
+        if (isImageGen) return imageGenRequestBuilder(target, IMAGE_GEN_SD_MODELS_PATH)
+        val builder = Request.Builder().url(buildHealthCheckUrl(target, isGateway))
+        buildAuthorizationHeader(target)?.let { builder.header("Authorization", it) }
+        return builder
+    }
+
     private suspend fun checkServerHealth(target: ServerConfig, isGateway: Boolean, isImageGen: Boolean = false) {
-        val authorizationHeader = buildAuthorizationHeader(target)
-        val url = buildHealthCheckUrl(target, isGateway, isImageGen)
 
         // #3 (health) fix: this runs on Dispatchers.IO — the 30s periodic sweep below and
         // forceCheckHealth both launch there — but _serverStatus may only be
@@ -1319,8 +1330,7 @@ class AssistantService : Service() {
         // So compute the outcome off-Main and apply it through a Main hop, one entry at a
         // time, exactly like the other writers.
         val outcome = try {
-            val requestBuilder = Request.Builder().url(url)
-            authorizationHeader?.let { requestBuilder.header("Authorization", it) }
+            val requestBuilder = buildServerRequest(target, isGateway, isImageGen)
 
             fastClient.newCall(requestBuilder.build()).execute().use { response ->
                 if (response.isSuccessful || response.code == 401) {
@@ -1353,8 +1363,7 @@ class AssistantService : Service() {
             .build()
         return withContext(Dispatchers.IO) {
             try {
-                val requestBuilder = Request.Builder().url(buildHealthCheckUrl(target, isGateway, isImageGen))
-                buildAuthorizationHeader(target)?.let { requestBuilder.header("Authorization", it) }
+                val requestBuilder = buildServerRequest(target, isGateway, isImageGen)
                 probeClient.newCall(requestBuilder.build()).execute().use { response ->
                     if (response.isSuccessful) {
                         ServerConnectionResult(success = true)
@@ -1531,6 +1540,15 @@ class AssistantService : Service() {
             }
             current[idx] = ServerConfig(newName, newUrl, newUsername, newPassword, newAuthType, newApiKey)
             _serverBases.value = current
+            // A persona addresses its gateway by URL too (backendUrl = gw.url), so an edited URL
+            // must repoint the gateway/translator personas that named it — the same chokepoint as
+            // the Ollama rename migration. Image-generator personas are deliberately skipped: their
+            // backendUrl points at an image-gen server, which may share the host but is a different
+            // registry.
+            val oldUrl = oldConfig.url
+            if (newUrl != oldUrl) {
+                _personas.value = rewritePersonasBackendUrl(_personas.value, oldUrl, newUrl, forImageGenerators = false)
+            }
             saveSettings()
             fetchModels(current[idx])
         }
@@ -1743,6 +1761,14 @@ class AssistantService : Service() {
             }
             current[idx] = ServerConfig(newName, newUrl, newUsername, newPassword, newAuthType, newApiKey)
             _imageGenBases.value = current
+            // A persona references its image-gen server by URL (backendUrl = cfg.url), so an
+            // edited URL must repoint every image-generator persona at the new address — the
+            // same chokepoint as the Ollama rename migration. Without it the persona keeps
+            // pointing at the old address, which no entry matches any more.
+            val oldUrl = oldConfig.url
+            if (newUrl != oldUrl) {
+                _personas.value = rewritePersonasBackendUrl(_personas.value, oldUrl, newUrl, forImageGenerators = true)
+            }
             saveSettings()
         }
     }

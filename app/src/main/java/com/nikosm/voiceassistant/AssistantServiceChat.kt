@@ -2112,18 +2112,31 @@ private fun Response.decodeTextHeader(name: String, fallback: String): String {
 }
 
 internal suspend fun AssistantService.performImageGeneration(prompt: String, currentPersona: Persona) {
-    if (ContextCompat.checkSelfPermission(this, "android.permission.ACCESS_LOCAL_NETWORK") != PackageManager.PERMISSION_GRANTED) {
+    // ACCESS_LOCAL_NETWORK is new in Android 16 (API 36). On older platforms the permission
+    // is unknown to PackageManager, so checkSelfPermission always reports DENIED — an ungated
+    // guard therefore failed EVERY generation on Android 12–15 (minSdk is 31) with a
+    // permission error no user could ever satisfy. Enforce it only where the platform actually
+    // defines it.
+    if (Build.VERSION.SDK_INT >= 36 &&
+        ContextCompat.checkSelfPermission(this, "android.permission.ACCESS_LOCAL_NETWORK") != PackageManager.PERMISSION_GRANTED
+    ) {
         throw Exception("Local network access permission is required to connect to local A1111 servers (0.0.0.0). Please grant Local Network permission in app settings.")
     }
     val startTime = System.currentTimeMillis()
     _state.value = AssistantState.THINKING
     updateNotification("Generating image...")
     try {
-        val serverUrl = run {
-            val raw = currentPersona.backendUrl
-            val matched = _imageGenBases.value.find { it.name == raw || it.url == raw }
-            (matched?.url ?: raw.ifBlank { _imageGenBases.value.firstOrNull()?.url ?: "http://0.0.0.0:7860" }).trim().removeSuffix("/")
-        }
+        // One resolver + one header builder for every image-gen request (see
+        // AssistantServiceImageGen.kt). Resolving to a configured entry — never rebuilding
+        // a credential-less ServerConfig from the raw URL — is what keeps a generation
+        // authenticated exactly like Settings → Servers → Image Gen's Test Connection.
+        // A Backend URL that matches no configured entry fails visibly here instead of
+        // sending a bare request.
+        val config = resolveImageGenConfig(_imageGenBases.value, currentPersona.backendUrl)
+            ?: throw Exception(
+                "No image server is configured for this persona. " +
+                    "Add one in Settings → Servers → Image Gen."
+            )
 
         val jsonBody = JSONObject().apply {
             put("prompt", prompt)
@@ -2134,14 +2147,14 @@ internal suspend fun AssistantService.performImageGeneration(prompt: String, cur
         }.toString()
 
         val requestBody = jsonBody.toRequestBody("application/json; charset=utf-8".toMediaType())
-        val request = Request.Builder()
-            .url("$serverUrl/sdapi/v1/txt2img")
+        val request = imageGenRequestBuilder(config, IMAGE_GEN_TXT2IMG_PATH)
             .post(requestBody)
             .build()
 
         val responseString = withContext(Dispatchers.IO) {
             client.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) {
+                    if (response.code == 401 || response.code == 403) throw ImageGenAuthException()
                     throw Exception("Image generation failed: HTTP ${response.code} ${response.message}")
                 }
                 response.body.string()
@@ -2168,6 +2181,17 @@ internal suspend fun AssistantService.performImageGeneration(prompt: String, cur
             text = prompt,
             generatedImagePath = cacheFile.absolutePath,
             responseTimeMs = responseTime
+        ).stampedAt()
+        saveSettings()
+    } catch (e: ImageGenAuthException) {
+        // A specific, actionable bubble: the raw status alone ("HTTP 401") does not tell the
+        // user where to fix it. Deliberately does not log the pushback body or the header.
+        _state.value = AssistantState.IDLE
+        updateNotification("Ready to help")
+        _messages.value = _messages.value + ChatMessage(
+            role = "assistant",
+            text = IMAGE_GEN_AUTH_FAILURE_MESSAGE,
+            isError = true
         ).stampedAt()
         saveSettings()
     } catch (e: Exception) {
