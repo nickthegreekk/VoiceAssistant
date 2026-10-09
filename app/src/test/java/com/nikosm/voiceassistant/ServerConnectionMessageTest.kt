@@ -111,4 +111,47 @@ class ServerConnectionMessageTest {
             text
         )
     }
+
+    @Test fun `a wrong-backend address beats the generic 404 wording`() {
+        // The hint still carries a 404 — it must not fall through to "this address doesn't seem
+        // right", which is true but leaves the user nowhere to go.
+        val mismatch = imageGenBackendMismatchMessage(ImageGenBackend.A1111)
+        val text = serverConnectionFailureMessage(
+            ServerConnectionResult(success = false, httpCode = 404, detail = "Not Found", backendMismatch = mismatch),
+            AuthType.BASIC
+        )
+        assertEquals(mismatch, text)
+    }
+
+    @Test fun `a wrong-backend address beats the auth wording too`() {
+        // Defensive: the hint is only ever attached to a 404/405 today, but if a 401 ever carried
+        // one the specific explanation must still win over "check your password".
+        val text = serverConnectionFailureMessage(
+            ServerConnectionResult(
+                success = false, httpCode = 401, detail = "Unauthorized",
+                backendMismatch = imageGenBackendMismatchMessage(ImageGenBackend.COMFYUI)
+            ),
+            AuthType.BASIC
+        )
+        assertEquals(imageGenBackendMismatchMessage(ImageGenBackend.COMFYUI), text)
+    }
+
+    @Test fun `a failure without a hint keeps its original wording`() {
+        // The regression guard for everything above: adding the hint must change nothing when no
+        // mismatch was detected.
+        assertEquals(
+            "Server responded, but this address doesn't seem right — check the URL",
+            serverConnectionFailureMessage(
+                ServerConnectionResult(success = false, httpCode = 404, detail = "Not Found"),
+                AuthType.BASIC
+            )
+        )
+        assertEquals(
+            "Unexpected server response: HTTP 405",
+            serverConnectionFailureMessage(
+                ServerConnectionResult(success = false, httpCode = 405, detail = null),
+                AuthType.NONE
+            )
+        )
+    }
 }

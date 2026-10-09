@@ -25,6 +25,47 @@ enum class VoiceMode { NONE, SYSTEM_TTS, BUNDLED_ESPEAK, GATEWAY }
 @Serializable
 enum class AuthType { NONE, BASIC, API_KEY }
 
+/**
+ * Which HTTP API an **Image Gen** server entry speaks.
+ *
+ * The Image Gen registry is a `List<ServerConfig>` shared with the gateway and Ollama lists, so
+ * the discriminator rides on the entry rather than on a separate list type — changing the list
+ * type would ripple through the resolver, SettingsManager, the backup and the `rememberSaveable`
+ * saver for no benefit.
+ *
+ * Values are serialized by NAME (kotlinx's enum default), so the stored prefs and backups stay
+ * readable and a new value can be added later without disturbing existing ones.
+ */
+@Serializable
+enum class ImageGenBackend(val displayName: String) {
+    /** Stable Diffusion WebUI (AUTOMATIC1111): `/sdapi/v1/txt2img`, base64 images back. */
+    A1111("Automatic1111"),
+
+    /** ComfyUI: POST `/prompt` with a workflow, poll `/history/{id}`, download via `/view`. */
+    COMFYUI("ComfyUI");
+}
+
+/**
+ * The one definition of "an entry that does not say otherwise is A1111".
+ *
+ * Named rather than inlined because several independent construction sites need it: the
+ * `@Serializable` data-class default below, the add/edit dialog, and the `ServerConfigSaver`
+ * round trip. `@Serializable` requires the default to be a stable value, and a top-level `val`
+ * is stable; naming it also means the add/edit path and the decode path can never disagree.
+ */
+internal val DEFAULT_IMAGE_GEN_BACKEND: ImageGenBackend = ImageGenBackend.A1111
+
+/**
+ * Reads a persisted image-gen backend name, falling back to [DEFAULT_IMAGE_GEN_BACKEND].
+ *
+ * A hand-edited or future-written preference must never be able to break the setting — the same
+ * reason [ServerConfig.backendType] relies on `coerceInputValues`. Matched case-insensitively so a
+ * preference written by an older or newer build with different casing still resolves.
+ */
+internal fun imageGenBackendFromName(raw: String?): ImageGenBackend =
+    ImageGenBackend.entries.firstOrNull { it.name.equals(raw?.trim(), ignoreCase = true) }
+        ?: DEFAULT_IMAGE_GEN_BACKEND
+
 @Serializable
 data class ChatMessage(
     val role: String,
@@ -193,7 +234,32 @@ data class ServerConfig(
     val username: String? = null,
     val password: String? = null,
     val authType: AuthType = AuthType.NONE,
-    val apiKey: String? = null
+    val apiKey: String? = null,
+    /**
+     * Which image-gen API this entry speaks — see [ImageGenBackend]. Only read for entries in the
+     * Image Gen list; the gateway and Ollama lists carry the default and ignore it.
+     *
+     * **DEFAULTED ON PURPOSE.** Every entry persisted before ComfyUI existed — and every backup
+     * taken before it — decodes without this key, and with `coerceInputValues` (see
+     * `SettingsJson`) even a garbage value decays to [DEFAULT_IMAGE_GEN_BACKEND] instead of
+     * failing the whole list. So an existing install behaves exactly as it did: A1111.
+     *
+     * Declared LAST, because the positional `ServerConfig(name, url, …)` calls all over the app
+     * (SettingsManager, the server lists, the instrumented tests) must keep compiling unchanged.
+     */
+    val backendType: ImageGenBackend = DEFAULT_IMAGE_GEN_BACKEND,
+    /**
+     * A ComfyUI workflow in **API format**, stored as text (see `ComfyWorkflow.kt` for the
+     * format and the validation). Null for A1111 entries and for a ComfyUI entry whose template
+     * the user has not pasted yet.
+     *
+     * Kept INSIDE the entry rather than as a file in `filesDir`: the prefs blob is already
+     * `EncryptedSharedPreferences`, so this is encrypted at rest; it travels in
+     * `BackupData.imageGenBases` with no extra machinery; the `rememberSaveable` saver picks it
+     * up for free; deleting the entry deletes the template; and there is no device-local path to
+     * dangle after a restore on another device.
+     */
+    val comfyWorkflow: String? = null
 ) {
     // Backward compatibility: existing entries with username but default authType should use BASIC
     val effectiveAuthType: AuthType
@@ -303,7 +369,12 @@ data class RoomMessage(
 data class ServerConnectionResult(
     val success: Boolean,
     val httpCode: Int? = null,  // HTTP status when the server responded but rejected the request
-    val detail: String? = null  // raw detail: HTTP status phrase or exception message
+    val detail: String? = null, // raw detail: HTTP status phrase or exception message
+    // Set when an image-gen entry's address answered the OTHER backend's probe (404/405 from its own
+    // API, 200 from the other one's). Pre-formatted and ready to show: the address looks like
+    // ComfyUI, so the entry belongs in the other section. Null whenever the entry merely failed —
+    // including for every non-image-gen server, which never gets a mismatch probe at all.
+    val backendMismatch: String? = null
 )
 
 /**

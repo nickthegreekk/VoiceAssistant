@@ -5,6 +5,7 @@ import androidx.compose.ui.graphics.Color
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -37,37 +38,139 @@ class ImageGenResolutionTest {
 
     private val servers = listOf(local, remote)
 
-    @Test
-    fun trailingSlashAndWhitespaceStillResolveTheSameEntry() {
-        assertSame(local, resolveImageGenConfig(servers, "http://192.168.1.50:7860/"))
-        assertSame(local, resolveImageGenConfig(servers, "  http://192.168.1.50:7860//  "))
-        // A saved entry that itself carries a trailing slash is matched by a plain URL.
-        assertSame(remote, resolveImageGenConfig(servers, "http://192.168.1.9:7860"))
+    private val comfy = ServerConfig(
+        name = "Attic Comfy",
+        url = "http://192.168.1.9:8188",
+        backendType = ImageGenBackend.COMFYUI
+    )
+
+    /** Unwraps a resolution, failing loudly if it was not a success. */
+    private fun resolved(
+        imageGenServers: List<ServerConfig>,
+        active: ImageGenBackend = ImageGenBackend.A1111,
+        pin: String? = null
+    ): ServerConfig {
+        val resolution = resolveImageGenConfig(imageGenServers, active, pin)
+        assertTrue("expected a resolved entry, was $resolution", resolution is ImageGenResolution.Resolved)
+        return (resolution as ImageGenResolution.Resolved).config
     }
 
     @Test
-    fun nameBasedBackendUrlResolvesTheEntry() {
-        assertSame(local, resolveImageGenConfig(servers, "Local A1111"))
-        assertSame(local, resolveImageGenConfig(servers, "  Local A1111  "))
+    fun aPinThatMatchesByUrlOrNameWinsOverTheActiveGenerator() {
+        // Trailing slashes and surrounding whitespace are normalized, exactly as before.
+        assertSame(local, resolved(servers, pin = "http://192.168.1.50:7860/"))
+        assertSame(local, resolved(servers, pin = "  http://192.168.1.50:7860//  "))
+        assertSame(remote, resolved(servers, pin = "http://192.168.1.9:7860"))
+        assertSame(local, resolved(servers, pin = "Local A1111"))
+        assertSame(local, resolved(servers, pin = "  Local A1111  "))
     }
 
     @Test
-    fun anUnresolvableServerResolvesToNullSoNoBareRequestCanBeBuilt() {
-        assertNull(
-            "an unconfigured URL must resolve to null so the caller fails visibly instead of " +
-                "sending an unauthenticated request",
-            resolveImageGenConfig(servers, "http://10.0.0.7:7860")
+    fun aMatchingPinIsNotReportedAsStale() {
+        val resolution = resolveImageGenConfig(servers, ImageGenBackend.A1111, "http://192.168.1.50:7860")
+        assertNull((resolution as ImageGenResolution.Resolved).stalePinnedUrl)
+    }
+
+    @Test
+    fun theActiveTypeDecidesWhichEntryIsUsedAndTheFirstOneWins() {
+        val both = listOf(local, comfy)
+
+        assertSame(local, resolved(both, active = ImageGenBackend.A1111))
+        assertSame(comfy, resolved(both, active = ImageGenBackend.COMFYUI))
+
+        // Two entries of the active type: the user's own ordering decides, which is what the
+        // move-up/move-down buttons on the Image Gen screen are for.
+        val second = local.copy(name = "Second A1111", url = "http://192.168.1.60:7860")
+        assertSame(local, resolved(listOf(local, second, comfy), active = ImageGenBackend.A1111))
+        assertSame(second, resolved(listOf(second, local, comfy), active = ImageGenBackend.A1111))
+    }
+
+    @Test
+    fun aBlankPinFollowsTheActiveGeneratorWithNoNote() {
+        for (pin in listOf(null, "", "   ")) {
+            val resolution = resolveImageGenConfig(servers, ImageGenBackend.A1111, pin) as ImageGenResolution.Resolved
+            assertSame(local, resolution.config)
+            assertNull("a blank pin is not a stale pin", resolution.stalePinnedUrl)
+        }
+    }
+
+    @Test
+    fun aStalePinFallsBackToTheActiveGeneratorInsteadOfFailingTheRequest() {
+        // THE REPORTED BUG. The persona pinned http://192.168.1.50:7860; that entry was edited to
+        // the ComfyUI address (or replaced), so the pin matches nothing. If an entry of the active
+        // type exists, the request must still go out through it — and say the pin is stale.
+        val fallback = resolveImageGenConfig(
+            listOf(local, comfy),
+            ImageGenBackend.A1111,
+            "http://192.168.1.50:9999"
+        ) as ImageGenResolution.Resolved
+
+        assertSame(local, fallback.config)
+        assertEquals("http://192.168.1.50:9999", fallback.stalePinnedUrl)
+    }
+
+    @Test
+    fun aStalePinWithNoEntryOfTheActiveTypeIsAnActionableSetupError() {
+        // The genuinely un-fixable-by-fallback case: the user switched to ComfyUI (having edited
+        // their only entry to it, or with no ComfyUI entry at all) and the persona's pin no longer
+        // matches anything, so there is nothing to fall back TO. The error must name ComfyUI rather
+        // than the persona.
+        val resolution = resolveImageGenConfig(listOf(local), ImageGenBackend.COMFYUI, "http://192.168.1.50:9999")
+        assertEquals(ImageGenResolution.NoEntryForActiveBackend(ImageGenBackend.COMFYUI), resolution)
+    }
+
+    @Test
+    fun noEntryOfTheActiveTypeIsReportedAsSuchAndTheMessageNamesTheType() {
+        val message = noEntryForActiveImageBackendMessage(ImageGenBackend.COMFYUI)
+
+        assertTrue("the error must name the type: $message", message.contains("ComfyUI"))
+        assertTrue(
+            "...and where to add one: $message",
+            message.contains("Settings → Servers → Image Gen")
         )
-        assertNull(resolveImageGenConfig(emptyList(), "http://192.168.1.50:7860"))
-        assertNull(resolveImageGenConfig(emptyList(), ""))
+        assertTrue(
+            "the error must NOT blame the persona — that is the wording this replaces: $message",
+            !message.contains("persona", ignoreCase = true)
+        )
+        // Reachable with an EMPTY list too, not only with a list of the wrong type.
+        assertEquals(
+            ImageGenResolution.NoEntryForActiveBackend(ImageGenBackend.A1111),
+            resolveImageGenConfig(emptyList(), ImageGenBackend.A1111, null)
+        )
     }
 
     @Test
-    fun blankBackendUrlFallsBackToTheFirstConfiguredServer() {
-        // The old lookup defaulted a blank Backend URL to the first entry — preserved, but now
-        // the entry is returned WITH its credentials instead of just its url.
-        assertSame(local, resolveImageGenConfig(servers, ""))
-        assertSame(local, resolveImageGenConfig(servers, "   "))
+    fun onlyAnImageGeneratorPersonaMayPinAServer() {
+        val generator = Persona(
+            name = "Painter", themeColor = Color(0xFF4ADE80), model = "", systemPrompt = "",
+            isImageGenerator = true, backendUrl = "http://192.168.1.9:8188"
+        )
+        val chatter = Persona(
+            name = "Chatty", themeColor = Color(0xFF4ADE80), model = "[Home] llama3", systemPrompt = "",
+            isImageGenerator = false, backendUrl = "http://192.168.1.44:11434"
+        )
+
+        assertEquals("http://192.168.1.9:8188", imageGenPinnedUrl(generator))
+        assertNull("a chat persona's Backend URL is where its CHAT goes", imageGenPinnedUrl(chatter))
+    }
+
+    @Test
+    fun theInlineTriggerIgnoresThePersonasChatUrlAndUsesTheActiveGenerator() {
+        // THE OTHER HALF OF THE REPORTED BUG. The chat persona's URL is an Ollama base; it matches
+        // no Image Gen entry, so honouring it failed with "not configured for this persona".
+        val chatter = Persona(
+            name = "Chatty", themeColor = Color(0xFF4ADE80), model = "[Home] llama3", systemPrompt = "",
+            isImageGenerator = false, backendUrl = "http://192.168.1.44:11434"
+        )
+
+        val resolution = resolveImageGenConfig(servers, ImageGenBackend.A1111, imageGenPinnedUrl(chatter))
+
+        assertSame(
+            "the inline trigger must follow the active generator, not the chat URL",
+            local,
+            (resolution as ImageGenResolution.Resolved).config
+        )
+        assertNull(resolution.stalePinnedUrl)
     }
 
     @Test
@@ -196,7 +299,8 @@ class ImageGenResolutionTest {
         assertSame(
             "after the edit the persona must resolve to the edited entry (credentials included)",
             entry,
-            resolveImageGenConfig(listOf(entry), rewritten.backendUrl)
+            (resolveImageGenConfig(listOf(entry), ImageGenBackend.A1111, rewritten.backendUrl)
+                as ImageGenResolution.Resolved).config
         )
     }
 }

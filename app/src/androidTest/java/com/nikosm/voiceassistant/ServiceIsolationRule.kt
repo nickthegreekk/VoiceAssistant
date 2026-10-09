@@ -288,7 +288,13 @@ private object IsolationState {
          * needs a baseline entry or the rule would report a leak it just caused itself —
          * and, worse, would not clean a real one.
          */
-        val favoriteModels: Set<String>
+        val favoriteModels: Set<String>,
+        /**
+         * Which image backend the service generates with. A test that flips the switch would
+         * otherwise leave the device on ComfyUI and make later tests depend on run order, so it is
+         * part of the baseline like the server lists.
+         */
+        val activeImageGenBackend: ImageGenBackend
     )
 
     /** Stable identity for a [ServerConfig], which has no id of its own. */
@@ -326,7 +332,8 @@ private object IsolationState {
                     imageGenServers = imageGenKeys(s),
                     cloudApis = cloudKeys(s),
                     customCloudApis = customCloudKeys(s),
-                    favoriteModels = s.getFavoriteModels().orEmpty().toSet()
+                    favoriteModels = s.getFavoriteModels().orEmpty().toSet(),
+                    activeImageGenBackend = s.getActiveImageGenBackend()
                 )
                 baseline = b
                 b
@@ -397,6 +404,11 @@ private object IsolationState {
                     s.getCustomCloudApis().orEmpty()
                         .filter { serverKey(it.name, it.baseUrl) in b.customCloudApis }
                 )
+            }
+            // The active generator is a single value, not a list: restore it whenever a test moved
+            // it, so the switch cannot leak into another test's expectations.
+            if (s.getActiveImageGenBackend() != b.activeImageGenBackend) {
+                s.saveActiveImageGenBackend(b.activeImageGenBackend)
             }
         }
     }

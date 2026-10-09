@@ -75,6 +75,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -1358,9 +1359,9 @@ Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
         title = "Local Gateways",
         servers = gateways,
         status = serverStatus,
-        onAdd = { name: String, url: String, user: String?, pass: String?, authType: AuthType, apiKey: String? -> service.addServerBase(name, url, user, pass, authType, apiKey) },
+        onAdd = { name: String, url: String, user: String?, pass: String?, authType: AuthType, apiKey: String?, backendType: ImageGenBackend, workflow: String? -> service.addServerBase(name, url, user, pass, authType, apiKey) },
         onRemove = { service.removeServerBase(it) },
-        onEdit = { old: ServerConfig, name: String, url: String, user: String?, pass: String?, authType: AuthType, apiKey: String? -> service.updateServerBase(old, name, url, user, pass, authType, apiKey) },
+        onEdit = { old: ServerConfig, name: String, url: String, user: String?, pass: String?, authType: AuthType, apiKey: String?, backendType: ImageGenBackend, workflow: String? -> service.updateServerBase(old, name, url, user, pass, authType, apiKey) },
         currentThemeColor = currentThemeColor,
         onRefreshHealth = { service.forceCheckHealth(it, true) },
         onRefreshModels = { /* Gateways don't have models */ },
@@ -1374,9 +1375,9 @@ Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
         title = "Ollama Servers",
         servers = ollama,
         status = serverStatus,
-        onAdd = { name: String, url: String, user: String?, pass: String?, authType: AuthType, apiKey: String? -> service.addOllamaBase(name, url, user, pass, authType, apiKey) },
+        onAdd = { name: String, url: String, user: String?, pass: String?, authType: AuthType, apiKey: String?, backendType: ImageGenBackend, workflow: String? -> service.addOllamaBase(name, url, user, pass, authType, apiKey) },
         onRemove = { service.removeOllamaBase(it) },
-        onEdit = { old: ServerConfig, name: String, url: String, user: String?, pass: String?, authType: AuthType, apiKey: String? -> service.updateOllamaBase(old, name, url, user, pass, authType, apiKey) },
+        onEdit = { old: ServerConfig, name: String, url: String, user: String?, pass: String?, authType: AuthType, apiKey: String?, backendType: ImageGenBackend, workflow: String? -> service.updateOllamaBase(old, name, url, user, pass, authType, apiKey) },
         currentThemeColor = currentThemeColor,
         onRefreshHealth = { service.forceCheckHealth(it, false) },
         onRefreshModels = { service.fetchModels(it) },
@@ -1387,21 +1388,12 @@ Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
         snackbarHostState = snackbarHostState,
         onOpenModels = { modelsServerUrl = it.url }
     )
-    ServerListSection(
-        title = "Image Gen Servers",
-        servers = imageGen,
-        status = serverStatus,
-        onAdd = { name: String, url: String, user: String?, pass: String?, authType: AuthType, apiKey: String? -> service.addImageGenBase(name, url, user, pass, authType, apiKey) },
-        onRemove = { service.removeImageGenBase(it) },
-        onEdit = { old: ServerConfig, name: String, url: String, user: String?, pass: String?, authType: AuthType, apiKey: String? -> service.updateImageGenBase(old, name, url, user, pass, authType, apiKey) },
-        currentThemeColor = currentThemeColor,
-        onRefreshHealth = { service.forceCheckHealth(it, false, true) },
-        onRefreshModels = { },
-        onMoveUp = { service.moveImageGenUp(it) },
-        onMoveDown = { service.moveImageGenDown(it) },
-        isGateway = false,
-        isImageGen = true,
+    SettingsSectionHeader(title = "Image Gen", icon = Icons.Default.Image)
+    ImageGenSettings(
         service = service,
+        imageGen = imageGen,
+        status = serverStatus,
+        currentThemeColor = currentThemeColor,
         snackbarHostState = snackbarHostState
     )
     SettingsSectionHeader(title = "External Services", icon = Icons.Default.Public)
@@ -1556,15 +1548,21 @@ fun ServerListSection(
     title: String,
     servers: List<ServerConfig>,
     status: Map<String, String>,
-    onAdd: (String, String, String?, String?, AuthType, String?) -> Unit,
+    onAdd: (String, String, String?, String?, AuthType, String?, ImageGenBackend, String?) -> Unit,
     onRemove: (ServerConfig) -> Unit,
-    onEdit: (ServerConfig, String, String, String?, String?, AuthType, String?) -> Unit,
+    onEdit: (ServerConfig, String, String, String?, String?, AuthType, String?, ImageGenBackend, String?) -> Unit,
     onRefreshHealth: (ServerConfig) -> Unit,
     onRefreshModels: (ServerConfig) -> Unit,
     onMoveUp: (ServerConfig) -> Unit,
     onMoveDown: (ServerConfig) -> Unit,
     isGateway: Boolean,
     isImageGen: Boolean = false,
+    /**
+     * The backend THIS section owns. The type is a property of the section, not a field in the
+     * dialog: the Image Gen screen renders one section per backend, so the "+" inside a section can
+     * only create an entry of that type and there is nothing for the user to get wrong.
+     */
+    imageGenBackend: ImageGenBackend = DEFAULT_IMAGE_GEN_BACKEND,
     service: AssistantService,
     snackbarHostState: SnackbarHostState,
     /** The persona's accent colour, so the Models entry matches every other row here. */
@@ -1592,6 +1590,23 @@ fun ServerListSection(
     var newAuthType by rememberSaveable { mutableStateOf(AuthType.NONE) }
     var newApiKey by rememberSaveable { mutableStateOf("") }
 
+    // Image-gen entries only. The ComfyUI workflow sits alongside the credential fields because it
+    // is part of the same entry. The workflow is held as a NON-null String ("" = none):
+    // `rememberSaveable` needs a Bundle-able value, and "" is how the neighbouring
+    // username/password fields already express "not set". The backend TYPE is not state here — it
+    // comes from the section (see [imageGenBackend]).
+    var newComfyWorkflow by rememberSaveable { mutableStateOf("") }
+    // Validated once per COMMITTED workflow rather than once per keystroke: this dialog recomposes
+    // on every character typed into Name/URL, and re-parsing a 100 KB workflow each time would be
+    // wasteful. The text only changes when the workflow editor or the file picker commits — and
+    // both validate before committing, so [workflowValidation] here is a last-line guard.
+    val workflowValidation = remember(newComfyWorkflow) {
+        if (newComfyWorkflow.isBlank()) null else validateComfyWorkflow(newComfyWorkflow)
+    }
+    val workflowBlocksSave = isImageGen &&
+        imageGenBackend == ImageGenBackend.COMFYUI &&
+        workflowValidation is ComfyWorkflowValidation.Invalid
+
     Column {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -1601,9 +1616,13 @@ fun ServerListSection(
             Text(text = title, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
             IconButton(onClick = {
                 newName = ""; newUrl = ""; newUser = ""; newPass = ""
+                newComfyWorkflow = ""
                 showAddDialog = true
             }, modifier = Modifier.size(32.dp)) {
-                Icon(Icons.Default.Add, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
+                // A real description, not null: an icon-only button with no name is unreadable to a
+                // screen reader, and it is also the only stable handle a UI test has on this
+                // control (there is no label text to match).
+                Icon(Icons.Default.Add, contentDescription = "Add $title", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
             }
         }
 
@@ -1644,6 +1663,8 @@ fun ServerListSection(
 
                     Column(modifier = Modifier.weight(1f)) {
                         Text(server.name, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
+                        // The backend is the SECTION's, so repeating it per row would be noise; the
+                        // header above every row already says which type this list belongs to.
                         Text(server.url, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
                         serverStatus?.let { err ->
                             Text(err, style = MaterialTheme.typography.labelSmall, color = if (isOnline) Color.Gray else MaterialTheme.colorScheme.error)
@@ -1672,6 +1693,7 @@ fun ServerListSection(
                             newPass = server.password ?: ""
                             newAuthType = if (server.username.isNullOrBlank()) AuthType.NONE else server.authType
                             newApiKey = server.apiKey ?: ""
+                            newComfyWorkflow = server.comfyWorkflow ?: ""
                         }, modifier = Modifier.size(28.dp)) {
                             Icon(Icons.Default.Edit, null, tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f), modifier = Modifier.size(18.dp))
                         }
@@ -1693,6 +1715,50 @@ fun ServerListSection(
             }
         }
 
+        // Lifted out of the dialog's confirm button so the save path — build the entry, hand it to
+        // the caller, reset the fields, then probe the address that was just saved — reads as one
+        // block instead of nesting inside an AlertDialog slot.
+        val commitEntry: () -> Unit = {
+            if (newUrl.isNotBlank()) {
+                // Build the entry first: the post-save probe below reports failures through a
+                // snackbar (this dialog is gone by then, so inline text would not be visible), and
+                // it must probe exactly what was stored.
+                val savedConfig = ServerConfig(
+                    name = newName.ifBlank { "Server" },
+                    url = newUrl,
+                    username = newUser.ifBlank { null },
+                    password = newPass.ifBlank { null },
+                    authType = newAuthType,
+                    apiKey = newApiKey.ifBlank { null },
+                    // The section owns the type, so the entry is created as the section's backend.
+                    backendType = imageGenBackend,
+                    // "" means "no template", stored as null so "is one configured?" is a single
+                    // test for every caller.
+                    comfyWorkflow = newComfyWorkflow.ifBlank { null }
+                )
+                val editing = editingServer
+                if (editing != null) {
+                    onEdit(editing, savedConfig.name, savedConfig.url, savedConfig.username, savedConfig.password, savedConfig.authType, savedConfig.apiKey, savedConfig.backendType, savedConfig.comfyWorkflow)
+                } else {
+                    onAdd(savedConfig.name, savedConfig.url, savedConfig.username, savedConfig.password, savedConfig.authType, savedConfig.apiKey, savedConfig.backendType, savedConfig.comfyWorkflow)
+                }
+                showAddDialog = false
+                editingServer = null
+                newName = ""; newUrl = ""; newUser = ""; newPass = ""; newAuthType = AuthType.NONE; newApiKey = ""
+                newComfyWorkflow = ""
+                scope.launch {
+                    val result = service.testServerConnection(savedConfig, isGateway, isImageGen)
+                    if (!result.success) {
+                        snackbarHostState.showSnackbar(
+                            message = "${savedConfig.name}: ${serverConnectionFailureMessage(result, savedConfig.effectiveAuthType)}",
+                            withDismissAction = true,
+                            duration = SnackbarDuration.Long
+                        )
+                    }
+                }
+            }
+        }
+
         if (showAddDialog || editingServer != null) {
             val isEditing = editingServer != null
             AlertDialog(
@@ -1700,6 +1766,7 @@ fun ServerListSection(
                     showAddDialog = false
                     editingServer = null
                     newName = ""; newUrl = ""; newUser = ""; newPass = ""; newAuthType = AuthType.NONE; newApiKey = ""
+                    newComfyWorkflow = ""
                 },
                 title = { Text(if (isEditing) "Edit Server" else "Add Server") },
                 text = {
@@ -1735,6 +1802,16 @@ fun ServerListSection(
                             OutlinedTextField(value = newApiKey, onValueChange = { newApiKey = it }, label = { Text("API Key") }, modifier = Modifier.fillMaxWidth(), visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation())
                         }
 
+                        if (isImageGen && imageGenBackend == ImageGenBackend.COMFYUI) {
+                            Spacer(Modifier.height(12.dp))
+                            ComfyWorkflowField(
+                                workflow = newComfyWorkflow,
+                                onWorkflowChange = { newComfyWorkflow = it },
+                                validation = workflowValidation,
+                                accentColor = currentThemeColor
+                            )
+                        }
+
                         Spacer(Modifier.height(12.dp))
                         // Setup-context connection probe against the fields as currently
                         // entered (nothing is saved). Result shows inline — a snackbar would
@@ -1749,7 +1826,11 @@ fun ServerListSection(
                                         username = newUser.ifBlank { null },
                                         password = newPass.ifBlank { null },
                                         authType = newAuthType,
-                                        apiKey = newApiKey.ifBlank { null }
+                                        apiKey = newApiKey.ifBlank { null },
+                                        // Included so "Test Connection" probes the endpoint of the
+                                        // backend this SECTION owns — the entry is always created as
+                                        // the section's type, so the probe and the saved entry agree.
+                                        backendType = imageGenBackend
                                     )
                                     testOutcome = null
                                     testInProgress = true
@@ -1780,49 +1861,324 @@ fun ServerListSection(
                     }
                 },
                 confirmButton = {
-                    TextButton(onClick = {
-                        if (newUrl.isNotBlank()) {
-                            // Capture before the field resets below — the connection check
-                            // runs after save and reports failures as a snackbar (this
-                            // dialog is gone by then, so inline text wouldn't be visible).
-                            val savedConfig = ServerConfig(
-                                name = newName.ifBlank { "Server" },
-                                url = newUrl,
-                                username = newUser.ifBlank { null },
-                                password = newPass.ifBlank { null },
-                                authType = newAuthType,
-                                apiKey = newApiKey.ifBlank { null }
-                            )
-                            if (isEditing) {
-                                onEdit(editingServer!!, newName.ifBlank { "Server" }, newUrl, newUser.ifBlank { null }, newPass.ifBlank { null }, newAuthType, newApiKey.ifBlank { null })
-                            } else {
-                                onAdd(newName.ifBlank { "Server" }, newUrl, newUser.ifBlank { null }, newPass.ifBlank { null }, newAuthType, newApiKey.ifBlank { null })
-                            }
-                            showAddDialog = false
-                            editingServer = null
-                            newName = ""; newUrl = ""; newUser = ""; newPass = ""; newAuthType = AuthType.NONE; newApiKey = ""
-                            scope.launch {
-                                val result = service.testServerConnection(savedConfig, isGateway)
-                                if (!result.success) {
-                                    snackbarHostState.showSnackbar(
-                                        message = "${savedConfig.name}: ${serverConnectionFailureMessage(result, savedConfig.effectiveAuthType)}",
-                                        withDismissAction = true,
-                                        duration = SnackbarDuration.Long
-                                    )
-                                }
-                            }
-                        }
-                    }) { Text(if (isEditing) "Save" else "Add") }
+                    TextButton(
+                        // A malformed workflow must never be stored. The editor and the file picker
+                        // both refuse one before it reaches this state, so this is the last-line
+                        // guard — and it is what makes "rejected on save" true no matter how the
+                        // text got here.
+                        enabled = newUrl.isNotBlank() && !workflowBlocksSave,
+                        onClick = { commitEntry() }
+                    ) { Text(if (isEditing) "Save" else "Add") }
                 },
                 dismissButton = {
                     TextButton(onClick = {
                         showAddDialog = false
                         editingServer = null
                         newName = ""; newUrl = ""; newUser = ""; newPass = ""; newAuthType = AuthType.NONE; newApiKey = ""
+                        newComfyWorkflow = ""
                     }) { Text("Cancel") }
                 }
             )
         }
+    }
+}
+/**
+ * Help text for the workflow editor.
+ *
+ * Deliberately states the three things a user cannot guess: which tokens exist, that a template
+ * WITHOUT `%SEED%` still gets a fresh seed on every run (so Regenerate is not a no-op), and that
+ * the workflow — not Celeste — owns the size, the sampler and the step count.
+ */
+private const val COMFY_WORKFLOW_HELP =
+    "Tokens are optional — put them where your graph needs them: %PROMPT%, %NEGATIVE%, %SEED%. " +
+        "%SEED% is replaced as a number. A workflow with no %SEED% still gets a fresh random seed " +
+        "on every run, so Regenerate differs. The workflow owns its size, sampler and steps — " +
+        "%WIDTH% and %HEIGHT% are NOT supported, so set the size inside the workflow itself."
+
+/**
+ * The workflow editor for one ComfyUI entry: a summary line, a fullscreen paste editor and a file
+ * import.
+ *
+ * Both routes VALIDATE before committing, so the [onWorkflowChange] callback only ever receives a
+ * workflow the server can execute. A rejected paste stays on screen with the reason, instead of
+ * closing and dropping the text the user just waited to paste.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ComfyWorkflowField(
+    workflow: String,
+    onWorkflowChange: (String) -> Unit,
+    validation: ComfyWorkflowValidation?,
+    accentColor: Color
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var showEditor by remember { mutableStateOf(false) }
+    var commitError by remember { mutableStateOf<String?>(null) }
+    var pickerError by remember { mutableStateOf<String?>(null) }
+
+    // Read + validate the picked file, then commit. A content URI's read grant does not survive
+    // this callback, so the bytes must be read now rather than referenced for later — the same
+    // lesson the share target learned.
+    val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        pickerError = null
+        scope.launch {
+            val text = withContext(Dispatchers.IO) { readComfyWorkflowText(context, uri) }
+            if (text == null) {
+                pickerError = "Couldn't read that file."
+                return@launch
+            }
+            when (val result = validateComfyWorkflow(text)) {
+                is ComfyWorkflowValidation.Valid -> onWorkflowChange(text)
+                is ComfyWorkflowValidation.Invalid -> pickerError = result.message
+            }
+        }
+    }
+
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(
+            "Workflow (API format)",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            TextButton(onClick = {
+                commitError = null
+                showEditor = true
+            }) {
+                Icon(Icons.Default.Edit, null, modifier = Modifier.size(16.dp))
+                Spacer(Modifier.width(6.dp))
+                Text(if (workflow.isBlank()) "Paste workflow" else "Edit workflow")
+            }
+            TextButton(onClick = { filePicker.launch(arrayOf("application/json", "text/plain", "*/*")) }) {
+                Text("Import file")
+            }
+        }
+        when (validation) {
+            is ComfyWorkflowValidation.Invalid ->
+                Text(validation.message, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+            else -> {
+                // Each warning is its own line: a template can trip both, and dropping one would
+                // hide the more actionable of the two.
+                val warnings = (validation as? ComfyWorkflowValidation.Valid)?.warnings ?: emptyList()
+                if (ComfyWorkflowWarning.UNSUPPORTED_SIZE_TOKEN in warnings) {
+                    Text(
+                        "%WIDTH%/%HEIGHT% are not supported — leave the size in the workflow, which owns it.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = accentColor.copy(alpha = 0.9f)
+                    )
+                }
+                if (ComfyWorkflowWarning.NO_PROMPT_FIELD in warnings) {
+                    Text(
+                        "No %PROMPT% field: the text you type would be ignored.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = accentColor.copy(alpha = 0.9f)
+                    )
+                }
+                if (workflow.isBlank()) {
+                    Text(
+                        "No workflow yet — this entry cannot generate until you paste one.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                    )
+                } else if (warnings.isEmpty()) {
+                    Text(
+                        "Workflow ready.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+            }
+        }
+        pickerError?.let {
+            Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+        }
+    }
+
+    if (showEditor) {
+        // A temp buffer committed only on Save, the same shape the persona editor's fullscreen
+        // system-prompt dialog uses: Cancel must not lose the workflow already stored, and a
+        // rejected paste must stay on screen so the user can fix one node instead of retyping.
+        var tempWorkflow by remember { mutableStateOf(workflow) }
+        AlertDialog(
+            onDismissRequest = { showEditor = false },
+            modifier = Modifier.fillMaxSize(),
+            properties = DialogProperties(usePlatformDefaultWidth = false)
+        ) {
+            Surface(
+                modifier = Modifier.fillMaxSize(),
+                shape = RectangleShape,
+                color = MaterialTheme.colorScheme.surface,
+                tonalElevation = 6.dp
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(16.dp)
+                        .imePadding(),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Text("ComfyUI Workflow", style = MaterialTheme.typography.titleLarge)
+                    Text(
+                        COMFY_WORKFLOW_HELP,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                    )
+                    OutlinedTextField(
+                        value = tempWorkflow,
+                        onValueChange = {
+                            tempWorkflow = it
+                            commitError = null
+                        },
+                        label = { Text("Paste an API-format workflow") },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f),
+                        maxLines = Int.MAX_VALUE,
+                        textStyle = LocalTextStyle.current.copy(
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 12.sp
+                        )
+                    )
+                    commitError?.let {
+                        Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.End,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        TextButton(onClick = { showEditor = false }) { Text("Cancel") }
+                        Spacer(Modifier.width(8.dp))
+                        Button(
+                            onClick = {
+                                when (val result = validateComfyWorkflow(tempWorkflow)) {
+                                    is ComfyWorkflowValidation.Valid -> {
+                                        onWorkflowChange(tempWorkflow)
+                                        showEditor = false
+                                    }
+                                    is ComfyWorkflowValidation.Invalid -> commitError = result.message
+                                }
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = accentColor.copy(alpha = 0.8f))
+                        ) { Text("Save") }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Reads a picked workflow as UTF-8 text.
+ *
+ * Capped at [COMFY_MAX_WORKFLOW_CHARS] bytes plus one — the count is in BYTES while the validation
+ * cap is in characters, and for a JSON workflow the byte count is at least the character count, so
+ * the read always stops early enough for the "too large" message rather than for a silently
+ * truncated — and therefore invalid — template. Returns null only when the file cannot be read.
+ */
+private fun readComfyWorkflowText(context: Context, uri: Uri): String? = try {
+    context.contentResolver.openInputStream(uri)?.use { stream ->
+        val limit = COMFY_MAX_WORKFLOW_CHARS
+        val buffer = ByteArray(64 * 1024)
+        val collected = java.io.ByteArrayOutputStream()
+        var total = 0
+        while (total <= limit) {
+            val read = stream.read(buffer)
+            if (read <= 0) break
+            collected.write(buffer, 0, read)
+            total += read
+        }
+        String(collected.toByteArray(), Charsets.UTF_8)
+    }
+} catch (_: Exception) {
+    null
+}
+
+
+
+/**
+ * The Image Gen area: the active-generator switch and the two typed sections.
+ *
+ * Split out of [ServerSettings] so it can be composed — and rotated — on its own in a test, and so
+ * the two-section rule (an entry belongs to the section whose type it carries, and the "+" of a
+ * section can only create that type) lives in one place.
+ */
+@Composable
+internal fun ImageGenSettings(
+    service: AssistantService,
+    imageGen: List<ServerConfig>,
+    status: Map<String, String>,
+    currentThemeColor: Color,
+    snackbarHostState: SnackbarHostState
+) {
+    // The one choice that decides which server an image request uses. Collected rather than read
+    // once, so a switch made anywhere (this screen, a restored backup) is reflected immediately —
+    // and it comes from the service, so it survives a rotation by construction.
+    var activeImageGen by remember { mutableStateOf(DEFAULT_IMAGE_GEN_BACKEND) }
+    LaunchedEffect(service) {
+        service.activeImageGenBackend.collect { activeImageGen = it }
+    }
+    SettingsSection {
+        Text(
+            "Active image generator",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+        )
+        Spacer(Modifier.height(8.dp))
+        SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+            ImageGenBackend.entries.forEachIndexed { index, backend ->
+                SegmentedButton(
+                    selected = activeImageGen == backend,
+                    onClick = { service.setActiveImageGenBackend(backend) },
+                    shape = SegmentedButtonDefaults.itemShape(
+                        index = index,
+                        count = ImageGenBackend.entries.size
+                    ),
+                    label = { Text(backend.displayName) }
+                )
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        val activeEntries = imageGen.filter { it.backendType == activeImageGen }
+        if (activeEntries.isEmpty()) {
+            // A hint, not an error: the switch is a valid choice that simply cannot generate yet,
+            // and the fix is one row below it.
+            Text(
+                "No ${activeImageGen.displayName} server yet — add one below, or switch the active generator.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error
+            )
+        } else {
+            Text(
+                "Image requests use “${activeEntries.first().name}”. The first entry of the active type is used, so reorder to change it.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+            )
+        }
+    }
+    ImageGenBackend.entries.forEach { backend ->
+        ServerListSection(
+            // "… servers" rather than just the type name: the section header then reads as a list
+            // title, and it cannot be confused with the switch option of the same name above it.
+            title = "${backend.displayName} servers",
+            servers = imageGen.filter { it.backendType == backend },
+            status = status,
+            onAdd = { name: String, url: String, user: String?, pass: String?, authType: AuthType, apiKey: String?, backendType: ImageGenBackend, workflow: String? -> service.addImageGenBase(name, url, user, pass, authType, apiKey, backendType, workflow) },
+            onRemove = { service.removeImageGenBase(it) },
+            onEdit = { old: ServerConfig, name: String, url: String, user: String?, pass: String?, authType: AuthType, apiKey: String?, backendType: ImageGenBackend, workflow: String? -> service.updateImageGenBase(old, name, url, user, pass, authType, apiKey, backendType, workflow) },
+            currentThemeColor = currentThemeColor,
+            onRefreshHealth = { service.forceCheckHealth(it, false, true) },
+            onRefreshModels = { },
+            onMoveUp = { service.moveImageGenUp(it) },
+            onMoveDown = { service.moveImageGenDown(it) },
+            isGateway = false,
+            isImageGen = true,
+            imageGenBackend = backend,
+            service = service,
+            snackbarHostState = snackbarHostState
+        )
     }
 }
 
@@ -1930,6 +2286,11 @@ Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
 // internal so the JVM unit test (ServerConnectionMessageTest) can pin the wording.
 internal fun serverConnectionFailureMessage(result: ServerConnectionResult, authType: AuthType): String {
     return when {
+        // A wrong-backend address beats every other explanation: "this address doesn't seem right"
+        // is true but useless when the server just told us it is the other API. Checked FIRST, so a
+        // 404 or 405 that answered the other backend's probe can never fall through to the generic
+        // wording below.
+        result.backendMismatch != null -> result.backendMismatch
         result.httpCode == 401 || result.httpCode == 403 ->
             if (authType == AuthType.API_KEY) "Authentication failed — check your API key"
             else "Authentication failed — check your username/password"

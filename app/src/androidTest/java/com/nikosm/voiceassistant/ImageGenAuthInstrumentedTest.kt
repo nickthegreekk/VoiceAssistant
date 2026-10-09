@@ -114,8 +114,15 @@ class ImageGenAuthInstrumentedTest {
     ): ServerConfig {
         val entry = ServerConfig(PROBE_SERVER, stub.url, IMAGE_GEN_PROBE_USER, password, AuthType.BASIC)
         mainSync {
-            service._imageGenBases.value =
-                imageGenBefore.filterNot { it.name == PROBE_SERVER || it.url == stub.url } + entry
+            // The probe is PREPENDED, not appended. With a stale pin now falling back (and the
+            // inline trigger ignoring the chat URL entirely), the ACTIVE type's FIRST entry is what
+            // a request uses — and a fresh install already holds a default "Local A1111" entry at
+            // http://0.0.0.0:7860 that would otherwise outrank the stub.
+            service._imageGenBases.value = listOf(entry) +
+                imageGenBefore.filterNot { it.name == PROBE_SERVER || it.url == stub.url }
+            // Explicit, not assumed: the active backend is in-memory service state that another
+            // test class may have moved, and every case here is an A1111 one.
+            service.setActiveImageGenBackend(ImageGenBackend.A1111)
         }
         return entry
     }
@@ -188,8 +195,11 @@ class ImageGenAuthInstrumentedTest {
     fun inlineCreateImageTriggerFromANormalPersonaReachesTxt2imgWithTheHeader() {
         ImageGenStub().use { stub ->
             registerImageGenServer(stub)
-            // Trailing-slash Backend URL exercises the resolver's URL normalization end-to-end.
-            val persona = probePersona("ProbeInline", stub.url + "/", isImageGenerator = false)
+            // The persona's Backend URL is where its CHAT goes — an Ollama-style address that
+            // matches no Image Gen entry. The inline trigger must IGNORE it and use the active
+            // generator (A1111), which is where the probe entry is; honouring it is what used to
+            // produce "No image server is configured for this persona".
+            val persona = probePersona("ProbeInline", "http://192.168.1.44:11434/", isImageGenerator = false)
             val genBefore = genFiles()
             mainSync { service._messages.value = emptyList() }
 
@@ -201,9 +211,15 @@ class ImageGenAuthInstrumentedTest {
             )
             val hit = stub.requests.first { it.path.startsWith(IMAGE_GEN_TXT2IMG_PATH) }
             assertEquals(stub.basicHeader, hit.headers["authorization"])
-            assertTrue(
-                "the trigger text must be stripped to the bare prompt",
-                hit.body.contains("red bicycle")
+            // BYTE-IDENTITY PROOF for the A1111 path, on the platform the request actually leaves
+            // from. Android's org.json is LinkedHashMap-backed, so this literal is insertion order
+            // and any change to the A1111 body — a reordered, renamed, added or removed field —
+            // fails here. The JVM unit test asserts the same field set order-independently,
+            // because the JVM's org.json artifact is HashMap-backed and would pin the wrong order.
+            assertEquals(
+                "the A1111 body must be exactly what it has always been",
+                """{"prompt":"a red bicycle","negative_prompt":"$IMAGE_GEN_NEGATIVE_PROMPT","steps":20,"width":512,"height":512}""",
+                hit.body
             )
             assertTrue(waitUntil { genFiles().size == genBefore.size + 1 })
         }
@@ -299,25 +315,58 @@ class ImageGenAuthInstrumentedTest {
     }
 
     @Test
-    fun anUnresolvableServerFailsVisiblyWithoutSendingAnything() {
+    fun aStalePinFallsBackToTheActiveGeneratorInsteadOfFailing() {
         ImageGenStub().use { stub ->
-            // List is non-empty (the probe is registered), but the persona points elsewhere
-            // and resolves to nothing.
+            // The persona pins an address that matches no entry — the reported "I edited my server
+            // and now the persona says it is not configured". The request must still go out, through
+            // the active generator, rather than refusing.
             registerImageGenServer(stub)
-            val persona = probePersona("ProbeUnresolved", "http://10.9.9.9:7860", isImageGenerator = true)
+            val persona = probePersona("ProbeStalePin", "http://10.9.9.9:7860", isImageGenerator = true)
             val genBefore = genFiles()
             mainSync { service._messages.value = emptyList() }
 
             runBlocking { service.performImageGeneration("a serene mountain lake", persona) }
 
-            assertTrue("no request may reach any server for an unresolved config", stub.requests.isEmpty())
-            val last = service._messages.value.last()
-            assertTrue("an unresolved server must surface an error bubble", last.isError)
+            val hit = stub.requests.firstOrNull { it.path.startsWith(IMAGE_GEN_TXT2IMG_PATH) }
+            assertNotNull("a stale pin must fall back to the active generator, not refuse", hit)
+            assertEquals("the fallback must use the configured entry's credentials", stub.basicHeader, hit!!.headers["authorization"])
+            assertTrue("the fallback must produce an image", waitUntil { genFiles().size == genBefore.size + 1 })
             assertTrue(
-                "the no-server error must name where to fix it",
+                "and it must not be reported as a failure: ${service._messages.value.last().text}",
+                !service._messages.value.last().isError
+            )
+        }
+    }
+
+    @Test
+    fun noEntryOfTheActiveTypeFailsVisiblyNamingTheTypeAndSendingNothing() {
+        ImageGenStub().use { stub ->
+            // Nothing configured at all: this is the case a fallback cannot rescue, so it must fail
+            // with an actionable message about the BACKEND, not about the persona.
+            mainSync {
+                service._imageGenBases.value = emptyList()
+                service.setActiveImageGenBackend(ImageGenBackend.A1111)
+            }
+            val persona = probePersona("ProbeNoEntries", stub.url, isImageGenerator = true)
+            mainSync { service._messages.value = emptyList() }
+
+            runBlocking { service.performImageGeneration("a serene mountain lake", persona) }
+
+            assertTrue("no request may reach any server with nothing configured", stub.requests.isEmpty())
+            val last = service._messages.value.last()
+            assertTrue("this must surface an error bubble", last.isError)
+            assertTrue(
+                "the error must name where to fix it: ${last.text}",
                 last.text.contains("Settings → Servers → Image Gen")
             )
-            assertEquals(genBefore.size, genFiles().size)
+            assertTrue(
+                "the error must name the active TYPE: ${last.text}",
+                last.text.contains(DEFAULT_IMAGE_GEN_BACKEND.displayName)
+            )
+            assertTrue(
+                "the error must not blame the persona: ${last.text}",
+                !last.text.contains("persona", ignoreCase = true)
+            )
         }
     }
 

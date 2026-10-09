@@ -580,31 +580,56 @@ fun PersonaEditor(
                     if (it) isTranslator = false
                 }
             )
-            Text("Image Generator Persona (A1111)")
+            Text("Image Generator Persona")
         }
 
         if (isImageGenerator) {
             var imageGenBases by remember { mutableStateOf<List<ServerConfig>>(emptyList()) }
+            var activeBackend by remember { mutableStateOf(DEFAULT_IMAGE_GEN_BACKEND) }
             LaunchedEffect(service) {
+                launch { imageGenBases = service.imageGenBases.value }
+                launch { activeBackend = service.activeImageGenBackend.value }
                 launch { service.imageGenBases.collect { imageGenBases = it } }
+                launch { service.activeImageGenBackend.collect { activeBackend = it } }
             }
+
+            // The SAME resolution the generation path uses, so this block can never describe a
+            // different server (or a different failure) than the one that will actually run.
+            val resolution = resolveImageGenConfig(imageGenBases, activeBackend, backendUrl.ifBlank { null })
+            val activeEntry = imageGenBases.firstOrNull { it.backendType == activeBackend }
+            val followLabel = "Follow the active generator (" +
+                (activeEntry?.name ?: "no ${activeBackend.displayName} server yet") + ")"
 
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 var expanded by remember { mutableStateOf(false) }
-                val selectedName = imageGenBases.find { it.url == backendUrl }?.name ?: if (backendUrl.isNotBlank()) "Custom URL" else "Select Server"
+                // The pinned entry is shown with its TYPE, because the dropdown lists both
+                // backends and two entries can be indistinguishable by name alone.
+                val selectedName = when {
+                    backendUrl.isBlank() -> followLabel
+                    else -> imageGenBases.find { it.url == backendUrl }
+                        ?.let { "${it.name} · ${it.backendType.displayName}" }
+                        ?: "Custom URL"
+                }
                 Box(modifier = Modifier.fillMaxWidth()) {
                     OutlinedTextField(
                         value = selectedName,
                         onValueChange = {},
                         readOnly = true,
-                        label = { Text("A1111 Backend") },
+                        label = { Text("Image Backend") },
                         modifier = Modifier.fillMaxWidth(),
                         trailingIcon = { IconButton(onClick = { expanded = true }) { Icon(Icons.Default.ArrowDropDown, null) } }
                     )
                     DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                        DropdownMenuItem(
+                            text = { Text(followLabel) },
+                            onClick = {
+                                backendUrl = ""
+                                expanded = false
+                            }
+                        )
                         imageGenBases.forEach { cfg ->
                             DropdownMenuItem(
-                                text = { Text(cfg.name) },
+                                text = { Text("${cfg.name} · ${cfg.backendType.displayName}") },
                                 onClick = {
                                     backendUrl = cfg.url
                                     expanded = false
@@ -616,9 +641,38 @@ fun PersonaEditor(
                 OutlinedTextField(
                     value = backendUrl,
                     onValueChange = { backendUrl = it },
-                    label = { Text("Server URL") },
+                    label = { Text("Pinned server URL (optional)") },
                     modifier = Modifier.fillMaxWidth()
                 )
+                // What this persona will ACTUALLY use, from the same resolution the generation path
+                // runs. The stale case is called out by name rather than left invisible: the persona
+                // still works, but not through the server its author pinned.
+                when (resolution) {
+                    is ImageGenResolution.NoEntryForActiveBackend ->
+                        Text(
+                            "No ${resolution.backend.displayName} server is configured. " +
+                                "Add one in Settings → Servers → Image Gen.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    is ImageGenResolution.Resolved -> {
+                        val stale = resolution.stalePinnedUrl
+                        if (stale != null) {
+                            Text(
+                                "The pinned server ($stale) is no longer configured. " +
+                                    "This persona will use ${resolution.config.name} instead.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error
+                            )
+                        } else {
+                            Text(
+                                "Images will use ${resolution.config.name} (${resolution.config.backendType.displayName}).",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = themeColor.copy(alpha = 0.85f)
+                            )
+                        }
+                    }
+                }
             }
         }
 

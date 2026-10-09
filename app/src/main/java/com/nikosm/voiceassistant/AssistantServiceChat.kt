@@ -2126,25 +2126,34 @@ internal suspend fun AssistantService.performImageGeneration(prompt: String, cur
     _state.value = AssistantState.THINKING
     updateNotification("Generating image...")
     try {
-        // One resolver + one header builder for every image-gen request (see
-        // AssistantServiceImageGen.kt). Resolving to a configured entry — never rebuilding
-        // a credential-less ServerConfig from the raw URL — is what keeps a generation
-        // authenticated exactly like Settings → Servers → Image Gen's Test Connection.
-        // A Backend URL that matches no configured entry fails visibly here instead of
-        // sending a bare request.
-        val config = resolveImageGenConfig(_imageGenBases.value, currentPersona.backendUrl)
-            ?: throw Exception(
-                "No image server is configured for this persona. " +
-                    "Add one in Settings → Servers → Image Gen."
+        // Which entry: the persona's OWN pin when it is an image-generator persona and still
+        // matches a configured entry, else the FIRST entry of the ACTIVE backend. A normal
+        // persona's Backend URL is where its CHAT goes — an Ollama base, a gateway, a cloud
+        // provider — and is deliberately NOT consulted here; feeding it to the image resolver is
+        // what used to fail every inline "create an image of …" with "not configured for this
+        // persona". One resolver + one header builder for every image-gen request (see
+        // AssistantServiceImageGen.kt), so a generation is authenticated exactly like Test
+        // Connection.
+        val config = when (
+            val resolution = resolveImageGenConfig(
+                _imageGenBases.value,
+                _activeImageGenBackend.value,
+                imageGenPinnedUrl(currentPersona)
             )
+        ) {
+            is ImageGenResolution.Resolved -> resolution.config
+            is ImageGenResolution.NoEntryForActiveBackend ->
+                throw Exception(noEntryForActiveImageBackendMessage(resolution.backend))
+        }
 
-        val jsonBody = JSONObject().apply {
-            put("prompt", prompt)
-            put("negative_prompt", "blurry, distorted, low quality, extra limbs, deformed")
-            put("steps", 20)
-            put("width", 512)
-            put("height", 512)
-        }.toString()
+        // ComfyUI is submit-then-poll, A1111 is one request. Both end in the same shared tail, so
+        // everything downstream (deletion, eviction, Regenerate, save-to-gallery) is unchanged.
+        if (config.backendType == ImageGenBackend.COMFYUI) {
+            performComfyImageGeneration(prompt, config, startTime)
+            return
+        }
+
+        val jsonBody = buildA1111Txt2ImgBody(prompt)
 
         val requestBody = jsonBody.toRequestBody("application/json; charset=utf-8".toMediaType())
         val request = imageGenRequestBuilder(config, IMAGE_GEN_TXT2IMG_PATH)
@@ -2155,7 +2164,12 @@ internal suspend fun AssistantService.performImageGeneration(prompt: String, cur
             client.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) {
                     if (response.code == 401 || response.code == 403) throw ImageGenAuthException()
-                    throw Exception("Image generation failed: HTTP ${response.code} ${response.message}")
+                    // A 404/405 that answers ComfyUI's /system_stats means this A1111-typed entry is
+                    // pointed at a ComfyUI server: say so instead of "Image generation failed: HTTP 404".
+                    val mismatch = imageGenBackendMismatchHint(config, response.code)
+                    throw Exception(
+                        mismatch ?: "Image generation failed: HTTP ${response.code} ${response.message}"
+                    )
                 }
                 response.body.string()
             }
@@ -2172,17 +2186,7 @@ internal suspend fun AssistantService.performImageGeneration(prompt: String, cur
             FileOutputStream(cacheFile).use { it.write(imageBytes) }
         }
 
-        val responseTime = System.currentTimeMillis() - startTime
-        _state.value = AssistantState.IDLE
-        updateNotification("Ready to help")
-
-        _messages.value = _messages.value + ChatMessage(
-            role = "assistant",
-            text = prompt,
-            generatedImagePath = cacheFile.absolutePath,
-            responseTimeMs = responseTime
-        ).stampedAt()
-        saveSettings()
+        publishGeneratedImage(prompt, cacheFile, startTime)
     } catch (e: ImageGenAuthException) {
         // A specific, actionable bubble: the raw status alone ("HTTP 401") does not tell the
         // user where to fix it. Deliberately does not log the pushback body or the header.

@@ -499,6 +499,16 @@ class AssistantService : Service() {
     internal val _imageGenBases = MutableStateFlow<List<ServerConfig>>(emptyList())
     val imageGenBases = _imageGenBases.asStateFlow()
 
+    /**
+     * Which image backend the app generates with — the switch on the Image Gen screen.
+     *
+     * A service-level flow rather than a per-persona choice, because the failure it fixes was
+     * exactly that the backend depended on where a persona happened to point. Defaults to
+     * [DEFAULT_IMAGE_GEN_BACKEND], so an install that never touches the switch behaves as before.
+     */
+    internal val _activeImageGenBackend = MutableStateFlow(DEFAULT_IMAGE_GEN_BACKEND)
+    val activeImageGenBackend = _activeImageGenBackend.asStateFlow()
+
     private val _manualModels = MutableStateFlow<List<String>>(emptyList())
     val manualModels = _manualModels.asStateFlow()
 
@@ -1305,13 +1315,14 @@ class AssistantService : Service() {
 
     /**
      * The one place a probe request to a server is built WITH its credentials. Image-gen
-     * servers (including the Test Connection probe, GET /sdapi/v1/sd-models, and the
-     * passive health re-check) go through [imageGenRequestBuilder], which resolves the
-     * auth header through the shared `effectiveAuthType` helper; every other server keeps
-     * the health-check URL plus [buildAuthorizationHeader].
+     * servers (including Test Connection and the passive health re-check) go through
+     * [imageGenRequestBuilder], which resolves the auth header through the shared
+     * `effectiveAuthType` helper AND picks the probe endpoint for the entry's backend — A1111's
+     * `GET /sdapi/v1/sd-models` or ComfyUI's `GET /system_stats` ([imageGenProbePath]); every
+     * other server keeps the health-check URL plus [buildAuthorizationHeader].
      */
     private fun buildServerRequest(target: ServerConfig, isGateway: Boolean, isImageGen: Boolean): Request.Builder {
-        if (isImageGen) return imageGenRequestBuilder(target, IMAGE_GEN_SD_MODELS_PATH)
+        if (isImageGen) return imageGenRequestBuilder(target, imageGenProbePath(target.backendType))
         val builder = Request.Builder().url(buildHealthCheckUrl(target, isGateway))
         buildAuthorizationHeader(target)?.let { builder.header("Authorization", it) }
         return builder
@@ -1368,7 +1379,18 @@ class AssistantService : Service() {
                     if (response.isSuccessful) {
                         ServerConnectionResult(success = true)
                     } else {
-                        ServerConnectionResult(success = false, httpCode = response.code, detail = response.message.ifBlank { null })
+                        // A 404/405 from an image-gen entry's own endpoint is the signature of the
+                        // entry sitting in the wrong section (see imageGenBackendMismatchHint): the
+                        // address is reachable and running another API. The probe is only sent for
+                        // those two statuses, and only for image-gen entries.
+                        ServerConnectionResult(
+                            success = false,
+                            httpCode = response.code,
+                            detail = response.message.ifBlank { null },
+                            backendMismatch = if (isImageGen) {
+                                imageGenBackendMismatchHint(target, response.code)
+                            } else null
+                        )
                     }
                 }
             } catch (e: CancellationException) {
@@ -1422,6 +1444,8 @@ class AssistantService : Service() {
         // importBackup being the one that matters — where nothing has armed them at all.
         refreshAllSpontaneousSchedules()
         _imageGenBases.value = settingsManager.getImageGenBases()?.takeIf { it.isNotEmpty() } ?: listOf(ServerConfig("Local A1111", "http://0.0.0.0:7860"))
+        // Loaded after the list so the two can never be momentarily inconsistent for a collector.
+        _activeImageGenBackend.value = settingsManager.getActiveImageGenBackend()
         // Rooms load AFTER the Ollama/cloud server lists, because eligibility is judged
         // against them: a member whose backing server has since been deleted, or which is
         // a gateway-only/image-generator/translator persona, cannot speak, so it is
@@ -1494,6 +1518,7 @@ class AssistantService : Service() {
             settingsManager.savePersonaMessages(name, _messages.value)
         }
         settingsManager.saveImageGenBases(_imageGenBases.value)
+        settingsManager.saveActiveImageGenBackend(_activeImageGenBackend.value)
         settingsManager.saveTotalCost(_totalCost.value)
         settingsManager.saveFavoriteModels(_favoriteModels.value)
     }
@@ -1727,9 +1752,19 @@ class AssistantService : Service() {
         _personas.value = rewritePersonasServerPrefix(_personas.value, oldName, newName)
     }
 
-    fun addImageGenBase(name: String, url: String, username: String? = null, password: String? = null, authType: AuthType = AuthType.NONE, apiKey: String? = null) {
+    /**
+     * Switches the generator. The first entry of the new type becomes the one image requests use,
+     * so this is the whole of the "which backend" decision — no per-entry flags.
+     */
+    fun setActiveImageGenBackend(backend: ImageGenBackend) {
+        if (_activeImageGenBackend.value == backend) return
+        _activeImageGenBackend.value = backend
+        saveSettings()
+    }
+
+    fun addImageGenBase(name: String, url: String, username: String? = null, password: String? = null, authType: AuthType = AuthType.NONE, apiKey: String? = null, backendType: ImageGenBackend = DEFAULT_IMAGE_GEN_BACKEND, comfyWorkflow: String? = null) {
         if (_imageGenBases.value.none { it.url == url }) {
-            _imageGenBases.value = _imageGenBases.value + ServerConfig(name, url, username, password, authType, apiKey)
+            _imageGenBases.value = _imageGenBases.value + ServerConfig(name, url, username, password, authType, apiKey, backendType, comfyWorkflow)
             saveSettings()
         } else {
             val existing = _imageGenBases.value.first { it.url == url }
@@ -1746,7 +1781,7 @@ class AssistantService : Service() {
         saveSettings()
     }
 
-    fun updateImageGenBase(oldConfig: ServerConfig, newName: String, newUrl: String, newUsername: String? = null, newPassword: String? = null, newAuthType: AuthType = AuthType.NONE, newApiKey: String? = null) {
+    fun updateImageGenBase(oldConfig: ServerConfig, newName: String, newUrl: String, newUsername: String? = null, newPassword: String? = null, newAuthType: AuthType = AuthType.NONE, newApiKey: String? = null, newBackendType: ImageGenBackend = oldConfig.backendType, newComfyWorkflow: String? = oldConfig.comfyWorkflow) {
         val current = _imageGenBases.value.toMutableList()
         val idx = current.indexOf(oldConfig)
         if (idx != -1) {
@@ -1759,7 +1794,10 @@ class AssistantService : Service() {
                 ).show()
                 return
             }
-            current[idx] = ServerConfig(newName, newUrl, newUsername, newPassword, newAuthType, newApiKey)
+            // The backend type and the workflow default to the entry's existing values, so an edit
+            // dialog that does not mention them (or a caller that only changes the URL) can never
+            // silently reset a ComfyUI entry back to A1111 or drop its template.
+            current[idx] = ServerConfig(newName, newUrl, newUsername, newPassword, newAuthType, newApiKey, newBackendType, newComfyWorkflow)
             _imageGenBases.value = current
             // A persona references its image-gen server by URL (backendUrl = cfg.url), so an
             // edited URL must repoint every image-generator persona at the new address — the

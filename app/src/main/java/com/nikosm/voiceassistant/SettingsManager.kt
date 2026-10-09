@@ -213,6 +213,20 @@ class SettingsManager(context: Context) {
         return null
     }
 
+    /**
+     * The image backend Celeste generates with — the two-section Image Gen screen's switch.
+     *
+     * Stored as the enum NAME and decoded through [imageGenBackendFromName], so an absent (every
+     * existing install), unknown or hand-edited value degrades to [DEFAULT_IMAGE_GEN_BACKEND] rather
+     * than breaking the setting. Unset therefore means "behaves exactly as before this existed".
+     */
+    fun saveActiveImageGenBackend(backend: ImageGenBackend) {
+        prefs.edit().putString("active_image_gen_backend", backend.name).apply()
+    }
+
+    fun getActiveImageGenBackend(): ImageGenBackend =
+        imageGenBackendFromName(prefs.getString("active_image_gen_backend", null))
+
     fun saveCloudApis(apis: List<CloudApiSetting>) {
         prefs.edit().putString("cloud_apis_v2", json.encodeToString(apis)).apply()
     }
@@ -858,7 +872,10 @@ class SettingsManager(context: Context) {
             roomMessages = exportedRooms.associate { it.id to (getRoomMessages(it.id) ?: emptyList()) },
             // Skills travel whole and unpruned: the personas below carry the ids that point
             // into this list, and the import prunes any that don't resolve.
-            skills = getSkills() ?: emptyList()
+            skills = getSkills() ?: emptyList(),
+            // The chosen generator travels too: a restored install should keep generating with the
+            // backend it was backed up with, not silently revert to A1111.
+            activeImageGenBackend = getActiveImageGenBackend()
         )
         return json.encodeToString(backup)
     }
@@ -893,6 +910,9 @@ class SettingsManager(context: Context) {
             // persona referencing a skill this backup doesn't contain must not restore an
             // enabled-but-missing skill.
             saveSkills(backup.skills)
+            // Absent in a backup taken before the switch existed, and defaulted to A1111 there, so
+            // this restores the behaviour that backup was taken with.
+            saveActiveImageGenBackend(backup.activeImageGenBackend)
             val restoredSkillIds = backup.skills.map { it.id }.toSet()
             savePersonas(
                 restoredPersonas.map { persona ->
@@ -1232,7 +1252,10 @@ data class BackupData(
     // Defaulted, so a backup written before Skills existed still decodes (and, thanks to
     // ignoreUnknownKeys, a NEW backup still imports into an older build — which simply
     // ignores the field and leaves every persona with no skills).
-    val skills: List<Skill> = emptyList()
+    val skills: List<Skill> = emptyList(),
+    // Which image backend Celeste generates with. Defaulted to A1111, so a backup written before
+    // the switch existed still decodes — and restores to exactly the behaviour it was taken with.
+    val activeImageGenBackend: ImageGenBackend = DEFAULT_IMAGE_GEN_BACKEND
 )
 
 // One persona's embedded artwork. Both slots are optional: a persona may have only an
