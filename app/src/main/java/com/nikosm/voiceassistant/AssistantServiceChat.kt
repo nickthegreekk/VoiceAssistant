@@ -2167,9 +2167,8 @@ internal suspend fun AssistantService.performImageGeneration(prompt: String, cur
                     // A 404/405 that answers ComfyUI's /system_stats means this A1111-typed entry is
                     // pointed at a ComfyUI server: say so instead of "Image generation failed: HTTP 404".
                     val mismatch = imageGenBackendMismatchHint(config, response.code)
-                    throw Exception(
-                        mismatch ?: "Image generation failed: HTTP ${response.code} ${response.message}"
-                    )
+                    if (mismatch != null) throw ImageGenBackendMismatchException(mismatch)
+                    throw Exception("Image generation failed: HTTP ${response.code} ${response.message}")
                 }
                 response.body.string()
             }
@@ -2187,6 +2186,22 @@ internal suspend fun AssistantService.performImageGeneration(prompt: String, cur
         }
 
         publishGeneratedImage(prompt, cacheFile, startTime)
+    } catch (e: CancellationException) {
+        // Stop cancels this coroutine. It must unwind as a cancellation — not be swallowed here and
+        // turned into an "Image generation error" bubble for a turn the user explicitly stopped.
+        throw e
+    } catch (e: ImageGenBackendMismatchException) {
+        // "This address looks like ComfyUI; add it under ComfyUI servers" is already the whole
+        // instruction, so it is shown as the bubble itself, not prefixed with "Image generation
+        // error:". Same idle/notify/bubble/save tail as every other failure.
+        _state.value = AssistantState.IDLE
+        updateNotification("Ready to help")
+        _messages.value = _messages.value + ChatMessage(
+            role = "assistant",
+            text = e.diagnosis,
+            isError = true
+        ).stampedAt()
+        saveSettings()
     } catch (e: ImageGenAuthException) {
         // A specific, actionable bubble: the raw status alone ("HTTP 401") does not tell the
         // user where to fix it. Deliberately does not log the pushback body or the header.

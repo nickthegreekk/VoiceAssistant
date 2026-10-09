@@ -110,7 +110,8 @@ class ComfyImageInstrumentedTest {
 
     private fun registerComfyServer(
         stub: ComfyUiStub,
-        password: String = COMFY_PROBE_PASSWORD
+        password: String = COMFY_PROBE_PASSWORD,
+        freeMemory: Boolean = false
     ): ServerConfig {
         val entry = ServerConfig(
             name = PROBE_SERVER,
@@ -120,7 +121,8 @@ class ComfyImageInstrumentedTest {
             authType = AuthType.BASIC,
             apiKey = null,
             backendType = ImageGenBackend.COMFYUI,
-            comfyWorkflow = WORKFLOW
+            comfyWorkflow = WORKFLOW,
+            freeComfyMemoryAfterImage = freeMemory
         )
         mainSync {
             service._imageGenBases.value =
@@ -523,6 +525,182 @@ class ComfyImageInstrumentedTest {
                 lastMessage().text.contains(COMFY_NO_WORKFLOW_MESSAGE)
             )
             assertTrue("nothing may be sent for an entry with no workflow", stub.requests.isEmpty())
+        }
+    }
+
+    // ------------------------------------------------------------------ Stop (queue-first cancel)
+
+    @Test
+    fun stoppingARunningJobInterruptsOnlyThatJob() {
+        ComfyUiStub().use { stub ->
+            val entry = registerComfyServer(stub)
+            // The default /queue answer has the job in queue_running.
+            runBlocking { service.cancelComfyJob(entry, stub.promptId) }
+
+            assertEquals("a running job must be interrupted", 1, stub.interruptCalls.get())
+            val interrupt = stub.requests.first { it.method == "POST" && it.path == COMFY_INTERRUPT_PATH }
+            assertTrue(
+                "the interrupt must name our prompt id: ${interrupt.body}",
+                interrupt.body.contains(stub.promptId)
+            )
+            assertFalse(
+                "a running job must not be 'deleted' from the queue",
+                stub.requests.any { it.method == "POST" && it.path == COMFY_QUEUE_PATH }
+            )
+        }
+    }
+
+    @Test
+    fun stoppingAPendingJobDeletesItFromTheQueue() {
+        ComfyUiStub().use { stub ->
+            stub.queuePending = true
+            val entry = registerComfyServer(stub)
+            runBlocking { service.cancelComfyJob(entry, stub.promptId) }
+
+            assertEquals("a pending job must NOT be interrupted (that is global)", 0, stub.interruptCalls.get())
+            val delete = stub.requests.firstOrNull { it.method == "POST" && it.path == COMFY_QUEUE_PATH }
+            assertNotNull("a pending job must be deleted from the queue", delete)
+            assertTrue("the delete must name our id: ${delete!!.body}", delete.body.contains(stub.promptId))
+        }
+    }
+
+    @Test
+    fun stoppingWhenTheQueueNoLongerHoldsOurJobDoesNothing() {
+        ComfyUiStub().use { stub ->
+            stub.loseJob = true
+            val entry = registerComfyServer(stub)
+            runBlocking { service.cancelComfyJob(entry, stub.promptId) }
+
+            assertEquals("an absent job must not be interrupted", 0, stub.interruptCalls.get())
+            assertFalse(
+                "an absent job must not be deleted",
+                stub.requests.any { it.method == "POST" && it.path == COMFY_QUEUE_PATH }
+            )
+        }
+    }
+
+    @Test
+    fun stoppingMidPollCancelsTheGenerationAndWritesNoImage() {
+        ComfyUiStub().use { stub ->
+            // The job never finishes on its own, so the run is genuinely mid-poll when Stop lands.
+            stub.pollsBeforeDone = Int.MAX_VALUE / 2
+            stub.queuePending = true
+            registerComfyServer(stub)
+            val persona = probePersona("ComfyStop", stub.url, isImageGenerator = true)
+            val genBefore = genFiles()
+            mainSync { service._messages.value = emptyList() }
+
+            service.sendTextMessageToServer("a serene mountain lake", persona)
+
+            assertTrue(
+                "the generation must be submitted and polled before Stop",
+                waitUntil { stub.requests.any { it.path == COMFY_PROMPT_PATH } && stub.historyPolls.get() >= 1 }
+            )
+
+            mainSync { service.stopEverything() }
+
+            assertTrue(
+                "Stop must delete the (pending) ComfyUI job",
+                waitUntil { stub.requests.any { it.method == "POST" && it.path == COMFY_QUEUE_PATH } }
+            )
+            // Give a would-be download time to land if the cancellation were broken.
+            Thread.sleep(1_500)
+            assertEquals("Stop must write no image", genBefore.size, genFiles().size)
+            assertTrue("...and no partial file", partialFiles().isEmpty())
+            assertNull("Stop must never reach /view", stub.lastViewQuery)
+            assertTrue(
+                "Stop must not publish an image or an error bubble: ${service._messages.value.map { it.text }}",
+                service._messages.value.none { it.generatedImagePath != null || it.isError }
+            )
+        }
+    }
+
+    // ------------------------------------------------------------------ GPU failure hint
+
+    @Test
+    fun aGpuFailureKeepsTheServersTextAndAppendsTheHint() {
+        ComfyUiStub().use { stub ->
+            stub.failJob = true
+            stub.failureMessage = "CUDA error: an illegal memory access was encountered"
+            registerComfyServer(stub)
+            val persona = probePersona("ComfyGpu", stub.url, isImageGenerator = true)
+            val genBefore = genFiles()
+            mainSync { service._messages.value = emptyList() }
+
+            runBlocking { service.performImageGeneration("a serene mountain lake", persona) }
+
+            val text = lastMessage().text
+            assertTrue("the server's own words must survive: $text", text.contains("illegal memory access"))
+            assertTrue("the hint must be appended: $text", text.contains(COMFY_GPU_FAILURE_HINT))
+            assertEquals(genBefore.size, genFiles().size)
+            assertNull("a failed run's image must not be fetched", stub.lastViewQuery)
+        }
+    }
+
+    // ------------------------------------------------------------------ the server stops answering
+
+    @Test
+    fun aServerThatStopsAnsweringMidPollFailsFastWithoutWritingAnImage() {
+        ComfyUiStub().use { stub ->
+            stub.dropHistoryConnections = true
+            registerComfyServer(stub)
+            val persona = probePersona("ComfyDead", stub.url, isImageGenerator = true)
+            val genBefore = genFiles()
+            mainSync { service._messages.value = emptyList() }
+
+            runBlocking { service.performImageGeneration("a serene mountain lake", persona) }
+
+            val text = lastMessage().text
+            assertTrue("the dead server must be named: $text", text.contains("stopped responding"))
+            assertTrue("...by its address: $text", text.contains(stub.url))
+            assertEquals(genBefore.size, genFiles().size)
+            assertTrue("...and no partial file", partialFiles().isEmpty())
+            assertNull("a dead server must never reach /view", stub.lastViewQuery)
+            assertTrue(
+                "the loop must have retried before giving up (saw ${stub.historyPolls.get()})",
+                stub.historyPolls.get() >= COMFY_TRANSPORT_FAILURES_BEFORE_DEAD
+            )
+        }
+    }
+
+    // ------------------------------------------------------------------ optional /free after save
+
+    @Test
+    fun freeMemoryIsSentExactlyOnceWhenTheEntryOptsIn() {
+        ComfyUiStub().use { stub ->
+            registerComfyServer(stub, freeMemory = true)
+            val persona = probePersona("ComfyFree", stub.url, isImageGenerator = true)
+            val genBefore = genFiles()
+            mainSync { service._messages.value = emptyList() }
+
+            runBlocking { service.performImageGeneration("a serene mountain lake", persona) }
+
+            assertTrue("the image must be saved first", waitUntil { genFiles().size == genBefore.size + 1 })
+            assertEquals("exactly one /free must be sent", 1, stub.freeCalls.get())
+            val free = stub.requests.first { it.method == "POST" && it.path == COMFY_FREE_PATH }
+            assertEquals("both flags must be asked for", buildComfyFreeBody(), free.body)
+            assertEquals(
+                "the entry's credentials must be attached to /free",
+                stub.basicHeader,
+                free.headers["authorization"]
+            )
+        }
+    }
+
+    @Test
+    fun freeMemoryIsNotSentWhenTheEntryDoesNotOptIn() {
+        ComfyUiStub().use { stub ->
+            // Default: the switch is off, so the entry carries freeComfyMemoryAfterImage = false.
+            registerComfyServer(stub)
+            val persona = probePersona("ComfyNoFree", stub.url, isImageGenerator = true)
+            val genBefore = genFiles()
+            mainSync { service._messages.value = emptyList() }
+
+            runBlocking { service.performImageGeneration("a serene mountain lake", persona) }
+
+            assertTrue("the image must still be saved", waitUntil { genFiles().size == genBefore.size + 1 })
+            Thread.sleep(300)
+            assertEquals("no /free when the switch is off", 0, stub.freeCalls.get())
         }
     }
 }

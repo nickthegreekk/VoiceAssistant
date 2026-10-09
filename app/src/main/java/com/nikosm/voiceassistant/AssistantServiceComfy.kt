@@ -1,12 +1,17 @@
 package com.nikosm.voiceassistant
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.job
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.File
 import java.io.FileOutputStream
+import java.io.IOException
 
 // ---------------------------------------------------------------------------
 // The ComfyUI generation flow.
@@ -55,14 +60,30 @@ internal suspend fun AssistantService.performComfyImageGeneration(
         )
     )
 
-    val promptId = when (val submit = submitComfyPrompt(config, buildComfySubmitBody(workflow))) {
-        is ComfyPromptSubmit.Accepted -> submit.promptId
-        is ComfyPromptSubmit.Rejected -> throw Exception(submit.message)
-    }
+    // Register this run so Stop can cancel the poll and stop the server-side job. The config is set
+    // before submit (a Stop during submit still cancels this coroutine); the prompt id is added the
+    // moment the server answers. Clearing in `finally` covers success, failure and cancellation
+    // alike, so a finished run never leaves a stale handle for Stop to act on.
+    comfyGenJob = currentCoroutineContext().job
+    comfyGenConfig = config
+    try {
+        val promptId = when (val submit = submitComfyPrompt(config, buildComfySubmitBody(workflow))) {
+            is ComfyPromptSubmit.Accepted -> submit.promptId
+            is ComfyPromptSubmit.Rejected -> throw Exception(submit.message)
+        }
+        comfyGenPromptId = promptId
 
-    val image = awaitComfyJob(config, promptId)
-    val file = downloadComfyImage(config, image)
-    publishGeneratedImage(prompt, file, startTime)
+        val image = awaitComfyJob(config, promptId)
+        val file = downloadComfyImage(config, image)
+        publishGeneratedImage(prompt, file, startTime)
+        // Optional, off by default, and deliberately last: the image is already saved, so a /free
+        // that fails (or is rejected by an older server) must not change what the user sees.
+        if (config.freeComfyMemoryAfterImage) freeComfyMemory(config)
+    } finally {
+        comfyGenJob = null
+        comfyGenPromptId = null
+        comfyGenConfig = null
+    }
 }
 
 private class ComfyHttpResult(val code: Int, val body: String, val message: String)
@@ -72,7 +93,7 @@ private suspend fun AssistantService.submitComfyPrompt(config: ServerConfig, bod
     // A 404/405 from /prompt on an address that answers /sdapi/v1/sd-models is an A1111 server on
     // the ComfyUI list. Naming that beats "ComfyUI returned HTTP 404", and it is the whole reason a
     // generation can fail here with the address plainly reachable and healthy.
-    imageGenBackendMismatchHint(config, result.code)?.let { return ComfyPromptSubmit.Rejected(it) }
+    imageGenBackendMismatchHint(config, result.code)?.let { throw ImageGenBackendMismatchException(it) }
     return parseComfySubmitResponse(result.code, result.body)
 }
 
@@ -84,31 +105,133 @@ private suspend fun AssistantService.submitComfyPrompt(config: ServerConfig, bod
  * it is never coming back, and failing then with a clear message beats waiting out the full
  * [COMFY_POLL_TIMEOUT_MS]. A queue that cannot be read is not evidence of anything, so an UNKNOWN
  * answer simply resumes polling.
+ *
+ * A TRANSPORT failure (a dropped connection, a refused connect, a timeout) is not a job failure:
+ * one blip is tolerated and polling continues. [COMFY_TRANSPORT_FAILURES_BEFORE_DEAD] of them in a
+ * row inside [COMFY_TRANSPORT_FAILURE_WINDOW_MS] mean the address itself is gone, and the loop
+ * fails at once with [comfyUnreachableMessage] rather than polling a dead socket for ten minutes.
+ * A successful answer resets the streak.
  */
 private suspend fun AssistantService.awaitComfyJob(config: ServerConfig, promptId: String): ComfyOutputImage {
     val startedAt = System.currentTimeMillis()
     val deadline = startedAt + COMFY_POLL_TIMEOUT_MS
     var interval = COMFY_POLL_INITIAL_MS
     var queueChecked = false
+    var transportFailures = 0
+    var firstFailureAt = 0L
 
     while (true) {
         if (System.currentTimeMillis() > deadline) {
             throw Exception(comfyJobTimeoutMessage(COMFY_POLL_TIMEOUT_MS / 60_000L))
         }
-        val history = comfyJson(config, "$COMFY_HISTORY_PATH/$promptId")
+        val history = try {
+            comfyJson(config, "$COMFY_HISTORY_PATH/$promptId")
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: ImageGenAuthException) {
+            throw e
+        } catch (e: IOException) {
+            val now = System.currentTimeMillis()
+            if (transportFailures == 0) firstFailureAt = now
+            transportFailures++
+            if (transportFailures >= COMFY_TRANSPORT_FAILURES_BEFORE_DEAD &&
+                now - firstFailureAt <= COMFY_TRANSPORT_FAILURE_WINDOW_MS
+            ) {
+                throw Exception(comfyUnreachableMessage(normalizeGatewayUrl(config.url)))
+            }
+            delay(interval)
+            interval = minOf((interval * COMFY_POLL_BACKOFF).toLong(), COMFY_POLL_MAX_MS)
+            continue
+        }
+        transportFailures = 0
+
         when (val state = parseComfyJobState(history.body, promptId)) {
             is ComfyJobState.Finished -> return state.image
             is ComfyJobState.Failed -> throw Exception(state.message)
             is ComfyJobState.Pending -> {
                 if (!queueChecked && System.currentTimeMillis() - startedAt >= COMFY_LOST_JOB_AFTER_MS) {
                     queueChecked = true
-                    val position = parseComfyQueuePosition(comfyJson(config, COMFY_QUEUE_PATH).body, promptId)
+                    val position = try {
+                        parseComfyQueuePosition(comfyJson(config, COMFY_QUEUE_PATH).body, promptId)
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: ImageGenAuthException) {
+                        throw e
+                    } catch (e: IOException) {
+                        // A queue that does not answer is not evidence the job is gone.
+                        ComfyQueuePosition.UNKNOWN
+                    }
                     if (position == ComfyQueuePosition.ABSENT) throw Exception(COMFY_JOB_LOST_MESSAGE)
                 }
             }
         }
         delay(interval)
         interval = minOf((interval * COMFY_POLL_BACKOFF).toLong(), COMFY_POLL_MAX_MS)
+    }
+}
+
+/**
+ * Stop path for a ComfyUI generation (called from `stopEverything`).
+ *
+ * Cancels the local poll FIRST — that alone is what guarantees no file is written — then, when the
+ * job's prompt id is known, best-effort tells the server to stop. The server side is deliberately
+ * queue-FIRST: a bodyless `/interrupt` is GLOBAL, so it is only sent once `/queue` has confirmed OUR
+ * id is the running one; a pending job is removed with a targeted `/queue` delete; anything else
+ * (absent, or a queue that cannot be read) is left alone, because a job the user started in the
+ * browser must never be killed by our Stop.
+ */
+internal fun AssistantService.stopComfyGeneration() {
+    val job = comfyGenJob
+    val promptId = comfyGenPromptId
+    val config = comfyGenConfig
+    comfyGenJob = null
+    comfyGenPromptId = null
+    comfyGenConfig = null
+    job?.cancel()
+    if (promptId != null && config != null) {
+        serviceScope.launch(Dispatchers.IO) {
+            try {
+                cancelComfyJob(config, promptId)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                // Best-effort: the local poll is already cancelled, and Stop must not fail noisily.
+            }
+        }
+    }
+}
+
+/**
+ * One read of `/queue` followed by the matching cancel action, or nothing.
+ *
+ * Read-only when the answer does not place OUR id in `queue_running` or `queue_pending` — see
+ * [stopComfyGeneration] for why that matters. Internal (not private) so a stub test can drive each
+ * of the three cases deterministically without racing a real generation.
+ */
+internal suspend fun AssistantService.cancelComfyJob(config: ServerConfig, promptId: String) {
+    val body = comfyJson(config, COMFY_QUEUE_PATH).body
+    when (parseComfyQueuePosition(body, promptId)) {
+        ComfyQueuePosition.RUNNING ->
+            comfyJson(config, COMFY_INTERRUPT_PATH, method = "POST", body = buildComfyInterruptBody(promptId))
+        ComfyQueuePosition.PENDING ->
+            comfyJson(config, COMFY_QUEUE_PATH, method = "POST", body = buildComfyQueueDeleteBody(promptId))
+        ComfyQueuePosition.ABSENT, ComfyQueuePosition.UNKNOWN -> Unit
+    }
+}
+
+/**
+ * Best-effort `POST /free` after an image is published, when the entry opts in.
+ *
+ * Failures — a 401, an old server without the route, a dropped connection — are ignored on purpose:
+ * the image is already saved, and a housekeeping call must not turn into a user-visible error.
+ */
+private suspend fun AssistantService.freeComfyMemory(config: ServerConfig) {
+    try {
+        comfyJson(config, COMFY_FREE_PATH, method = "POST", body = buildComfyFreeBody())
+    } catch (e: CancellationException) {
+        throw e
+    } catch (_: Exception) {
+        // Ignored: freeing memory is opportunistic.
     }
 }
 

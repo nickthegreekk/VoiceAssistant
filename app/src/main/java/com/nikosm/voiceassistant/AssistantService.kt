@@ -509,6 +509,19 @@ class AssistantService : Service() {
     internal val _activeImageGenBackend = MutableStateFlow(DEFAULT_IMAGE_GEN_BACKEND)
     val activeImageGenBackend = _activeImageGenBackend.asStateFlow()
 
+    /**
+     * The ComfyUI generation that is in flight, if any — see `AssistantServiceComfy.kt`.
+     *
+     * Registered the moment a generation starts polling and cleared when it ends, so the Stop path
+     * can cancel this one coroutine and tell the server to stop THAT job. A1111 generations never set
+     * these, which is what makes Stop a no-op for them. [comfyGenPromptId] is only known after
+     * `POST /prompt` answers, so during the submit window Stop cancels the local poll but rightly
+     * takes no server-side action (there is no id to act on).
+     */
+    @Volatile internal var comfyGenJob: Job? = null
+    @Volatile internal var comfyGenPromptId: String? = null
+    @Volatile internal var comfyGenConfig: ServerConfig? = null
+
     private val _manualModels = MutableStateFlow<List<String>>(emptyList())
     val manualModels = _manualModels.asStateFlow()
 
@@ -1762,9 +1775,9 @@ class AssistantService : Service() {
         saveSettings()
     }
 
-    fun addImageGenBase(name: String, url: String, username: String? = null, password: String? = null, authType: AuthType = AuthType.NONE, apiKey: String? = null, backendType: ImageGenBackend = DEFAULT_IMAGE_GEN_BACKEND, comfyWorkflow: String? = null) {
+    fun addImageGenBase(name: String, url: String, username: String? = null, password: String? = null, authType: AuthType = AuthType.NONE, apiKey: String? = null, backendType: ImageGenBackend = DEFAULT_IMAGE_GEN_BACKEND, comfyWorkflow: String? = null, freeComfyMemoryAfterImage: Boolean = false) {
         if (_imageGenBases.value.none { it.url == url }) {
-            _imageGenBases.value = _imageGenBases.value + ServerConfig(name, url, username, password, authType, apiKey, backendType, comfyWorkflow)
+            _imageGenBases.value = _imageGenBases.value + ServerConfig(name, url, username, password, authType, apiKey, backendType, comfyWorkflow, freeComfyMemoryAfterImage)
             saveSettings()
         } else {
             val existing = _imageGenBases.value.first { it.url == url }
@@ -1781,7 +1794,7 @@ class AssistantService : Service() {
         saveSettings()
     }
 
-    fun updateImageGenBase(oldConfig: ServerConfig, newName: String, newUrl: String, newUsername: String? = null, newPassword: String? = null, newAuthType: AuthType = AuthType.NONE, newApiKey: String? = null, newBackendType: ImageGenBackend = oldConfig.backendType, newComfyWorkflow: String? = oldConfig.comfyWorkflow) {
+    fun updateImageGenBase(oldConfig: ServerConfig, newName: String, newUrl: String, newUsername: String? = null, newPassword: String? = null, newAuthType: AuthType = AuthType.NONE, newApiKey: String? = null, newBackendType: ImageGenBackend = oldConfig.backendType, newComfyWorkflow: String? = oldConfig.comfyWorkflow, newFreeComfyMemoryAfterImage: Boolean = oldConfig.freeComfyMemoryAfterImage) {
         val current = _imageGenBases.value.toMutableList()
         val idx = current.indexOf(oldConfig)
         if (idx != -1) {
@@ -1797,7 +1810,7 @@ class AssistantService : Service() {
             // The backend type and the workflow default to the entry's existing values, so an edit
             // dialog that does not mention them (or a caller that only changes the URL) can never
             // silently reset a ComfyUI entry back to A1111 or drop its template.
-            current[idx] = ServerConfig(newName, newUrl, newUsername, newPassword, newAuthType, newApiKey, newBackendType, newComfyWorkflow)
+            current[idx] = ServerConfig(newName, newUrl, newUsername, newPassword, newAuthType, newApiKey, newBackendType, newComfyWorkflow, newFreeComfyMemoryAfterImage)
             _imageGenBases.value = current
             // A persona references its image-gen server by URL (backendUrl = cfg.url), so an
             // edited URL must repoint every image-generator persona at the new address — the

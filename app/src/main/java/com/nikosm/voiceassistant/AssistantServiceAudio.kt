@@ -580,6 +580,10 @@ fun AssistantService.stopEverything() {
     // eventually produces — no history append and, critically, no playResponse —
     // even when the underlying network work completes after Stop was pressed.
     nextChatRequestSeq()
+    // ComfyUI is submit-then-poll, so a Stop must also cancel the poll (no file is written once the
+    // coroutine dies) and, best-effort, tell the server to drop that one job. Deliberately after the
+    // sequence bump so the turn is already invalidated, and a no-op for A1111 and an idle app.
+    stopComfyGeneration()
     // Fix: stop an active manual recording — the red STOP button is reachable during
     // LISTENING, and this used to leave the MediaRecorder running: the mic stayed hot
     // after an explicit Stop, the partial file grew unbounded, and the next

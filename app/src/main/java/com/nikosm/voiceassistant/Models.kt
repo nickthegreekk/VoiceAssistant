@@ -259,7 +259,17 @@ data class ServerConfig(
      * up for free; deleting the entry deletes the template; and there is no device-local path to
      * dangle after a restore on another device.
      */
-    val comfyWorkflow: String? = null
+    val comfyWorkflow: String? = null,
+    /**
+     * ComfyUI only, OFF by default: after a generated image is saved, the app sends one best-effort
+     * `POST /free {"unload_models":true,"free_memory":true}` with this entry's credentials, so a
+     * model that would otherwise sit in VRAM is released. Failures are ignored — the image is
+     * already saved — and the flag does nothing for A1111 entries.
+     *
+     * Defaulted, and declared LAST, for the same reasons as [backendType]: every entry and backup
+     * persisted before this existed decodes without the key and keeps behaving exactly as before.
+     */
+    val freeComfyMemoryAfterImage: Boolean = false
 ) {
     // Backward compatibility: existing entries with username but default authType should use BASIC
     val effectiveAuthType: AuthType

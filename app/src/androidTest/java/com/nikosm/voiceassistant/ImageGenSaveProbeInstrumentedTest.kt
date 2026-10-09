@@ -162,11 +162,11 @@ class ImageGenSaveProbeInstrumentedTest {
                         title = "${backend.displayName} servers",
                         servers = emptyList(),
                         status = emptyMap(),
-                        onAdd = { name, entryUrl, user, pass, authType, apiKey, backendType, workflow ->
-                            service.addImageGenBase(name, entryUrl, user, pass, authType, apiKey, backendType, workflow)
+                        onAdd = { name, entryUrl, user, pass, authType, apiKey, backendType, workflow, freeMemory ->
+                            service.addImageGenBase(name, entryUrl, user, pass, authType, apiKey, backendType, workflow, freeMemory)
                         },
                         onRemove = { },
-                        onEdit = { _, _, _, _, _, _, _, _, _ -> },
+                        onEdit = { _, _, _, _, _, _, _, _, _, _ -> },
                         onRefreshHealth = { },
                         onRefreshModels = { },
                         onMoveUp = { },

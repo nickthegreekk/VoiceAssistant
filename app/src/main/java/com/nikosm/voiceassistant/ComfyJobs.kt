@@ -4,6 +4,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import java.util.UUID
 
@@ -51,6 +52,20 @@ internal const val COMFY_LOST_JOB_AFTER_MS = 5_000L
 /** Hard cap on a downloaded image, enforced while streaming to a temp file. */
 internal const val COMFY_MAX_IMAGE_BYTES = 25 * 1024 * 1024
 
+/**
+ * How many consecutive transport failures (a dropped connection, a refused connect, a timeout)
+ * while polling mean the server is gone rather than briefly busy.
+ *
+ * A transport failure is not a job failure: ComfyUI keeps running and a single blip must be
+ * tolerated. Several in a row inside [COMFY_TRANSPORT_FAILURE_WINDOW_MS] are the server itself
+ * being unreachable, and saying so at once beats waiting out the full [COMFY_POLL_TIMEOUT_MS] on
+ * a socket that will never answer.
+ */
+internal const val COMFY_TRANSPORT_FAILURES_BEFORE_DEAD = 4
+
+/** Window the [COMFY_TRANSPORT_FAILURES_BEFORE_DEAD] failures must fall inside to count as dead. */
+internal const val COMFY_TRANSPORT_FAILURE_WINDOW_MS = 8_000L
+
 // --- messages (constants so the UI and tests cannot drift) -----------------------------------
 
 internal const val COMFY_NO_WORKFLOW_MESSAGE =
@@ -65,6 +80,37 @@ internal const val COMFY_JOB_FAILED_MESSAGE =
     "The workflow failed before producing an image."
 internal const val COMFY_IMAGE_TOO_LARGE_MESSAGE =
     "The image ComfyUI returned is larger than 25 MB."
+
+/**
+ * Appended to ComfyUI's OWN error text when the run failed on the GPU.
+ *
+ * The server's words are always kept — they name the node and the exact fault — and this only adds
+ * the two things a user cannot read off that text: that a retry needs a ComfyUI restart, and that a
+ * tiled VAE decode is the usual way around it.
+ */
+internal const val COMFY_GPU_FAILURE_HINT =
+    "ComfyUI's GPU failed. Restart ComfyUI before retrying, and consider VAE Decode (Tiled) in the " +
+        "workflow."
+
+/** Substrings (case-insensitive) that mark a ComfyUI error as a GPU failure. */
+internal val COMFY_GPU_ERROR_MARKERS = listOf("illegal memory access", "hipError", "out of memory")
+
+/** The operator-visible wording when the ComfyUI address stops answering while polling. */
+internal fun comfyUnreachableMessage(address: String): String =
+    "ComfyUI at $address stopped responding"
+
+/**
+ * ComfyUI's error text, with [COMFY_GPU_FAILURE_HINT] appended when it names a GPU failure.
+ *
+ * Pure and idempotent-by-inspection: a message that does not carry a marker is returned unchanged,
+ * so every non-GPU failure reads exactly as it always did.
+ */
+internal fun withComfyGpuHint(message: String): String =
+    if (COMFY_GPU_ERROR_MARKERS.any { message.contains(it, ignoreCase = true) }) {
+        "$message $COMFY_GPU_FAILURE_HINT"
+    } else {
+        message
+    }
 
 internal fun comfyJobTimeoutMessage(minutes: Long): String =
     "The image job did not finish within $minutes minutes."
@@ -131,6 +177,29 @@ internal fun buildComfySubmitBody(workflowJson: String, clientId: String = UUID.
 }
 
 /**
+ * The body Stop posts to `/interrupt`.
+ *
+ * Carries the prompt id even though the caller has ALREADY confirmed the id is in `queue_running`:
+ * current ComfyUI answers a targeted interrupt by only calling `interrupt_processing()` when that id
+ * is genuinely the running one, so this is the belt to the `/queue` check's braces and can never
+ * disturb a job started from the browser.
+ */
+internal fun buildComfyInterruptBody(promptId: String): String =
+    buildJsonObject { put("prompt_id", JsonPrimitive(promptId)) }.toString()
+
+/** The body Stop posts to `/queue` for a job that is still pending: delete exactly that id. */
+internal fun buildComfyQueueDeleteBody(promptId: String): String =
+    buildJsonObject {
+        put("delete", buildJsonArray { add(JsonPrimitive(promptId)) })
+    }.toString()
+
+/** The body the optional "free memory after each image" switch posts to `/free`. */
+internal fun buildComfyFreeBody(): String = buildJsonObject {
+    put("unload_models", JsonPrimitive(true))
+    put("free_memory", JsonPrimitive(true))
+}.toString()
+
+/**
  * Reads `POST /prompt`'s answer.
  *
  * A 400 is rendered from `node_errors` FIRST, because that is the actionable half: it names the
@@ -166,7 +235,7 @@ internal fun parseComfyJobState(body: String, promptId: String): ComfyJobState {
         // A run that failed after a SaveImage already ran still has an image. Deliver it: the
         // user asked for a picture, and refusing it would be pedantry.
         failed && image != null -> ComfyJobState.Finished(image)
-        failed -> ComfyJobState.Failed(comfyStatusMessage(status))
+        failed -> ComfyJobState.Failed(withComfyGpuHint(comfyStatusMessage(status)))
         image != null -> ComfyJobState.Finished(image)
         else -> ComfyJobState.Failed(COMFY_NO_IMAGE_MESSAGE)
     }

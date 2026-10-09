@@ -62,6 +62,12 @@ internal const val COMFY_INTERRUPT_PATH = "/interrupt"
 internal const val COMFY_QUEUE_PATH = "/queue"
 
 /**
+ * ComfyUI: free VRAM/model memory. Body `{"unload_models": bool, "free_memory": bool}`; both
+ * default false server-side (verified in ComfyUI's `server.py`, `post_free`). Best-effort only.
+ */
+internal const val COMFY_FREE_PATH = "/free"
+
+/**
  * The negative prompt Celeste supplies to `%NEGATIVE%` in a ComfyUI template — the same literal
  * A1111 has always been sent. One constant so the two backends cannot drift.
  */
@@ -106,6 +112,16 @@ internal const val IMAGE_GEN_AUTH_FAILURE_MESSAGE =
  * show [IMAGE_GEN_AUTH_FAILURE_MESSAGE] instead of a bare "HTTP 401".
  */
 internal class ImageGenAuthException : Exception(IMAGE_GEN_AUTH_FAILURE_MESSAGE)
+
+/**
+ * Marker thrown when the address answered the OTHER backend's own probe, so the generation catch can
+ * show [imageGenBackendMismatchMessage] verbatim.
+ *
+ * The diagnosis is already the complete instruction ("looks like ComfyUI; add it under ComfyUI
+ * servers"), so wrapping it in the generic "Image generation error:" line only buries it. Distinct
+ * from [ImageGenAuthException] because that one has its own fixed, credential-specific wording.
+ */
+internal class ImageGenBackendMismatchException(val diagnosis: String) : Exception(diagnosis)
 
 /**
  * Does this status mean "a running server that has no such route"?

@@ -58,6 +58,18 @@ internal class ComfyUiStub(
     /** `/history` reports the run as failed, with no image. */
     var failJob: Boolean = false
 
+    /** The `exception_message` a [failJob] run reports, so a test can drive the GPU-hint path. */
+    var failureMessage: String = "stub failure"
+
+    /** `/queue` places the job in `queue_pending` instead of `queue_running`. */
+    var queuePending: Boolean = false
+
+    /**
+     * Drop the connection (close it with no HTTP response) on every `/history` poll, so the client
+     * sees a transport failure. The suite uses this to drive the "server stopped responding" path.
+     */
+    var dropHistoryConnections: Boolean = false
+
     /** What `/view` returns. Defaults to a real 1×1 PNG. */
     var imageBytes: ByteArray = PNG_1X1
 
@@ -74,6 +86,7 @@ internal class ComfyUiStub(
 
     val historyPolls = AtomicInteger(0)
     val interruptCalls = AtomicInteger(0)
+    val freeCalls = AtomicInteger(0)
     var lastPromptBody: String? = null
     var lastViewQuery: Map<String, String>? = null
 
@@ -129,11 +142,15 @@ internal class ComfyUiStub(
 
     private fun failedHistory(id: String) = """
         {"$id":{"outputs":{},"status":{"status_str":"error","completed":false,
-         "messages":[["execution_error",{"node_id":"9","node_type":"SaveImage","exception_message":"stub failure"}]]}}}
+         "messages":[["execution_error",{"node_id":"9","node_type":"SaveImage","exception_message":"$failureMessage"}]]}}}
     """.trimIndent()
 
     private fun queueWithJob() =
-        """{"queue_running":[[0,"$COMFY_STUB_PROMPT_ID",{},{}]],"queue_pending":[]}"""
+        if (queuePending) {
+            """{"queue_running":[],"queue_pending":[[0,"$COMFY_STUB_PROMPT_ID",{},{}]]}"""
+        } else {
+            """{"queue_running":[[0,"$COMFY_STUB_PROMPT_ID",{},{}]],"queue_pending":[]}"""
+        }
 
     private fun handle(connection: Socket) {
         try {
@@ -186,6 +203,13 @@ internal class ComfyUiStub(
             writeText(client, 401, "application/json", """{"detail":"Unauthorized"}""")
             return
         }
+        // A dropped poll: close the connection with no response, so the client sees a transport
+        // failure exactly as it would against a server that died mid-poll. The poll itself still
+        // counts (it reached the server), then the socket is closed by the caller's `use`.
+        if (dropHistoryConnections && method == "GET" && path.startsWith("$COMFY_HISTORY_PATH/")) {
+            historyPolls.incrementAndGet()
+            return
+        }
         when {
             path == COMFY_SYSTEM_STATS_PATH && method == "GET" ->
                 writeText(client, 200, "application/json", SYSTEM_STATS)
@@ -207,6 +231,16 @@ internal class ComfyUiStub(
                     client, 200, "application/json",
                     if (loseJob) """{"queue_running":[],"queue_pending":[]}""" else queueWithJob()
                 )
+
+            // Stop's delete of a pending job. Recorded like every request (the test asserts the
+            // body), and answered 200 as ComfyUI does.
+            path == COMFY_QUEUE_PATH && method == "POST" ->
+                writeText(client, 200, "application/json", "{}")
+
+            path == COMFY_FREE_PATH && method == "POST" -> {
+                freeCalls.incrementAndGet()
+                writeText(client, 200, "application/json", "{}")
+            }
 
             path.startsWith("$COMFY_HISTORY_PATH/") && method == "GET" -> {
                 val id = path.removePrefix("$COMFY_HISTORY_PATH/")

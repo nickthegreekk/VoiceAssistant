@@ -1359,9 +1359,9 @@ Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
         title = "Local Gateways",
         servers = gateways,
         status = serverStatus,
-        onAdd = { name: String, url: String, user: String?, pass: String?, authType: AuthType, apiKey: String?, backendType: ImageGenBackend, workflow: String? -> service.addServerBase(name, url, user, pass, authType, apiKey) },
+        onAdd = { name: String, url: String, user: String?, pass: String?, authType: AuthType, apiKey: String?, backendType: ImageGenBackend, workflow: String?, freeMemory: Boolean -> service.addServerBase(name, url, user, pass, authType, apiKey) },
         onRemove = { service.removeServerBase(it) },
-        onEdit = { old: ServerConfig, name: String, url: String, user: String?, pass: String?, authType: AuthType, apiKey: String?, backendType: ImageGenBackend, workflow: String? -> service.updateServerBase(old, name, url, user, pass, authType, apiKey) },
+        onEdit = { old: ServerConfig, name: String, url: String, user: String?, pass: String?, authType: AuthType, apiKey: String?, backendType: ImageGenBackend, workflow: String?, freeMemory: Boolean -> service.updateServerBase(old, name, url, user, pass, authType, apiKey) },
         currentThemeColor = currentThemeColor,
         onRefreshHealth = { service.forceCheckHealth(it, true) },
         onRefreshModels = { /* Gateways don't have models */ },
@@ -1375,9 +1375,9 @@ Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
         title = "Ollama Servers",
         servers = ollama,
         status = serverStatus,
-        onAdd = { name: String, url: String, user: String?, pass: String?, authType: AuthType, apiKey: String?, backendType: ImageGenBackend, workflow: String? -> service.addOllamaBase(name, url, user, pass, authType, apiKey) },
+        onAdd = { name: String, url: String, user: String?, pass: String?, authType: AuthType, apiKey: String?, backendType: ImageGenBackend, workflow: String?, freeMemory: Boolean -> service.addOllamaBase(name, url, user, pass, authType, apiKey) },
         onRemove = { service.removeOllamaBase(it) },
-        onEdit = { old: ServerConfig, name: String, url: String, user: String?, pass: String?, authType: AuthType, apiKey: String?, backendType: ImageGenBackend, workflow: String? -> service.updateOllamaBase(old, name, url, user, pass, authType, apiKey) },
+        onEdit = { old: ServerConfig, name: String, url: String, user: String?, pass: String?, authType: AuthType, apiKey: String?, backendType: ImageGenBackend, workflow: String?, freeMemory: Boolean -> service.updateOllamaBase(old, name, url, user, pass, authType, apiKey) },
         currentThemeColor = currentThemeColor,
         onRefreshHealth = { service.forceCheckHealth(it, false) },
         onRefreshModels = { service.fetchModels(it) },
@@ -1548,9 +1548,9 @@ fun ServerListSection(
     title: String,
     servers: List<ServerConfig>,
     status: Map<String, String>,
-    onAdd: (String, String, String?, String?, AuthType, String?, ImageGenBackend, String?) -> Unit,
+    onAdd: (String, String, String?, String?, AuthType, String?, ImageGenBackend, String?, Boolean) -> Unit,
     onRemove: (ServerConfig) -> Unit,
-    onEdit: (ServerConfig, String, String, String?, String?, AuthType, String?, ImageGenBackend, String?) -> Unit,
+    onEdit: (ServerConfig, String, String, String?, String?, AuthType, String?, ImageGenBackend, String?, Boolean) -> Unit,
     onRefreshHealth: (ServerConfig) -> Unit,
     onRefreshModels: (ServerConfig) -> Unit,
     onMoveUp: (ServerConfig) -> Unit,
@@ -1596,6 +1596,9 @@ fun ServerListSection(
     // username/password fields already express "not set". The backend TYPE is not state here — it
     // comes from the section (see [imageGenBackend]).
     var newComfyWorkflow by rememberSaveable { mutableStateOf("") }
+    // ComfyUI only, OFF by default. Held here so the dialog and the saved entry agree; the switch
+    // that writes it is rendered only inside the ComfyUI branch below.
+    var newFreeComfyMemory by rememberSaveable { mutableStateOf(false) }
     // Validated once per COMMITTED workflow rather than once per keystroke: this dialog recomposes
     // on every character typed into Name/URL, and re-parsing a 100 KB workflow each time would be
     // wasteful. The text only changes when the workflow editor or the file picker commits — and
@@ -1617,6 +1620,7 @@ fun ServerListSection(
             IconButton(onClick = {
                 newName = ""; newUrl = ""; newUser = ""; newPass = ""
                 newComfyWorkflow = ""
+                newFreeComfyMemory = false
                 showAddDialog = true
             }, modifier = Modifier.size(32.dp)) {
                 // A real description, not null: an icon-only button with no name is unreadable to a
@@ -1694,6 +1698,7 @@ fun ServerListSection(
                             newAuthType = if (server.username.isNullOrBlank()) AuthType.NONE else server.authType
                             newApiKey = server.apiKey ?: ""
                             newComfyWorkflow = server.comfyWorkflow ?: ""
+                            newFreeComfyMemory = server.freeComfyMemoryAfterImage
                         }, modifier = Modifier.size(28.dp)) {
                             Icon(Icons.Default.Edit, null, tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f), modifier = Modifier.size(18.dp))
                         }
@@ -1734,18 +1739,23 @@ fun ServerListSection(
                     backendType = imageGenBackend,
                     // "" means "no template", stored as null so "is one configured?" is a single
                     // test for every caller.
-                    comfyWorkflow = newComfyWorkflow.ifBlank { null }
+                    comfyWorkflow = newComfyWorkflow.ifBlank { null },
+                    // Only meaningful for ComfyUI; forced off elsewhere so an A1111 entry can never
+                    // carry a stale opt-in.
+                    freeComfyMemoryAfterImage =
+                        imageGenBackend == ImageGenBackend.COMFYUI && newFreeComfyMemory
                 )
                 val editing = editingServer
                 if (editing != null) {
-                    onEdit(editing, savedConfig.name, savedConfig.url, savedConfig.username, savedConfig.password, savedConfig.authType, savedConfig.apiKey, savedConfig.backendType, savedConfig.comfyWorkflow)
+                    onEdit(editing, savedConfig.name, savedConfig.url, savedConfig.username, savedConfig.password, savedConfig.authType, savedConfig.apiKey, savedConfig.backendType, savedConfig.comfyWorkflow, savedConfig.freeComfyMemoryAfterImage)
                 } else {
-                    onAdd(savedConfig.name, savedConfig.url, savedConfig.username, savedConfig.password, savedConfig.authType, savedConfig.apiKey, savedConfig.backendType, savedConfig.comfyWorkflow)
+                    onAdd(savedConfig.name, savedConfig.url, savedConfig.username, savedConfig.password, savedConfig.authType, savedConfig.apiKey, savedConfig.backendType, savedConfig.comfyWorkflow, savedConfig.freeComfyMemoryAfterImage)
                 }
                 showAddDialog = false
                 editingServer = null
                 newName = ""; newUrl = ""; newUser = ""; newPass = ""; newAuthType = AuthType.NONE; newApiKey = ""
                 newComfyWorkflow = ""
+                newFreeComfyMemory = false
                 scope.launch {
                     val result = service.testServerConnection(savedConfig, isGateway, isImageGen)
                     if (!result.success) {
@@ -1767,6 +1777,7 @@ fun ServerListSection(
                     editingServer = null
                     newName = ""; newUrl = ""; newUser = ""; newPass = ""; newAuthType = AuthType.NONE; newApiKey = ""
                     newComfyWorkflow = ""
+                    newFreeComfyMemory = false
                 },
                 title = { Text(if (isEditing) "Edit Server" else "Add Server") },
                 text = {
@@ -1810,6 +1821,30 @@ fun ServerListSection(
                                 validation = workflowValidation,
                                 accentColor = currentThemeColor
                             )
+                            Spacer(Modifier.height(12.dp))
+                            // Off by default and ComfyUI-only: it lives inside this branch so an
+                            // A1111 entry never shows it and never stores an opt-in.
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        "Free ComfyUI memory after each image",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                                    )
+                                    Text(
+                                        "Sends one /free (unload models, release VRAM) once the image is saved. Off by default.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                                    )
+                                }
+                                Switch(
+                                    checked = newFreeComfyMemory,
+                                    onCheckedChange = { newFreeComfyMemory = it }
+                                )
+                            }
                         }
 
                         Spacer(Modifier.height(12.dp))
@@ -2165,9 +2200,9 @@ internal fun ImageGenSettings(
             title = "${backend.displayName} servers",
             servers = imageGen.filter { it.backendType == backend },
             status = status,
-            onAdd = { name: String, url: String, user: String?, pass: String?, authType: AuthType, apiKey: String?, backendType: ImageGenBackend, workflow: String? -> service.addImageGenBase(name, url, user, pass, authType, apiKey, backendType, workflow) },
+            onAdd = { name: String, url: String, user: String?, pass: String?, authType: AuthType, apiKey: String?, backendType: ImageGenBackend, workflow: String?, freeMemory: Boolean -> service.addImageGenBase(name, url, user, pass, authType, apiKey, backendType, workflow, freeMemory) },
             onRemove = { service.removeImageGenBase(it) },
-            onEdit = { old: ServerConfig, name: String, url: String, user: String?, pass: String?, authType: AuthType, apiKey: String?, backendType: ImageGenBackend, workflow: String? -> service.updateImageGenBase(old, name, url, user, pass, authType, apiKey, backendType, workflow) },
+            onEdit = { old: ServerConfig, name: String, url: String, user: String?, pass: String?, authType: AuthType, apiKey: String?, backendType: ImageGenBackend, workflow: String?, freeMemory: Boolean -> service.updateImageGenBase(old, name, url, user, pass, authType, apiKey, backendType, workflow, freeMemory) },
             currentThemeColor = currentThemeColor,
             onRefreshHealth = { service.forceCheckHealth(it, false, true) },
             onRefreshModels = { },
