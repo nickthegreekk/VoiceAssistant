@@ -125,6 +125,10 @@ fun ChatMessageBubble(
     modifier: Modifier = Modifier
 ) {
     val isUser = message.role == "user"
+    // Which of this bubble's images (if any) the user tapped to view full screen. Held as a
+    // path so a rotation-independent String is the whole state; the viewer is rendered as an
+    // overlay below and contributes no layout to the bubble itself.
+    var fullScreenImagePath by remember { mutableStateOf<String?>(null) }
     Column(
         horizontalAlignment = horizontalAlignment,
         modifier = modifier
@@ -248,7 +252,8 @@ fun ChatMessageBubble(
             Surface(
                 modifier = Modifier
                     .width(200.dp)
-                    .height(150.dp),
+                    .height(150.dp)
+                    .clickable { fullScreenImagePath = message.imagePath },
                 shape = MaterialTheme.shapes.small,
                 color = MaterialTheme.colorScheme.surfaceVariant
             ) {
@@ -266,7 +271,8 @@ fun ChatMessageBubble(
             Surface(
                 modifier = Modifier
                     .width(256.dp)
-                    .height(256.dp),
+                    .height(256.dp)
+                    .clickable { fullScreenImagePath = message.generatedImagePath },
                 shape = MaterialTheme.shapes.small,
                 color = MaterialTheme.colorScheme.surfaceVariant
             ) {
@@ -368,6 +374,16 @@ fun ChatMessageBubble(
                 fontSize = 10.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f),
                 modifier = Modifier.padding(top = 3.dp)
+            )
+        }
+
+        // Full-screen viewer for whichever image this bubble owns. A Dialog paints in its own
+        // window, so living inside this Column costs the bubble no layout; the guard makes it
+        // free when nothing was tapped, which is every bubble but one at most.
+        fullScreenImagePath?.let { path ->
+            FullScreenImageViewer(
+                file = File(path),
+                onDismiss = { fullScreenImagePath = null }
             )
         }
     }

@@ -1990,6 +1990,12 @@ class AssistantService : Service() {
                     Toast.makeText(applicationContext, message, Toast.LENGTH_SHORT).show()
                     return
                 }
+                // Home-screen shortcut: the shortcut id IS the persona name, so this rename
+                // orphans the pinned icon — and an icon pointing at a name that no longer
+                // exists would land the user on whichever persona is selected instead. Withdraw
+                // it rather than leave a dead icon; the user can re-add it from the persona
+                // list. Placed after the collision check so a REFUSED rename withdraws nothing.
+                removePersonaShortcut(applicationContext, oldName)
                 // Rename: move the persona's history to the new name-keyed storage
                 // entry (it would otherwise be orphaned on disk forever), and when
                 // the renamed persona is the active one, keep the selection pointing
@@ -2258,6 +2264,10 @@ class AssistantService : Service() {
             // exists. Without this the timer would keep ticking until its next run, at
             // which point the guard would end it anyway — this just makes it immediate.
             removeSpontaneousSchedule(removedName)
+            // Home-screen shortcut: a pinned launcher icon is keyed by this name, so it would
+            // otherwise outlive the persona it opens. Best-effort — a launcher that refuses
+            // must not fail the deletion.
+            removePersonaShortcut(applicationContext, removedName)
             // Followup to Fix #4: the removal must also drop the persona's persisted
             // history — a genuine deletion leaves no persona_messages_<name> entry
             // behind on disk. (Rename is handled by migratePersonaHistory in

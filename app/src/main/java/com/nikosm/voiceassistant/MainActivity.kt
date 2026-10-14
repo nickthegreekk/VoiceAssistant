@@ -12,6 +12,7 @@ import android.os.Bundle
 import android.speech.RecognizerIntent
 import android.util.Log
 import android.view.WindowManager
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -296,6 +297,7 @@ fun PersonaSettings(
     onInitialEditConsumed: () -> Unit = {}
 ) {
     var editingPersona by rememberSaveable(stateSaver = EditingPersonaSaver) { mutableStateOf<Pair<Int, Persona>?>(null) }
+    val context = LocalContext.current
 
     // The shortcut's open request, honoured exactly once. Keyed on the request itself, so the
     // normal path (null, and null again after the latch has fired) does nothing at all.
@@ -340,6 +342,30 @@ fun PersonaSettings(
                         Column(modifier = Modifier.weight(1f)) {
                             Text(persona.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                             Text(persona.model, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                        // Home-screen shortcut: a launcher icon that opens straight into this
+                        // persona's chat. Offered from the LIST rather than the editor on
+                        // purpose — every persona here is already saved, so a shortcut can
+                        // never be built from a name the app has not committed yet (the
+                        // editor's fields are debounced into the service). The launcher shows
+                        // its own confirmation dialog, so this is a request, not a placement.
+                        IconButton(
+                            onClick = {
+                                if (!requestPersonaShortcut(context, persona)) {
+                                    Toast.makeText(
+                                        context,
+                                        "This launcher can't add home-screen shortcuts",
+                                        Toast.LENGTH_SHORT
+                                    ).show()
+                                }
+                            },
+                            modifier = Modifier.size(28.dp)
+                        ) {
+                            Icon(
+                                Icons.Default.AddToHomeScreen,
+                                contentDescription = "Add ${persona.name} to home screen",
+                                modifier = Modifier.size(20.dp)
+                            )
                         }
                         // Reorder controls — same up/down pattern as the server and
                         // cloud-API lists. Order is user-visible: the persona selector
