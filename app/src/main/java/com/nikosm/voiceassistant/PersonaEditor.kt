@@ -50,6 +50,7 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -87,8 +88,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
 import java.io.File
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @Composable
 fun SettingsSectionHeader(title: String, icon: ImageVector? = null) {
@@ -161,6 +164,8 @@ internal data class PersonaEditorFields(
     val voiceEngine: String,
     val kokoroVoice: String,
     val backendUrl: String,
+    /** The persona's chosen Image Character id (see [Persona.imageWorkflowId]). */
+    val imageWorkflowId: String? = null,
     val enabledSkillIds: List<String>,
     val spontaneousEnabled: Boolean,
     val spontaneousInstruction: String,
@@ -245,6 +250,7 @@ internal fun Persona.withEditorFields(
         voiceEngine = fields.voiceEngine,
         kokoroVoice = fields.kokoroVoice,
         backendUrl = fields.backendUrl,
+        imageWorkflowId = fields.imageWorkflowId,
         enabledSkillIds = fields.enabledSkillIds,
         // Gated (plan location #2): never commit an opt-in the persona could not honour.
         spontaneousEnabled = fields.spontaneousEnabled && spontaneousAllowed,
@@ -253,6 +259,113 @@ internal fun Persona.withEditorFields(
         spontaneousWindowStartMin = fields.spontaneousWindowStartMin,
         spontaneousWindowEndMin = fields.spontaneousWindowEndMin
     )
+}
+
+/**
+ * The Image Character picker: bind one shared ComfyUI workflow (a FACE) to this persona.
+ *
+ * Shown to EVERY persona — an image-generator persona applies it to every turn, and an ordinary
+ * chat persona applies it to its inline "create an image of …" messages — so any character can
+ * produce an image mid-conversation without having to become a dedicated image generator. The
+ * library is shared (see [ImageWorkflow]), so two personas can bind the same face and editing it
+ * once updates both.
+ *
+ * A dangling selection (its character was deleted) and a malformed workflow are both called out
+ * HERE rather than at generation time, because this is where the user can still fix them. Nothing
+ * is written by this composable: it reports through [onSelect]/[onImport]/[onDelete], and the
+ * editor's single commit path persists the result like every other field.
+ */
+@Composable
+private fun ImageCharacterSelector(
+    characters: List<ImageWorkflow>,
+    selectedId: String?,
+    /** Whether ComfyUI is what this persona's images resolve to right now. */
+    comfyResolved: Boolean,
+    /** Named in the note below, so the user knows which generator the face is waiting for. */
+    activeBackendLabel: String,
+    onSelect: (String?) -> Unit,
+    onImport: () -> Unit,
+    onDelete: (ImageWorkflow) -> Unit,
+    accentColor: Color
+) {
+    val selected = characters.find { it.id == selectedId }
+    var expanded by remember { mutableStateOf(false) }
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Box(modifier = Modifier.fillMaxWidth()) {
+            OutlinedTextField(
+                value = selected?.name ?: "Use the server's workflow",
+                onValueChange = {},
+                readOnly = true,
+                label = { Text("Image Character") },
+                modifier = Modifier.fillMaxWidth(),
+                trailingIcon = { IconButton(onClick = { expanded = true }) { Icon(Icons.Default.ArrowDropDown, null) } }
+            )
+            DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                DropdownMenuItem(
+                    text = { Text("Use the server's workflow") },
+                    onClick = { onSelect(null); expanded = false }
+                )
+                characters.forEach { character ->
+                    DropdownMenuItem(
+                        text = { Text(character.name) },
+                        onClick = { onSelect(character.id); expanded = false }
+                    )
+                }
+                HorizontalDivider()
+                DropdownMenuItem(
+                    text = { Text("Import JSON file…") },
+                    onClick = { expanded = false; onImport() }
+                )
+            }
+        }
+        // A bound character is never invisible, even when the active generator cannot use it: an
+        // A1111 entry has no workflow, so the face is simply not applied until ComfyUI is active.
+        if (!comfyResolved && selected != null) {
+            Text(
+                "Only ComfyUI uses a workflow — the active image generator is $activeBackendLabel. " +
+                    "This face will be used once ComfyUI is the active generator.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+            )
+        }
+        // A selection whose character was deleted elsewhere is called out rather than silently
+        // pretending a face is still bound.
+        if (selectedId != null && selected == null) {
+            Text(
+                "The selected character is no longer in the library — the server's workflow will be used.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error
+            )
+        }
+        selected?.let { character ->
+            // The SAME validation the import and the generation path apply, so a character that
+            // would be rejected — or whose workflow has no %PROMPT%, so the user's own words would
+            // be ignored — says so HERE, before any image.
+            when (val check = validateComfyWorkflow(character.workflow)) {
+                is ComfyWorkflowValidation.Invalid -> Text(
+                    check.message,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error
+                )
+                is ComfyWorkflowValidation.Valid -> check.warnings.forEach { warning ->
+                    Text(
+                        comfyWorkflowWarningText(warning),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = accentColor.copy(alpha = 0.9f)
+                    )
+                }
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "Face for this persona: ${character.name}.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = accentColor.copy(alpha = 0.85f)
+                )
+                Spacer(Modifier.width(8.dp))
+                TextButton(onClick = { onDelete(character) }) { Text("Delete character") }
+            }
+        }
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -292,6 +405,11 @@ fun PersonaEditor(
     var voiceEngine by remember(persona) { mutableStateOf(persona.voiceEngine) }
     var kokoroVoice by remember(persona) { mutableStateOf(persona.kokoroVoice) }
     var backendUrl by remember(persona) { mutableStateOf(persona.backendUrl) }
+    // The chosen Image Character (ComfyUI only). Tracked locally for exactly the reason
+    // enabledSkillIds is: BOTH commit paths rebuild a WHOLE Persona from this editor's snapshot,
+    // so a field omitted here would be written back at its open-time value the moment any other
+    // field changed — or the moment the editor closed inside the debounce window.
+    var imageWorkflowId by remember(persona) { mutableStateOf(persona.imageWorkflowId) }
     // Skills are toggled through setSkillEnabledForPersona (which saves at once), but the
     // debounce and the dispose flush BOTH rebuild the whole Persona from this editor's
     // snapshot — and neither listed enabledSkillIds, so each would have written the value
@@ -448,6 +566,7 @@ fun PersonaEditor(
         voiceEngine = voiceEngine,
         kokoroVoice = kokoroVoice,
         backendUrl = backendUrl,
+        imageWorkflowId = imageWorkflowId,
         enabledSkillIds = enabledSkillIds,
         spontaneousEnabled = spontaneousEnabled,
         spontaneousInstruction = spontaneousInstruction,
@@ -495,7 +614,7 @@ fun PersonaEditor(
     }
 
     // Auto-save logic
-    LaunchedEffect(name, model, systemPrompt, themeColor, temp, topP, topK, repeatPenalty, maxTokens, numCtx, enableThinking, webSearchEnabled, ragEnabled, allowGatewayFailover, isTranslator, isImageGenerator, targetLanguage, voiceMode, voiceEngine, kokoroVoice, backendUrl, enabledSkillIds, iconImageUri, backgroundImageUri, spontaneousEnabled, spontaneousInstruction, spontaneousGapMinutes, spontaneousWindowStartMin, spontaneousWindowEndMin, editorIsCloudModel, customProviderNames, spontaneousAllowed) {
+    LaunchedEffect(name, model, systemPrompt, themeColor, temp, topP, topK, repeatPenalty, maxTokens, numCtx, enableThinking, webSearchEnabled, ragEnabled, allowGatewayFailover, isTranslator, isImageGenerator, targetLanguage, voiceMode, voiceEngine, kokoroVoice, backendUrl, imageWorkflowId, enabledSkillIds, iconImageUri, backgroundImageUri, spontaneousEnabled, spontaneousInstruction, spontaneousGapMinutes, spontaneousWindowStartMin, spontaneousWindowEndMin, editorIsCloudModel, customProviderNames, spontaneousAllowed) {
         // Skip initial evaluation if needed? No, persona change will trigger it once, which is fine.
         delay(500)
         // The SAME single builder as the dispose flush (see `editorFields` above), so a save from
@@ -583,24 +702,70 @@ fun PersonaEditor(
             Text("Image Generator Persona")
         }
 
-        if (isImageGenerator) {
-            var imageGenBases by remember { mutableStateOf<List<ServerConfig>>(emptyList()) }
-            var activeBackend by remember { mutableStateOf(DEFAULT_IMAGE_GEN_BACKEND) }
-            LaunchedEffect(service) {
-                launch { imageGenBases = service.imageGenBases.value }
-                launch { activeBackend = service.activeImageGenBackend.value }
-                launch { service.imageGenBases.collect { imageGenBases = it } }
-                launch { service.activeImageGenBackend.collect { activeBackend = it } }
+        // Image-generation state, shared by BOTH blocks below: the Image Generator pin (shown only
+        // when that flag is on) and the Image Character selector (shown to EVERY persona, so an
+        // ordinary chat persona can bind a face for its "create an image of …" messages).
+        var imageGenBases by remember { mutableStateOf<List<ServerConfig>>(emptyList()) }
+        var activeBackend by remember { mutableStateOf(DEFAULT_IMAGE_GEN_BACKEND) }
+        var characters by remember { mutableStateOf<List<ImageWorkflow>>(emptyList()) }
+        LaunchedEffect(service) {
+            launch { imageGenBases = service.imageGenBases.value }
+            launch { activeBackend = service.activeImageGenBackend.value }
+            launch { characters = service.imageWorkflows.value }
+            launch { service.imageGenBases.collect { imageGenBases = it } }
+            launch { service.activeImageGenBackend.collect { activeBackend = it } }
+            launch { service.imageWorkflows.collect { characters = it } }
+        }
+
+        // Importing an Image Character: read + validate the picked JSON, name it from the file, add
+        // it to the shared library and select it for THIS persona. The read runs off the main thread
+        // and must happen inside this callback — a content URI's grant does not outlive it, so the
+        // bytes are taken now rather than referenced for later (the same lesson the Image Gen
+        // dialog's import learned).
+        val workflowPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+            if (uri == null) return@rememberLauncherForActivityResult
+            scope.launch {
+                val text = withContext(Dispatchers.IO) { readComfyWorkflowText(context, uri) }
+                if (text == null) {
+                    Toast.makeText(context, "Couldn't read that file", Toast.LENGTH_SHORT).show()
+                    return@launch
+                }
+                when (val result = validateComfyWorkflow(text)) {
+                    is ComfyWorkflowValidation.Invalid ->
+                        Toast.makeText(context, result.message, Toast.LENGTH_LONG).show()
+                    is ComfyWorkflowValidation.Valid -> {
+                        val imported = ImageWorkflow(
+                            name = uniqueImageWorkflowName(
+                                imageWorkflowDisplayName(context, uri),
+                                service.imageWorkflows.value
+                            ),
+                            workflow = text
+                        )
+                        service.addImageWorkflow(imported)
+                        imageWorkflowId = imported.id
+                    }
+                }
             }
+        }
 
-            // The SAME resolution the generation path uses, so this block can never describe a
-            // different server (or a different failure) than the one that will actually run.
-            val resolution = resolveImageGenConfig(imageGenBases, activeBackend, backendUrl.ifBlank { null })
-            val activeEntry = imageGenBases.firstOrNull { it.backendType == activeBackend }
-            val followLabel = "Follow the active generator (" +
-                (activeEntry?.name ?: "no ${activeBackend.displayName} server yet") + ")"
+        // The SAME resolution the generation path uses, so neither block below can describe a
+        // different server (or a different failure) than the one that will actually run.
+        //
+        // The pin is the persona's Backend URL ONLY for an image-generator persona, mirroring
+        // imageGenPinnedUrl(): a chat persona's Backend URL is where its CHAT goes, so feeding it to
+        // the image resolver would describe a server its image request never contacts. Every other
+        // persona follows the ACTIVE generator — exactly what the inline "create an image of …"
+        // path does at runtime.
+        val imagePin = if (isImageGenerator) backendUrl.ifBlank { null } else null
+        val resolution = resolveImageGenConfig(imageGenBases, activeBackend, imagePin)
 
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        // One Column so the pin and the character selector read as a single image-generation group,
+        // and so the character selector keeps its place for every persona.
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (isImageGenerator) {
+                val activeEntry = imageGenBases.firstOrNull { it.backendType == activeBackend }
+                val followLabel = "Follow the active generator (" +
+                    (activeEntry?.name ?: "no ${activeBackend.displayName} server yet") + ")"
                 var expanded by remember { mutableStateOf(false) }
                 // The pinned entry is shown with its TYPE, because the dropdown lists both
                 // backends and two entries can be indistinguishable by name alone.
@@ -673,6 +838,34 @@ fun PersonaEditor(
                         }
                     }
                 }
+
+            }
+
+            // Image Character: which workflow's fixed prompt (the FACE) this persona paints, with
+            // the user's own text filling %PROMPT%. Available to EVERY persona — an image-generator
+            // persona applies it to every turn, and an ordinary chat persona applies it to its
+            // inline "create an image of …" messages, so any character can produce an image
+            // mid-conversation without becoming a dedicated image generator.
+            //
+            // Shown whenever ComfyUI is what images resolve to, OR whenever this persona already has
+            // a character bound — so a binding made under a ComfyUI setup never becomes invisible
+            // after the active generator is switched to A1111 (where it simply stops being used).
+            val resolvedBackend = (resolution as? ImageGenResolution.Resolved)?.config?.backendType
+            val comfyResolved = resolvedBackend == ImageGenBackend.COMFYUI
+            if (comfyResolved || imageWorkflowId != null) {
+                ImageCharacterSelector(
+                    characters = characters,
+                    selectedId = imageWorkflowId,
+                    comfyResolved = comfyResolved,
+                    activeBackendLabel = (resolvedBackend ?: activeBackend).displayName,
+                    onSelect = { imageWorkflowId = it },
+                    onImport = { workflowPicker.launch(arrayOf("application/json", "text/json", "*/*")) },
+                    onDelete = { character ->
+                        service.removeImageWorkflow(character)
+                        if (imageWorkflowId == character.id) imageWorkflowId = null
+                    },
+                    accentColor = themeColor
+                )
             }
         }
 

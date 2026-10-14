@@ -1999,14 +1999,14 @@ private fun ComfyWorkflowField(
                 val warnings = (validation as? ComfyWorkflowValidation.Valid)?.warnings ?: emptyList()
                 if (ComfyWorkflowWarning.UNSUPPORTED_SIZE_TOKEN in warnings) {
                     Text(
-                        "%WIDTH%/%HEIGHT% are not supported — leave the size in the workflow, which owns it.",
+                        comfyWorkflowWarningText(ComfyWorkflowWarning.UNSUPPORTED_SIZE_TOKEN),
                         style = MaterialTheme.typography.bodySmall,
                         color = accentColor.copy(alpha = 0.9f)
                     )
                 }
                 if (ComfyWorkflowWarning.NO_PROMPT_FIELD in warnings) {
                     Text(
-                        "No %PROMPT% field: the text you type would be ignored.",
+                        comfyWorkflowWarningText(ComfyWorkflowWarning.NO_PROMPT_FIELD),
                         style = MaterialTheme.typography.bodySmall,
                         color = accentColor.copy(alpha = 0.9f)
                     )
@@ -2104,34 +2104,6 @@ private fun ComfyWorkflowField(
         }
     }
 }
-
-/**
- * Reads a picked workflow as UTF-8 text.
- *
- * Capped at [COMFY_MAX_WORKFLOW_CHARS] bytes plus one — the count is in BYTES while the validation
- * cap is in characters, and for a JSON workflow the byte count is at least the character count, so
- * the read always stops early enough for the "too large" message rather than for a silently
- * truncated — and therefore invalid — template. Returns null only when the file cannot be read.
- */
-private fun readComfyWorkflowText(context: Context, uri: Uri): String? = try {
-    context.contentResolver.openInputStream(uri)?.use { stream ->
-        val limit = COMFY_MAX_WORKFLOW_CHARS
-        val buffer = ByteArray(64 * 1024)
-        val collected = java.io.ByteArrayOutputStream()
-        var total = 0
-        while (total <= limit) {
-            val read = stream.read(buffer)
-            if (read <= 0) break
-            collected.write(buffer, 0, read)
-            total += read
-        }
-        String(collected.toByteArray(), Charsets.UTF_8)
-    }
-} catch (_: Exception) {
-    null
-}
-
-
 
 /**
  * The Image Gen area: the active-generator switch and the two typed sections.

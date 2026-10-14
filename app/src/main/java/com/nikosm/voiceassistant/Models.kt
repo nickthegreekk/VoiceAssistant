@@ -143,6 +143,29 @@ data class Persona(
     val isImageGenerator: Boolean = false,
     val targetLanguage: String = "English",
     val backendUrl: String = "",
+    /**
+     * The **Image Character** this persona paints as: the id of an entry in the shared
+     * [ImageWorkflow] library, or null to use the image server entry's own `comfyWorkflow`.
+     *
+     * ComfyUI only. A character's workflow carries the face in its positive prompt, with
+     * `%PROMPT%` left for whatever the user typed, so binding one to a persona keeps the FACE
+     * constant while the scene changes.
+     *
+     * Set on ANY persona, not only an image generator: an image-generator persona applies it to
+     * every turn, and an ordinary chat persona applies it to its inline "create an image of …"
+     * messages — so a character can produce an image mid-conversation without the persona having
+     * to become a dedicated (image-only) generator. The image SERVER is deliberately not part of
+     * this: it follows the active generator, exactly as `imageGenPinnedUrl` leaves it for a
+     * non-generator persona.
+     *
+     * Reference-by-id, never a copy of the JSON — the same relationship [enabledSkillIds] has to
+     * [Skill], so editing a character updates every persona that picked it, and a deleted one
+     * leaves a dangling id that falls back to the server's workflow rather than failing the
+     * generation.
+     *
+     * Defaulted, so personas persisted before this existed decode unchanged.
+     */
+    val imageWorkflowId: String? = null,
     val allowGatewayFailover: Boolean = false, // S2: opt-in — when false, only backendUrl is ever contacted
     val voiceMode: VoiceMode = VoiceMode.SYSTEM_TTS,
     val voiceEngine: String = "kokoro",
@@ -319,6 +342,28 @@ data class Skill(
     val triggerPhrases: List<String> = emptyList(),
     /** The text injected into the system prompt on a matching turn. */
     val instructions: String = ""
+)
+
+/**
+ * One entry of the shared Image Characters library: a named ComfyUI workflow in **API format**
+ * (the same format [ServerConfig.comfyWorkflow] holds — see `ComfyWorkflow.kt`).
+ *
+ * A character is defined ONCE and referenced by any number of personas
+ * ([Persona.imageWorkflowId]) — the exact "defined once, attached to many" relationship [Skill]
+ * has to `enabledSkillIds`, and never duplicated per persona. The workflow's positive prompt
+ * carries the character's fixed appearance plus `%PROMPT%`, so every persona that picks this
+ * character paints the same face while the user's own text fills the scene.
+ *
+ * [id] is a UUID (not the name) for the same reason [Skill]'s is — see its KDoc: a character must
+ * stay freely renameable, and a deleted-then-recreated character must never inherit the
+ * references of the one it replaced.
+ */
+@Serializable
+data class ImageWorkflow(
+    val id: String = java.util.UUID.randomUUID().toString(),
+    val name: String,
+    /** The ComfyUI workflow in API format, exactly as imported or pasted. */
+    val workflow: String = ""
 )
 
 @Serializable

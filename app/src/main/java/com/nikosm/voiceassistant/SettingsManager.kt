@@ -522,6 +522,26 @@ class SettingsManager(context: Context) {
         return emptyList()
     }
 
+    // ---------------------------------------------------------- Image Characters
+    // The shared ComfyUI-workflow library, the same shape as skills_v1 above: one JSON key,
+    // corruption-tolerant reads, `emptyList()` when absent so a fresh install and any
+    // pre-Characters backup both behave as "no characters defined".
+    fun saveImageWorkflows(workflows: List<ImageWorkflow>) {
+        prefs.edit().putString("image_workflows_v1", json.encodeToString(workflows)).apply()
+    }
+
+    fun getImageWorkflows(): List<ImageWorkflow>? {
+        val data = prefs.getString("image_workflows_v1", null)
+        if (data != null) {
+            return runCatching { json.decodeFromString<List<ImageWorkflow>>(data) }
+                .onFailure { e ->
+                    Log.w("SettingsManager", "Corrupted/unreadable JSON in image_workflows_v1 — ignoring entry, returning null", e)
+                }
+                .getOrNull()
+        }
+        return emptyList()
+    }
+
     fun saveRoomMessages(roomId: String, messages: List<RoomMessage>) {
         val capped = if (messages.size > MAX_ROOM_MESSAGES) {
             messages.subList(messages.size - MAX_ROOM_MESSAGES, messages.size)
@@ -873,6 +893,9 @@ class SettingsManager(context: Context) {
             // Skills travel whole and unpruned: the personas below carry the ids that point
             // into this list, and the import prunes any that don't resolve.
             skills = getSkills() ?: emptyList(),
+            // Same contract for Image Characters: the personas below carry imageWorkflowId
+            // references into this list, and the import prunes any that don't resolve.
+            imageWorkflows = getImageWorkflows() ?: emptyList(),
             // The chosen generator travels too: a restored install should keep generating with the
             // backend it was backed up with, not silently revert to A1111.
             activeImageGenBackend = getActiveImageGenBackend()
@@ -910,14 +933,27 @@ class SettingsManager(context: Context) {
             // persona referencing a skill this backup doesn't contain must not restore an
             // enabled-but-missing skill.
             saveSkills(backup.skills)
+            // Characters land alongside skills and BEFORE the personas, for the same reason:
+            // each persona's imageWorkflowId is pruned against this exact list below, so a backup
+            // that carried a character but a persona referencing one this backup doesn't contain
+            // must not restore a dangling reference.
+            saveImageWorkflows(backup.imageWorkflows)
             // Absent in a backup taken before the switch existed, and defaulted to A1111 there, so
             // this restores the behaviour that backup was taken with.
             saveActiveImageGenBackend(backup.activeImageGenBackend)
             val restoredSkillIds = backup.skills.map { it.id }.toSet()
+            val restoredWorkflowIds = backup.imageWorkflows.map { it.id }.toSet()
             savePersonas(
                 restoredPersonas.map { persona ->
-                    val kept = persona.enabledSkillIds.filter { it in restoredSkillIds }
-                    if (kept.size == persona.enabledSkillIds.size) persona else persona.copy(enabledSkillIds = kept)
+                    val keptSkills = persona.enabledSkillIds.filter { it in restoredSkillIds }
+                    val keptWorkflow = persona.imageWorkflowId?.takeIf { it in restoredWorkflowIds }
+                    if (keptSkills.size == persona.enabledSkillIds.size &&
+                        keptWorkflow == persona.imageWorkflowId
+                    ) {
+                        persona
+                    } else {
+                        persona.copy(enabledSkillIds = keptSkills, imageWorkflowId = keptWorkflow)
+                    }
                 }
             )
             saveMessages(backup.messages)
@@ -1253,6 +1289,11 @@ data class BackupData(
     // ignoreUnknownKeys, a NEW backup still imports into an older build — which simply
     // ignores the field and leaves every persona with no skills).
     val skills: List<Skill> = emptyList(),
+    // The shared Image Characters library (ComfyUI workflows) travels with the backup like skills
+    // do, so a restored install keeps its characters AND the personas' imageWorkflowId references
+    // that point at them. Defaulted, so a backup written before Characters existed still decodes
+    // (and, thanks to ignoreUnknownKeys, a NEW backup still imports into an older build).
+    val imageWorkflows: List<ImageWorkflow> = emptyList(),
     // Which image backend Celeste generates with. Defaulted to A1111, so a backup written before
     // the switch existed still decodes — and restores to exactly the behaviour it was taken with.
     val activeImageGenBackend: ImageGenBackend = DEFAULT_IMAGE_GEN_BACKEND

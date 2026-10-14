@@ -2149,7 +2149,19 @@ internal suspend fun AssistantService.performImageGeneration(prompt: String, cur
         // ComfyUI is submit-then-poll, A1111 is one request. Both end in the same shared tail, so
         // everything downstream (deletion, eviction, Regenerate, save-to-gallery) is unchanged.
         if (config.backendType == ImageGenBackend.COMFYUI) {
-            performComfyImageGeneration(prompt, config, startTime)
+            // Which template: the persona's own Image Character when it picked one, else the
+            // entry's workflow. Resolved through the ONE precedence function, so the character
+            // binds to WHO is speaking while the server and its credentials stay the entry's.
+            performComfyImageGeneration(
+                prompt = prompt,
+                config = config,
+                startTime = startTime,
+                workflow = resolveImageWorkflow(
+                    currentPersona.imageWorkflowId,
+                    _imageWorkflows.value,
+                    config.comfyWorkflow
+                )
+            )
             return
         }
 

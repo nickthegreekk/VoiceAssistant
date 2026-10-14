@@ -33,6 +33,11 @@ import java.io.IOException
 /**
  * Runs one ComfyUI generation and publishes the image, or throws with a message meant for the user.
  *
+ * [workflow] is the template to submit — the persona's Image Character, or the entry's own
+ * `comfyWorkflow` when the persona never picked one (resolved by [resolveImageWorkflow], which is
+ * the ONE place the precedence lives). Defaulted to the entry's template, so a caller with no
+ * persona context (and every existing test) behaves exactly as before.
+ *
  * Cancellation is honoured at every `delay`, and each blocking read sits inside
  * `withContext(Dispatchers.IO)`, so cancelling the calling job (the Stop path) stops the polling and
  * never leaves a half-written file behind — the download only gets its final name after a complete
@@ -41,9 +46,10 @@ import java.io.IOException
 internal suspend fun AssistantService.performComfyImageGeneration(
     prompt: String,
     config: ServerConfig,
-    startTime: Long
+    startTime: Long,
+    workflow: String? = config.comfyWorkflow
 ) {
-    val template = config.comfyWorkflow
+    val template = workflow
     if (template.isNullOrBlank()) throw Exception(COMFY_NO_WORKFLOW_MESSAGE)
 
     // Re-validated here rather than trusted: the dialog refuses a malformed template, but a restored

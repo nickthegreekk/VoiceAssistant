@@ -100,4 +100,23 @@ class PersonaEditorCommitTest {
         val fromDispose = local.withEditorFields(f, isCloudModel = true, customProviderNames = emptySet(), spontaneousAllowed = true)
         assertEquals(fromDebounce, fromDispose)
     }
+
+    @Test
+    fun `the chosen image character rides both commit paths`() {
+        // imageWorkflowId is tracked in the editor's snapshot for exactly this reason: an omitted
+        // field would be written back at its open-time value the moment any other field changed.
+        val f = fields("[HomeBox] llama3").copy(imageWorkflowId = "face-id")
+        val committed = local.withEditorFields(
+            f, isCloudModel = false, customProviderNames = emptySet(), spontaneousAllowed = true
+        )
+        assertEquals("face-id", committed.imageWorkflowId)
+    }
+
+    @Test
+    fun `an unset image character stays null`() {
+        val committed = local.withEditorFields(
+            fields("[HomeBox] llama3"), isCloudModel = false, customProviderNames = emptySet(), spontaneousAllowed = true
+        )
+        assertEquals(null, committed.imageWorkflowId)
+    }
 }

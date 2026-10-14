@@ -272,6 +272,9 @@ private object IsolationState {
         val personaNames: Set<String>,
         val roomIds: Set<String>,
         val skillIds: Set<String>,
+        /** The shared Image Characters library, baselined like skills: a test that imports a
+         * character must not leave it for the next test's persona dropdown. */
+        val imageWorkflowIds: Set<String>,
         // Server lists were missing, which left tests that add a probe server holding
         // their own restore (SpontaneousWorkerInstrumentedTest.ollamaBefore) because the
         // rule would not remove it. Keyed by "name\u0000url": a name alone is not unique
@@ -327,6 +330,7 @@ private object IsolationState {
                     personaNames = s.getPersonas().orEmpty().map { it.name }.toSet(),
                     roomIds = s.getRooms().orEmpty().map { it.id }.toSet(),
                     skillIds = s.getSkills().orEmpty().map { it.id }.toSet(),
+                    imageWorkflowIds = s.getImageWorkflows().orEmpty().map { it.id }.toSet(),
                     ollamaServers = ollamaKeys(s),
                     serverBases = serverBaseKeys(s),
                     imageGenServers = imageGenKeys(s),
@@ -349,6 +353,7 @@ private object IsolationState {
         val extraPersonas = s.getPersonas().orEmpty().filter { it.name !in b.personaNames }
         val extraRooms = s.getRooms().orEmpty().filter { it.id !in b.roomIds }
         val extraSkills = s.getSkills().orEmpty().filter { it.id !in b.skillIds }
+        val extraImageWorkflows = s.getImageWorkflows().orEmpty().filter { it.id !in b.imageWorkflowIds }
 
         // Spontaneous state keyed by a name that is not a stored persona is orphaned: its
         // persona was deleted mid-test but the state entry (and its armed chains) survived.
@@ -368,6 +373,9 @@ private object IsolationState {
             }
             if (extraSkills.isNotEmpty()) {
                 s.saveSkills(s.getSkills().orEmpty().filter { it.id in b.skillIds })
+            }
+            if (extraImageWorkflows.isNotEmpty()) {
+                s.saveImageWorkflows(s.getImageWorkflows().orEmpty().filter { it.id in b.imageWorkflowIds })
             }
             // Server lists ride the same path: the service persists all of them from one
             // debounced saveSettings(), so a test that adds a probe server leaks it just
@@ -424,6 +432,8 @@ private object IsolationState {
             .forEach { out += "room ${it.name}" }
         s.getSkills().orEmpty().filter { it.id !in b.skillIds }
             .forEach { out += "skill ${it.name}" }
+        s.getImageWorkflows().orEmpty().filter { it.id !in b.imageWorkflowIds }
+            .forEach { out += "imageWorkflow ${it.name}" }
         s.getSpontaneousStates().keys.filter { it !in b.personaNames }
             .forEach { out += "spontaneousState $it" }
         return out

@@ -576,6 +576,14 @@ class AssistantService : Service() {
     internal val _skills = MutableStateFlow<List<Skill>>(emptyList())
     val skills = _skills.asStateFlow()
 
+    // ------------------------------------------------------- Image Characters
+    // The shared ComfyUI-workflow library every image-generator persona references by id
+    // (Persona.imageWorkflowId) — the exact shape _skills has, and for the same reason: a
+    // character is authored once and edited once, and every persona that picked it paints the
+    // same face. Nothing is copied per persona, so there is no fan-out write to keep in step.
+    internal val _imageWorkflows = MutableStateFlow<List<ImageWorkflow>>(emptyList())
+    val imageWorkflows = _imageWorkflows.asStateFlow()
+
     // ---------------------------------------------------------------- Rooms
     // Room state is deliberately PARALLEL to, never merged into, the single-chat state
     // above: a room has its own identity, its own transcript, and its own round state,
@@ -1431,6 +1439,12 @@ class AssistantService : Service() {
         // no longer exists is not repaired here — enabledSkillsFor() simply drops the id, so
         // a stale reference can never inject anything or throw.
         _skills.value = settingsManager.getSkills() ?: emptyList()
+
+        // Image Characters load beside the skills, for the same reason and with the same
+        // tolerance: a persona's imageWorkflowId is resolved against this list at generation
+        // time, and resolveImageWorkflow() simply falls back to the entry's workflow when the id
+        // no longer resolves — so a dangling reference is never repaired here, and never throws.
+        _imageWorkflows.value = settingsManager.getImageWorkflows() ?: emptyList()
         
         // If we have personas, initialize the first one as current if not already set
         if (currentPersonaName == null && loadedPersonas.isNotEmpty()) {
@@ -1515,6 +1529,10 @@ class AssistantService : Service() {
         // ids that were never persisted, which the load path would drop as dangling and
         // silently disable every enabled skill.)
         settingsManager.saveSkills(_skills.value)
+        // The Image Characters library rides the same debounced save, and is written BEFORE the
+        // persona list for the same reason skills are: a persona's imageWorkflowId must never be
+        // persisted pointing at a character that wasn't saved alongside it.
+        settingsManager.saveImageWorkflows(_imageWorkflows.value)
         settingsManager.savePersonas(_personas.value)
         // Rooms ride the same debounced save as everything else. Their transcripts do
         // NOT — those go through saveRoomHistory(), because a room transcript belongs to
@@ -2138,6 +2156,49 @@ class AssistantService : Service() {
             _skills.value = list
             saveSettings()
         }
+    }
+
+    // ------------------------------------------------------- Image Characters
+    // Library edits follow the same mutate-then-saveSettings() shape as Skills and the server
+    // lists: the flow is the single source of truth for the UI, and persistence is the existing
+    // debounced save, not a bespoke one.
+    fun addImageWorkflow(workflow: ImageWorkflow) {
+        _imageWorkflows.value = _imageWorkflows.value + workflow
+        saveSettings()
+    }
+
+    /**
+     * Replace a character in place. Its id is the reference every persona holds, so it is NOT
+     * editable: the existing one is kept even if the caller passes a different value, exactly as
+     * [updateSkill] keeps a stable identity.
+     */
+    fun updateImageWorkflow(index: Int, workflow: ImageWorkflow) {
+        val current = _imageWorkflows.value.toMutableList()
+        if (index !in current.indices) return
+        current[index] = workflow.copy(id = current[index].id)
+        _imageWorkflows.value = current
+        saveSettings()
+    }
+
+    /**
+     * Delete a character AND clear it from every persona that selected it.
+     *
+     * The persona-facing twin of [removeSkill]: without the prune a deleted character leaves a
+     * permanent dangling id that every export would carry, and the persona editor would show a
+     * selection that no longer resolves. Generation itself already tolerates the dangling id
+     * (resolveImageWorkflow falls back to the entry's workflow), so this keeps the DATA honest
+     * rather than fixing a crash.
+     */
+    fun removeImageWorkflow(workflow: ImageWorkflow) {
+        _imageWorkflows.value = _imageWorkflows.value - workflow
+        val referencing = _personas.value.filter { it.imageWorkflowId == workflow.id }
+        if (referencing.isNotEmpty()) {
+            _personas.value = _personas.value.map { persona ->
+                if (persona.imageWorkflowId != workflow.id) persona
+                else persona.copy(imageWorkflowId = null)
+            }
+        }
+        saveSettings()
     }
 
     /**

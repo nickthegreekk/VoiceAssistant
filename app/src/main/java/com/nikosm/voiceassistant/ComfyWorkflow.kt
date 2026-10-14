@@ -98,6 +98,20 @@ internal sealed interface ComfyWorkflowValidation {
     data class Invalid(val message: String) : ComfyWorkflowValidation
 }
 
+/**
+ * The user-facing line for one [ComfyWorkflowWarning].
+ *
+ * Shared by the two places a workflow can be brought in — the Image Gen entry's dialog and the
+ * persona editor's Image Character import — so the same warning is worded identically wherever it
+ * appears, and so the wording can be asserted without composing a screen.
+ */
+internal fun comfyWorkflowWarningText(warning: ComfyWorkflowWarning): String = when (warning) {
+    ComfyWorkflowWarning.NO_PROMPT_FIELD ->
+        "No %PROMPT% field: the text you type would be ignored."
+    ComfyWorkflowWarning.UNSUPPORTED_SIZE_TOKEN ->
+        "%WIDTH%/%HEIGHT% are not supported — leave the size in the workflow, which owns it."
+}
+
 private val ComfyJson = Json
 
 private const val COMFY_PROMPT_WRAPPER_KEY = "prompt"

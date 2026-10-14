@@ -250,6 +250,47 @@ internal fun AssistantService.findImageGenResolution(pinnedUrl: String?): ImageG
     resolveImageGenConfig(_imageGenBases.value, _activeImageGenBackend.value, pinnedUrl)
 
 /**
+ * Which ComfyUI workflow a generation submits: the persona's chosen **Image Character** when it
+ * resolves, else the server entry's own template.
+ *
+ * Persona-first, because a character is a property of WHO is speaking — two personas on the SAME
+ * ComfyUI server must be able to paint different faces — while the entry's workflow stays the
+ * shared default for an inline "create an image of …" from a persona that never picked one.
+ *
+ * A dangling id (its library entry was deleted) and a blank template both fall through to the
+ * entry, never to an error: the same "a stale pin degrades rather than fails" rule
+ * [resolveImageGenConfig] follows. Returns null only when neither source has a workflow, which the
+ * caller reports as [COMFY_NO_WORKFLOW_MESSAGE].
+ *
+ * Pure, so the precedence is unit-tested without a service or a device.
+ */
+internal fun resolveImageWorkflow(
+    personaWorkflowId: String?,
+    library: List<ImageWorkflow>,
+    entryWorkflow: String?
+): String? {
+    val fromPersona = personaWorkflowId
+        ?.let { id -> library.firstOrNull { it.id == id }?.workflow }
+        ?.takeIf { it.isNotBlank() }
+    return fromPersona ?: entryWorkflow?.takeIf { it.isNotBlank() }
+}
+
+/**
+ * A library name that cannot collide: [base], or "base 2", "base 3", … when taken.
+ *
+ * Importing two exports of the same character is normal (a re-export after tweaking a node), and
+ * silently reusing the first name would make two library rows indistinguishable in the persona
+ * editor's dropdown. A blank base becomes "Character" so a nameless file still gets a label.
+ */
+internal fun uniqueImageWorkflowName(base: String, existing: List<ImageWorkflow>): String {
+    val trimmed = base.trim().ifBlank { "Character" }
+    if (existing.none { it.name == trimmed }) return trimmed
+    var n = 2
+    while (existing.any { it.name == "$trimmed $n" }) n++
+    return "$trimmed $n"
+}
+
+/**
  * The URL a persona pins its image server with, or null to follow the active generator.
  *
  * ONLY an image-generator persona may pin. Its Backend URL was picked from the Image Gen list, so

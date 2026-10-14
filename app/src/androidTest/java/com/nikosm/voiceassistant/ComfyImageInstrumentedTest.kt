@@ -61,6 +61,15 @@ class ComfyImageInstrumentedTest {
             {"3":{"class_type":"KSampler","inputs":{"seed":"%SEED%","steps":20,"text":"%PROMPT%"}},
              "9":{"class_type":"SaveImage","inputs":{"images":["3",0]}}}
         """.trimIndent()
+
+        /**
+         * A character's workflow: a DIFFERENT node id ("7") and a fixed face prompt before
+         * %PROMPT%, so a submission can be attributed to the character rather than to the entry.
+         */
+        val CHARACTER_WORKFLOW = """
+            {"7":{"class_type":"CLIPTextEncode","inputs":{"text":"HER FACE, %PROMPT%"}},
+             "9":{"class_type":"SaveImage","inputs":{"images":["7",0]}}}
+        """.trimIndent()
     }
 
     @Before
@@ -219,6 +228,108 @@ class ComfyImageInstrumentedTest {
             assertTrue(
                 "the message must point at the generated file, which is what every downstream feature keys off",
                 message.generatedImagePath?.startsWith(context.cacheDir.absolutePath) == true
+            )
+        }
+    }
+
+    // ------------------------------------------------------- Image Characters
+
+    @Test
+    fun aPersonasImageCharacterOverridesTheServersOwnWorkflow() {
+        ComfyUiStub().use { stub ->
+            registerComfyServer(stub)
+            // A character whose graph is STRUCTURALLY different from the entry's: a different node
+            // id and a fixed face prompt before %PROMPT%. If the persona's character were ignored,
+            // the entry's node "3" would be submitted instead and this fails loudly.
+            val character = ImageWorkflow(name = "ProbeCharacter", workflow = CHARACTER_WORKFLOW)
+            val persona = probePersona("ComfyCharacter", PROBE_SERVER, isImageGenerator = true)
+                .copy(imageWorkflowId = character.id)
+            val genBefore = genFiles()
+            mainSync {
+                service.addImageWorkflow(character)
+                service._messages.value = emptyList()
+            }
+
+            runBlocking { service.performImageGeneration("on a beach", persona) }
+
+            val submit = stub.requests.firstOrNull { it.path == COMFY_PROMPT_PATH }
+            assertNotNull("the generation never reached POST $COMFY_PROMPT_PATH", submit)
+            val nodes = JSONObject(submit!!.body).getJSONObject("prompt")
+            assertTrue("the persona's CHARACTER workflow must be the one submitted", nodes.has("7"))
+            assertFalse(
+                "the server entry's own workflow must NOT be submitted when a character is chosen",
+                nodes.has("3")
+            )
+            assertEquals(
+                "the character's fixed face text must survive, with %PROMPT% filled in",
+                "HER FACE, on a beach",
+                nodes.getJSONObject("7").getJSONObject("inputs").getString("text")
+            )
+            assertTrue(
+                "the character generation must still produce an image",
+                waitUntil { genFiles().size == genBefore.size + 1 }
+            )
+        }
+    }
+
+    @Test
+    fun aDanglingCharacterFallsBackToTheServersOwnWorkflow() {
+        ComfyUiStub().use { stub ->
+            registerComfyServer(stub)
+            // The library entry was deleted, or a backup never carried it: the entry's workflow is
+            // used instead of failing the generation.
+            val persona = probePersona("ComfyDangling", PROBE_SERVER, isImageGenerator = true)
+                .copy(imageWorkflowId = "no-such-character")
+            val genBefore = genFiles()
+            mainSync { service._messages.value = emptyList() }
+
+            runBlocking { service.performImageGeneration("a serene mountain lake", persona) }
+
+            val submit = stub.requests.firstOrNull { it.path == COMFY_PROMPT_PATH }
+            assertNotNull("the generation never reached POST $COMFY_PROMPT_PATH", submit)
+            val nodes = JSONObject(submit!!.body).getJSONObject("prompt")
+            assertTrue("a dangling character must fall back to the entry's workflow", nodes.has("3"))
+            assertTrue(
+                "the fallback generation must still produce an image",
+                waitUntil { genFiles().size == genBefore.size + 1 }
+            )
+        }
+    }
+
+    @Test
+    fun aChatPersonasCharacterDrivesItsInlineCreateImageKeyword() {
+        ComfyUiStub().use { stub ->
+            registerComfyServer(stub)
+            // A NORMAL chat persona — isImageGenerator is FALSE — that has bound a character. This
+            // is the whole point of the feature: the keyword path must pick up the persona's face
+            // without the persona having to become an image-only generator (which would turn EVERY
+            // one of its messages into an image request).
+            val character = ImageWorkflow(name = "ChatCharacter", workflow = CHARACTER_WORKFLOW)
+            val persona = probePersona("ComfyChatCharacter", "http://192.168.1.44:11434", isImageGenerator = false)
+                .copy(imageWorkflowId = character.id)
+            val genBefore = genFiles()
+            mainSync {
+                service.addImageWorkflow(character)
+                service._messages.value = emptyList()
+            }
+
+            service.sendTextMessageToServer("create an image of on a beach", persona)
+
+            assertTrue(
+                "the inline keyword never submitted to ComfyUI",
+                waitUntil { stub.requests.any { it.path == COMFY_PROMPT_PATH } }
+            )
+            val submit = stub.requests.first { it.path == COMFY_PROMPT_PATH }
+            val nodes = JSONObject(submit.body).getJSONObject("prompt")
+            assertTrue("a CHAT persona's character must drive its inline image request", nodes.has("7"))
+            assertEquals(
+                "the character's fixed face text must survive, with the extracted prompt filled in",
+                "HER FACE, on a beach",
+                nodes.getJSONObject("7").getJSONObject("inputs").getString("text")
+            )
+            assertTrue(
+                "the inline generation must produce an image",
+                waitUntil { genFiles().size == genBefore.size + 1 }
             )
         }
     }
