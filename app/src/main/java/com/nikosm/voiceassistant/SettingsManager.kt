@@ -74,6 +74,19 @@ class SettingsManager(context: Context) {
         const val BACKGROUND_MAX_DIM = 1080
         const val MESSAGE_IMAGE_MAX_DIM = 1024
         const val DEFAULT_CHAT_FONT_SIZE = 14f
+
+        // The MCP server list. The key name is the Linux build's, deliberately: a settings blob
+        // written by either platform decodes on the other.
+        const val MCP_SERVERS = "mcp_servers_v1"
+
+        // Which MCP servers a persona offers, keyed by persona name.
+        const val MCP_PERSONA_PREFIX = "mcp_persona_"
+
+        // Long-term memory per persona (M10): one JSON list of notes, and the switch that says
+        // whether the persona has memory at all. Two prefixes, and the enabled one is the LONGER
+        // name on purpose — a generic prefix sweep must not sweep the switch with the notes.
+        const val PERSONA_MEMORY_PREFIX = "persona_memory_"
+        const val PERSONA_MEMORY_ENABLED_PREFIX = "persona_memory_enabled_"
     }
 
     private fun createEncryptedPrefsWithRecovery(context: Context): SharedPreferences {
@@ -631,6 +644,166 @@ class SettingsManager(context: Context) {
             .apply()
     }
 
+    // ------------------------------------------------------------------
+    // MCP servers (ported from the Linux build, M9)
+    //
+    // The stored shape is byte-compatible with the Linux tree's, so a settings blob or a
+    // backup written by either platform decodes on the other: the same key names, the same
+    // field names, the same enum spellings.
+    // ------------------------------------------------------------------
+
+    /**
+     * The configured MCP servers. Unreadable JSON reads as none — a corrupted entry costs the
+     * feature, never a failed start, which is this file's rule for every stored collection.
+     */
+    fun getMcpServers(): List<McpServerConfig> {
+        val data = prefs.getString(MCP_SERVERS, null) ?: return emptyList()
+        return runCatching { json.decodeFromString<List<McpServerConfig>>(data) }
+            .onFailure { e ->
+                Log.w("SettingsManager", "Corrupted/unreadable JSON in $MCP_SERVERS — no MCP servers", e)
+            }
+            .getOrDefault(emptyList())
+    }
+
+    /**
+     * Replace the server list.
+     *
+     * **Trust is only ever lowered here, and the rule is deliberate:** a grant was given for the
+     * command, its arguments and its URL, so editing any of those makes it a different server — the
+     * grant is revoked in the same write. Everything else about an entry (its name, whether it is
+     * enabled) can change without touching the grant, or renaming a server would silently turn the
+     * confirmation back on.
+     */
+    fun saveMcpServers(servers: List<McpServerConfig>) {
+        val previous = getMcpServers().associateBy { it.id }
+        val sanitized = servers.map { server ->
+            val old = previous[server.id]
+            val connectionChanged = old != null && (
+                old.transport != server.transport ||
+                    old.command != server.command ||
+                    old.args != server.args ||
+                    old.env != server.env ||
+                    old.workingDir != server.workingDir ||
+                    old.url != server.url ||
+                    old.headers != server.headers
+                )
+            if (connectionChanged && server.trust == McpTrust.TRUSTED) server.copy(trust = McpTrust.ASK) else server
+        }
+        prefs.edit().putString(MCP_SERVERS, json.encodeToString(sanitized)).apply()
+    }
+
+    /** Grant or revoke one server's trust, leaving every other entry exactly as it was. */
+    fun saveMcpTrust(serverId: String, trust: McpTrust) {
+        val servers = getMcpServers()
+        if (servers.none { it.id == serverId }) return
+        saveMcpServers(servers.map { if (it.id == serverId) it.copy(trust = trust) else it })
+    }
+
+    /** The server ids a persona offers; empty means "none", which is every persona until chosen. */
+    fun getMcpServersForPersona(personaName: String): List<String> {
+        if (personaName.isBlank()) return emptyList()
+        val data = prefs.getString(MCP_PERSONA_PREFIX + personaName, null) ?: return emptyList()
+        return runCatching { json.decodeFromString<List<String>>(data) }
+            .onFailure {
+                Log.w("SettingsManager", "Corrupted/unreadable JSON in ${MCP_PERSONA_PREFIX}$personaName — none", it)
+            }
+            .getOrDefault(emptyList())
+    }
+
+    fun saveMcpServersForPersona(personaName: String, serverIds: List<String>) {
+        if (personaName.isBlank()) return
+        val key = MCP_PERSONA_PREFIX + personaName
+        val ids = serverIds.distinct()
+        if (ids.isEmpty()) prefs.edit().remove(key).apply()
+        else prefs.edit().putString(key, json.encodeToString(ids)).apply()
+    }
+
+    /** The rename half, like every other name-keyed persona setting. */
+    fun migratePersonaMcp(oldName: String, newName: String) {
+        if (oldName == newName || oldName.isBlank()) return
+        val data = prefs.getString(MCP_PERSONA_PREFIX + oldName, null) ?: return
+        prefs.edit()
+            .putString(MCP_PERSONA_PREFIX + newName, data)
+            .remove(MCP_PERSONA_PREFIX + oldName)
+            .apply()
+    }
+
+    /** The delete half: an orphaned enablement would be inherited by a future persona of that name. */
+    fun removePersonaMcp(personaName: String) {
+        if (personaName.isBlank()) return
+        prefs.edit().remove(MCP_PERSONA_PREFIX + personaName).apply()
+    }
+
+    // ------------------------------------------------------------------
+    // Long-term memory per persona (ported from the Linux build, M10)
+    // ------------------------------------------------------------------
+
+    /**
+     * The persona's notes. Unreadable JSON reads as none — the same rule as every stored
+     * collection in this file — and blank entries are dropped so a hand-edited file cannot render
+     * an empty bullet in the prompt.
+     */
+    fun getPersonaMemory(personaName: String): List<String> {
+        if (personaName.isBlank()) return emptyList()
+        val data = prefs.getString(PERSONA_MEMORY_PREFIX + personaName, null) ?: return emptyList()
+        return runCatching { json.decodeFromString<List<String>>(data) }
+            .onFailure {
+                Log.w("SettingsManager", "Corrupted/unreadable JSON in ${PERSONA_MEMORY_PREFIX}$personaName — none", it)
+            }
+            .getOrDefault(emptyList())
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+    }
+
+    /**
+     * Replace the notes. The count is capped defensively at [MEMORY_MAX_ENTRIES]: the tool refuses
+     * over the cap in words, and the editor never adds beyond it, but a hand-edited file must not
+     * be able to turn the prompt into a memoir either.
+     */
+    fun savePersonaMemory(personaName: String, entries: List<String>) {
+        if (personaName.isBlank()) return
+        val key = PERSONA_MEMORY_PREFIX + personaName
+        val kept = entries.map { it.trim() }.filter { it.isNotEmpty() }.take(MEMORY_MAX_ENTRIES)
+        if (kept.isEmpty()) prefs.edit().remove(key).apply()
+        else prefs.edit().putString(key, json.encodeToString(kept)).apply()
+    }
+
+    fun isPersonaMemoryEnabled(personaName: String): Boolean =
+        prefs.getBoolean(PERSONA_MEMORY_ENABLED_PREFIX + personaName, false)
+
+    fun setPersonaMemoryEnabled(personaName: String, enabled: Boolean) {
+        if (personaName.isBlank()) return
+        val key = PERSONA_MEMORY_ENABLED_PREFIX + personaName
+        if (enabled) prefs.edit().putBoolean(key, true).apply() else prefs.edit().remove(key).apply()
+    }
+
+    /** The rename half, both keys, like every other name-keyed persona setting. */
+    fun migratePersonaMemory(oldName: String, newName: String) {
+        if (oldName == newName || oldName.isBlank()) return
+        val edit = prefs.edit()
+        var moved = false
+        prefs.getString(PERSONA_MEMORY_PREFIX + oldName, null)?.let {
+            edit.putString(PERSONA_MEMORY_PREFIX + newName, it)
+            edit.remove(PERSONA_MEMORY_PREFIX + oldName)
+            moved = true
+        }
+        if (isPersonaMemoryEnabled(oldName)) {
+            edit.putBoolean(PERSONA_MEMORY_ENABLED_PREFIX + newName, true)
+            edit.remove(PERSONA_MEMORY_ENABLED_PREFIX + oldName)
+            moved = true
+        }
+        if (moved) edit.apply()
+    }
+
+    /** The delete half: notes and switch die with the persona, like history does. */
+    fun removePersonaMemory(personaName: String) {
+        if (personaName.isBlank()) return
+        prefs.edit()
+            .remove(PERSONA_MEMORY_PREFIX + personaName)
+            .remove(PERSONA_MEMORY_ENABLED_PREFIX + personaName)
+            .apply()
+    }
+
     // ---------------------------------------------------------------------------
     // Persona artwork (custom icon + background image)
     //
@@ -898,7 +1071,17 @@ class SettingsManager(context: Context) {
             imageWorkflows = getImageWorkflows() ?: emptyList(),
             // The chosen generator travels too: a restored install should keep generating with the
             // backend it was backed up with, not silently revert to A1111.
-            activeImageGenBackend = getActiveImageGenBackend()
+            activeImageGenBackend = getActiveImageGenBackend(),
+            // MCP definitions only — the grant is stripped below. Per-persona enablement is
+            // name-keyed state like the filesystem pair and is deliberately not on the allowlist.
+            mcpServers = getMcpServers().map { it.copy(trust = McpTrust.ASK) },
+            // Memory travels with the personas it belongs to: notes keyed by persona name, and the
+            // names of the personas whose memory is switched on. Unlike a tool trust, this is the
+            // conversation's own content, which is what a backup is for.
+            personaMemories = personas
+                .associate { it.name to getPersonaMemory(it.name) }
+                .filterValues { it.isNotEmpty() },
+            personaMemoryEnabled = personas.filter { isPersonaMemoryEnabled(it.name) }.map { it.name },
         )
         return json.encodeToString(backup)
     }
@@ -928,6 +1111,10 @@ class SettingsManager(context: Context) {
             saveImageGenBases(backup.imageGenBases)
             saveCloudApis(backup.cloudApis)
             saveCustomCloudApis(backup.customCloudApis)
+            // MCP definitions restore; the grant does not. The export already stripped trust, and
+            // this second copy of the rule is what protects against a hand-edited backup that says
+            // TRUSTED — an imported file must never be a way to run tools without the confirmation.
+            saveMcpServers(backup.mcpServers.map { it.copy(trust = McpTrust.ASK) })
             // Skills land BEFORE the personas, because each persona's enabledSkillIds are
             // pruned against this exact list below: a backup that carried skills but a
             // persona referencing a skill this backup doesn't contain must not restore an
@@ -943,6 +1130,16 @@ class SettingsManager(context: Context) {
             saveActiveImageGenBackend(backup.activeImageGenBackend)
             val restoredSkillIds = backup.skills.map { it.id }.toSet()
             val restoredWorkflowIds = backup.imageWorkflows.map { it.id }.toSet()
+            // Memory restores for the personas this backup carries. A backup from before the
+            // feature has neither field, and this deliberately leaves whatever memory this install
+            // already has for other names alone rather than wiping it on an old restore.
+            val restoredNamesForMemory = restoredPersonas.map { it.name }.toSet()
+            backup.personaMemories
+                .filterKeys { it in restoredNamesForMemory }
+                .forEach { (name, notes) -> savePersonaMemory(name, notes) }
+            backup.personaMemoryEnabled
+                .filter { it in restoredNamesForMemory }
+                .forEach { setPersonaMemoryEnabled(it, true) }
             savePersonas(
                 restoredPersonas.map { persona ->
                     val keptSkills = persona.enabledSkillIds.filter { it in restoredSkillIds }
@@ -1296,7 +1493,17 @@ data class BackupData(
     val imageWorkflows: List<ImageWorkflow> = emptyList(),
     // Which image backend Celeste generates with. Defaulted to A1111, so a backup written before
     // the switch existed still decodes — and restores to exactly the behaviour it was taken with.
-    val activeImageGenBackend: ImageGenBackend = DEFAULT_IMAGE_GEN_BACKEND
+    val activeImageGenBackend: ImageGenBackend = DEFAULT_IMAGE_GEN_BACKEND,
+    // The MCP servers, definitions only: the export strips their trust and the import re-adds it as
+    // ASK, because a grant to run tools on this device is a permission and a restored backup must
+    // not confer one. Defaulted, so a backup written before MCP existed still decodes.
+    val mcpServers: List<McpServerConfig> = emptyList(),
+    // Long-term memory travels with the personas it belongs to: entries keyed by persona name, and
+    // the names of the personas whose memory is switched on. Unlike a tool trust, this is the
+    // conversation's own content, which is what a backup is for. Defaulted, so a backup written
+    // before memory existed still decodes.
+    val personaMemories: Map<String, List<String>> = emptyMap(),
+    val personaMemoryEnabled: List<String> = emptyList(),
 )
 
 // One persona's embedded artwork. Both slots are optional: a persona may have only an

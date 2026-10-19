@@ -156,6 +156,10 @@ internal val SETTINGS_CATEGORIES = listOf(
     SettingsCategory("General", Icons.Default.Settings, SettingsGroup.APP),
     SettingsCategory("Servers", Icons.Default.Dns, SettingsGroup.CONNECTIONS),
     SettingsCategory("Cloud", Icons.Default.Cloud, SettingsGroup.CONNECTIONS),
+    // The MCP servers ARE connections — the app talks to them over the network, the same way it
+    // talks to a model provider — so they are filed beside the other connections and not under
+    // the assistants, even though what they add is a capability rather than a model.
+    SettingsCategory("MCP", Icons.Default.Extension, SettingsGroup.CONNECTIONS),
     SettingsCategory("Personas", Icons.Default.Person, SettingsGroup.ASSISTANTS),
     SettingsCategory("Rooms", Icons.Default.Forum, SettingsGroup.ASSISTANTS),
     // After Personas, not beside them: a skill only means something once the persona that
@@ -258,6 +262,15 @@ internal fun skillsSummary(count: Int): String =
     if (count == 0) "No skills yet" else countedItems(count, "skill", "skills")
 
 /**
+ * The MCP category's one-line summary: how many servers are configured.
+ *
+ * A count rather than a sentence about them: the list itself says what each one is, and a
+ * summary that repeated it would be a second place to keep in step.
+ */
+internal fun mcpSummary(count: Int): String =
+    if (count == 0) "No tool servers yet" else countedItems(count, "server", "servers")
+
+/**
  * Every category's summary line, keyed by the category itself.
  *
  * Built once per state change and handed to the list, so the composable only renders and a
@@ -272,7 +285,8 @@ internal fun settingsCategorySummaries(
     customCloudProviders: Int,
     personas: Int,
     rooms: Int,
-    skills: Int
+    skills: Int,
+    mcpServers: Int = 0
 ): Map<SettingsCategory, String> = buildMap {
     SETTINGS_CATEGORIES.forEach { category ->
         put(
@@ -281,6 +295,7 @@ internal fun settingsCategorySummaries(
                 "General" -> GENERAL_SETTINGS_SUMMARY
                 "Servers" -> serversSummary(ollamaServers, gatewayServers, imageGenServers)
                 "Cloud" -> cloudSummary(cloudProvidersWithKey, customCloudProviders)
+                "MCP" -> mcpSummary(mcpServers)
                 "Personas" -> personasSummary(personas)
                 "Rooms" -> roomsSummary(rooms)
                 "Skills" -> skillsSummary(skills)
@@ -697,7 +712,8 @@ fun SettingsDialog(
         customCloudProviders = customCloudApis.size,
         personas = personas.size,
         rooms = rooms.size,
-        skills = skills.size
+        skills = skills.size,
+        mcpServers = if (svc != null) svc.mcpServersSetting().size else 0
     )
 
     AlertDialog(
@@ -764,6 +780,9 @@ fun SettingsDialog(
                                 "Cloud" -> CloudSettings(
                                     service = svc,
                                     apis = cloudApis
+                                )
+                                "MCP" -> McpSettings(
+                                    service = svc,
                                 )
                                 "Personas" -> PersonaSettings(
                                     service = svc,

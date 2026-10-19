@@ -280,7 +280,38 @@ internal fun AssistantService.sendAudioToServer(file: File, currentPersona: Pers
                     // the voice path passed no turnContext at all, so a spoken turn silently
                     // ignored every skill. Resolved here rather than at the top of
                     // sendAudioToServer because the trigger text does not exist yet.
-                    performCloudChat(transcribedText, currentPersona, useDeviceVoice, startTime, currentTurnInHistory = true, generation = generation, turnContext = turnContextWithSkills(transcribedText, currentPersona))
+                    // A spoken turn carries the tools too: the plan's rule is "single-chat
+                    // turns", and a voice turn is one — its sink is the single-chat transcript
+                    // and its writes go through the same confirmation. Wiring it only into the
+                    // text path left a hands-free "read my notes and summarise them" with no
+                    // tools and no explanation, which is the one outcome this feature exists to
+                    // prevent. Same fork as the text path, same loops.
+                    val voiceTurnContext = turnContextWithSkills(transcribedText, currentPersona)
+                    // The persona's enabled servers are resolved once, before the fork, because
+                    // whether there is a tool loop at all has two possible reasons.
+                    val mcpTools = resolveMcpTools(currentPersona)
+                    // The `remember` tool is the third reason a turn needs the loop.
+                    val memoryEnabled = settingsManager.isPersonaMemoryEnabled(currentPersona.name)
+                    if (mcpTools.isNotEmpty() || memoryEnabled) {
+                        performCloudChatWithTools(
+                            text = transcribedText,
+                            persona = currentPersona,
+                            useDeviceVoice = useDeviceVoice,
+                            startTime = startTime,
+                            currentTurnInHistory = true,
+                            generation = generation,
+                            attachments = emptyList(),
+                            imagePath = null,
+                            turnContext = voiceTurnContext.copy(
+                                mcpTools = mcpTools,
+                                memoryEnabled = memoryEnabled,
+                            ),
+                            mcpTools = mcpTools,
+                            memoryEnabled = memoryEnabled,
+                        )
+                    } else {
+                        performCloudChat(transcribedText, currentPersona, useDeviceVoice, startTime, currentTurnInHistory = true, generation = generation, turnContext = voiceTurnContext)
+                    }
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
@@ -356,7 +387,26 @@ internal fun AssistantService.sendAudioToServer(file: File, currentPersona: Pers
                          // against the transcription and forwarded as a turnContext. This call
                          // previously omitted turnContext entirely, so a spoken turn to a
                          // direct-Ollama persona ignored every skill.
-                         val directRes = performDirectOllamaChat(ollamaBase, actualModel, transcribedText, currentPersona, currentTurnInHistory = false, generation = generation, turnContext = turnContextWithSkills(transcribedText, currentPersona))
+                         // A spoken turn carries the tools too, for the same reason as the
+                         // cloud voice branch above: a voice turn is a single-chat turn.
+                         val voiceTurnContext = turnContextWithSkills(transcribedText, currentPersona)
+                         val mcpTools = resolveMcpTools(currentPersona)
+                         val memoryEnabled = settingsManager.isPersonaMemoryEnabled(currentPersona.name)
+                         val directRes = if (mcpTools.isNotEmpty() || memoryEnabled) {
+                             performOllamaChatWithTools(
+                                 baseUrl = ollamaBase, model = actualModel, text = transcribedText,
+                                 persona = currentPersona, currentTurnInHistory = false,
+                                 generation = generation, attachments = emptyList(), imagePath = null,
+                                 turnContext = voiceTurnContext.copy(
+                                     mcpTools = mcpTools,
+                                     memoryEnabled = memoryEnabled,
+                                 ),
+                                 mcpTools = mcpTools,
+                                 memoryEnabled = memoryEnabled,
+                             )
+                         } else {
+                             performDirectOllamaChat(ollamaBase, actualModel, transcribedText, currentPersona, currentTurnInHistory = false, generation = generation, turnContext = voiceTurnContext)
+                         }
                          // Fix #5 (voice-flow follow-up): clean markdown for TTS on IO —
                          // the cleaned variant feeds the on-device engines (5th element);
                          // the chat bubble/history keep the original markdown. This branch
@@ -722,7 +772,30 @@ internal fun AssistantService.sendTextMessageToServer(inputText: String, current
         var playbackRequested = false
 
         if (currentPersona.isCloud && isCloudModel(currentPersona.model)) {
-            performCloudChat(inputText, currentPersona, useDeviceVoice, startTime, currentTurnInHistory = true, generation = generation, imagePath = imagePath, turnContext = turnContext)
+            // The tools are resolved once, before the fork, because whether there is a tool
+            // loop at all has two possible reasons: MCP servers and the `remember` tool.
+            val mcpTools = resolveMcpTools(currentPersona)
+            val memoryEnabled = settingsManager.isPersonaMemoryEnabled(currentPersona.name)
+            if (mcpTools.isNotEmpty() || memoryEnabled) {
+                performCloudChatWithTools(
+                    text = inputText,
+                    persona = currentPersona,
+                    useDeviceVoice = useDeviceVoice,
+                    startTime = startTime,
+                    currentTurnInHistory = true,
+                    generation = generation,
+                    attachments = attachments,
+                    imagePath = imagePath,
+                    turnContext = turnContext.copy(
+                        mcpTools = mcpTools,
+                        memoryEnabled = memoryEnabled,
+                    ),
+                    mcpTools = mcpTools,
+                    memoryEnabled = memoryEnabled,
+                )
+            } else {
+                performCloudChat(inputText, currentPersona, useDeviceVoice, startTime, currentTurnInHistory = true, generation = generation, imagePath = imagePath, turnContext = turnContext)
+            }
             return@launch
         }
 
@@ -749,7 +822,26 @@ internal fun AssistantService.sendTextMessageToServer(inputText: String, current
                 if (displayServer != null) {
                      val ollamaBase = _ollamaBaseUrls.value.find { it.name == displayServer }?.url
                      if (ollamaBase != null) {
-                         val directRes = performDirectOllamaChat(ollamaBase, actualModel, inputText, currentPersona, attachments = attachments, imagePath = imagePath, currentTurnInHistory = true, generation = generation, turnContext = turnContext)
+                         // The same fork as the cloud branch above: a persona with MCP
+                         // servers or memory gets the bounded tool loop, and one without
+                         // them gets the call it always got.
+                         val mcpTools = resolveMcpTools(currentPersona)
+                         val memoryEnabled = settingsManager.isPersonaMemoryEnabled(currentPersona.name)
+                         val directRes = if (mcpTools.isNotEmpty() || memoryEnabled) {
+                             performOllamaChatWithTools(
+                                 baseUrl = ollamaBase, model = actualModel, text = inputText,
+                                 persona = currentPersona, currentTurnInHistory = true,
+                                 generation = generation, attachments = attachments, imagePath = imagePath,
+                                 turnContext = turnContext.copy(
+                                     mcpTools = mcpTools,
+                                     memoryEnabled = memoryEnabled,
+                                 ),
+                                 mcpTools = mcpTools,
+                                 memoryEnabled = memoryEnabled,
+                             )
+                         } else {
+                             performDirectOllamaChat(ollamaBase, actualModel, inputText, currentPersona, attachments = attachments, imagePath = imagePath, currentTurnInHistory = true, generation = generation, turnContext = turnContext)
+                         }
                          // Fix #5: clean markdown for TTS on IO — the cleaned variant feeds
                          // the on-device engines; the chat bubble/history keep the original.
                          val cleanedForTts = cleanTextForTts(directRes.first)
@@ -1183,12 +1275,34 @@ private fun AssistantService.isCloudModel(model: String): Boolean {
            _customCloudApis.value.any { it.name == providerName }
 }
 
-internal fun AssistantService.performCloudChat(text: String, persona: Persona, useDeviceVoice: Boolean = false, startTime: Long, currentTurnInHistory: Boolean, generation: Long, attachments: List<Uri> = emptyList(), imagePath: String? = null, turnContext: TurnContext = TurnContext.Default, allowPlayback: Boolean = true): Job {
+internal fun AssistantService.performCloudChat(text: String, persona: Persona, useDeviceVoice: Boolean = false, startTime: Long, currentTurnInHistory: Boolean, generation: Long, attachments: List<Uri> = emptyList(), imagePath: String? = null, turnContext: TurnContext = TurnContext.Default, allowPlayback: Boolean = true,
+    /**
+     * Where a tool call goes when the response carries one. Defaulted, exactly like the Ollama
+     * side's sink and for the same reason — the room-turn caller passes named arguments, so it
+     * compiles untouched and never sees a tool.
+     *
+     * The sink carries the dialect as well as the body, so the loop never looks the provider
+     * up a second time and the two cannot disagree about which provider a round is for.
+     */
+    toolSink: ((FsToolProvider, JSONObject) -> Unit)? = null,
+    /**
+     * Whether this call owns the THINKING state. False for a round of the tool loop: the LOOP
+     * holds THINKING across its rounds, because a gap between rounds would drop to IDLE and
+     * the state collector would put the microphone back on while the next round is still
+     * being asked for.
+     */
+    ownsThinkingState: Boolean = true,
+): Job {
     return serviceScope.launch {
         // M2: this turn owns the THINKING state it sets here (see stopVadListening()).
-        recordThinkingOwner(generation)
-        _state.value = AssistantState.THINKING
-        updateNotification("Thinking (Cloud)...")
+        // A round of the tool loop does NOT own it — the loop holds THINKING across its
+        // rounds, so a gap between them would not drop to IDLE (which would put the
+        // microphone back on mid-turn).
+        if (ownsThinkingState) {
+            recordThinkingOwner(generation)
+            _state.value = AssistantState.THINKING
+            updateNotification("Thinking (Cloud)...")
+        }
         // Focus-retention guard (same contract as sendAudioToServer): a voice
         // turn that reaches here retained its focus through THINKING — release
         // it in the finally below if playback was never handed off.
@@ -1220,6 +1334,19 @@ internal fun AssistantService.performCloudChat(text: String, persona: Persona, u
                             val detail = try { JSONObject(bodyStr).optJSONObject("error")?.optString("message") } catch (e: Exception) { null }
                             throw Exception("Error ${response.code}: ${detail ?: bodyStr.take(200)}")
                         }
+                        // The first-token rule, cloud side: a tool-call body carries
+                        // `content: null` and the parser below reads that field with
+                        // `getString`, which throws on it. So the body is asked about its
+                        // calls FIRST, and a body that carries one never reaches the
+                        // prose parser at all.
+                        if (toolSink != null) {
+                            val body = runCatching { JSONObject(bodyStr) }.getOrNull()
+                            val provider = fsToolProviderFor(apiSetting)
+                            if (body != null && fsToolCallsFrom(provider, body) != null) {
+                                toolSink(provider, body)
+                                return@withContext null
+                            }
+                        }
                         val (responseText, reasonText, usage) = parseCloudResponse(apiSetting, persona, bodyStr)
                         withContext(Dispatchers.Main) {
                             val currentUsage = _sessionUsage.value
@@ -1231,7 +1358,9 @@ internal fun AssistantService.performCloudChat(text: String, persona: Persona, u
                         // feeds the on-device engines (3rd element); the chat bubble/history
                         // keep the original markdown.
                         val cleanedForTts = cleanTextForTts(responseText)
-                        Triple(responseText, reasonText, cleanedForTts)
+                        // A turn that used tools and then said nothing answers with a sentence
+                        // rather than an empty bubble — see withCloudToolSummary.
+                        withCloudToolSummary(Triple(responseText, reasonText, cleanedForTts), turnContext)
                     }
                 } finally {
                     // A6: clear the in-flight reference on success AND failure — but only
@@ -1239,6 +1368,10 @@ internal fun AssistantService.performCloudChat(text: String, persona: Persona, u
                     if (currentCall === call) currentCall = null
                 }
             }
+            // The round called a tool instead of answering. There is nothing to append and
+            // nothing to speak, and the turn is not over — the loop runs the call and starts the
+            // next round — so the span this call would otherwise have ended is left alone.
+            if (responseData == null) return@launch
             val responseTimeMs = System.currentTimeMillis() - startTime
             // A2/B1: apply only if this is still the newest request for this persona.
             if (!isChatRequestCurrent(generation)) {
@@ -1325,7 +1458,13 @@ internal fun AssistantService.performCloudChat(text: String, persona: Persona, u
                 }
             }
         } finally {
-            if (_state.value == AssistantState.THINKING && isChatRequestCurrent(generation)) {
+            // **Only when this call is the whole turn.** As a round of the tool loop it leaves
+            // both halves alone: the state exit, because a between-rounds IDLE would resume the
+            // VAD while the next round is still being asked for; and the focus release, because
+            // the span is not over — abandoning it here would un-duck the user's other audio
+            // mid-turn. The loop makes both decisions once, when it ends (see
+            // `performCloudChatWithTools`'s finally).
+            if (ownsThinkingState && _state.value == AssistantState.THINKING && isChatRequestCurrent(generation)) {
                 // Focus-retention counterpart (see playbackRequested above): the
                 // turn terminated without handing off to playback — release the
                 // focus stopRecording() retained through THINKING. Playback-pending
@@ -1356,7 +1495,29 @@ internal data class TurnContext(
     // Phase 0: where this turn's own transcript writes land. Null ⇒ the single-chat
     // `_messages` transcript, i.e. exactly the pre-Rooms behavior. A room turn passes
     // its own sink so the identical pipeline writes into the room transcript.
-    val sink: TurnSink? = null
+    val sink: TurnSink? = null,
+    /**
+     * The earlier rounds of this turn's tool loop: the assistant's own call messages and
+     * the results, in the provider's own dialect.
+     *
+     * These are neither history nor the message, so nothing measured them — and that is
+     * why they are counted separately in the budget (see `fsToolTurnsText`). Empty for
+     * every turn that offers no tools, which is every turn a plain conversation makes.
+     */
+    val toolTurns: List<FsToolTurn> = emptyList(),
+    /**
+     * The MCP tools this turn may offer, resolved from the persona's enabled servers
+     * before the request is built.
+     *
+     * Off by default: a turn that offers no tools sends no `tools` field at all, and
+     * every existing call site keeps its byte-identical request.
+     */
+    val mcpTools: List<McpTool> = emptyList(),
+    /**
+     * Whether this turn offers the `remember` tool. Off by default, so no ordinary
+     * request grows a `tools` field.
+     */
+    val memoryEnabled: Boolean = false,
 ) {
     /**
      * Phase 2: true when this turn writes into the single-chat transcript, i.e. exactly
@@ -1376,7 +1537,7 @@ internal data class TurnContext(
     }
 }
 
-internal suspend fun AssistantService.performDirectOllamaChat(baseUrl: String, model: String, text: String, persona: Persona, currentTurnInHistory: Boolean, generation: Long, attachments: List<Uri> = emptyList(), imagePath: String? = null, turnContext: TurnContext = TurnContext.Default): Triple<String, String?, ByteArray?> {
+internal suspend fun AssistantService.performDirectOllamaChat(baseUrl: String, model: String, text: String, persona: Persona, currentTurnInHistory: Boolean, generation: Long, attachments: List<Uri> = emptyList(), imagePath: String? = null, turnContext: TurnContext = TurnContext.Default, toolSink: ((JSONObject) -> Unit)? = null): Triple<String, String?, ByteArray?> {
     // Resolve backend URL: fallback if empty or mistakenly pointing to a gateway (8880)
     val stripped = baseUrl.trim()
     val resolvedBackend = if (stripped.isBlank() || stripped.contains(":8880")) {
@@ -1426,7 +1587,15 @@ internal suspend fun AssistantService.performDirectOllamaChat(baseUrl: String, m
                 if (persona.stampsHistoryWithTimestamps(ollamaServerNames(), cloudProviderNames())) {
                     add(MODEL_STAMP_INSTRUCTION)
                 }
-            }.filter { it.isNotBlank() }.joinToString("\n\n")
+                // The tool contract, on the channel the design names — the same place the
+                // persona's own prompt sits, because a model that does not know a tool
+                // exists will not call it.
+                allToolContractFor(turnContext.mcpTools, turnContext.memoryEnabled)?.let { add(it) }
+            }.filter { it.isNotBlank() }.joinToString("\n\n"),
+            // The persona's own notes, inside the system prompt: the history budget trims
+            // history, not this, which is exactly the survival memory exists for. "" for a
+            // room turn, a memory-off persona, and every turn before this feature existed.
+            memory = memoryBlockFor(persona, turnContext),
         )
 
         // Add system prompt first
@@ -1441,7 +1610,18 @@ internal suspend fun AssistantService.performDirectOllamaChat(baseUrl: String, m
         // resolveHistoryBudget(). Throws (and sends nothing) when the system prompt,
         // this message/attachment and the reserved output alone already exceed the
         // window, since no history trimming can make such a request fit.
-        val budget = resolveHistoryBudget(contextWindow, reservedOutput, finalSystemPrompt, modelText)
+        //
+        // The tool turns and declarations count as fixed text too: they ride in the request
+        // after the history, and a turn that has already run a few rounds carries a real
+        // amount of JSON that must not silently overrun the window.
+        val budget = resolveHistoryBudget(
+            contextWindow,
+            reservedOutput,
+            finalSystemPrompt,
+            modelText,
+            extraFixed = fsToolTurnsText(turnContext.toolTurns) +
+                toolDeclarationsText(FsToolProvider.OLLAMA, turnContext.mcpTools, turnContext.memoryEnabled),
+        )
 
         // A1: positional slice — the caller says whether the current user turn is
         // already the last entry in _messages (text flow appends it before the
@@ -1491,9 +1671,22 @@ internal suspend fun AssistantService.performDirectOllamaChat(baseUrl: String, m
             currentMsg.put("images", JSONArray().put(base64Image))
         }
         msgsArray.put(currentMsg)
+
+        // This turn's earlier tool rounds, carried back to the model so it can read what
+        // its own calls produced. Appended AFTER the current user turn, because that is
+        // where they belong in the conversation.
+        turnContext.toolTurns.forEach { toolTurn ->
+            toolTurn.messages.forEach { msgsArray.put(it) }
+        }
     }
 
     json.put("messages", msgsArray)
+
+    // The tool declarations, in Ollama's dialect. Null when this turn offers no tools, and
+    // then the request carries no `tools` field at all — the byte-identical request every
+    // ordinary conversation still sends.
+    allToolsJsonFor(FsToolProvider.OLLAMA, turnContext.mcpTools, turnContext.memoryEnabled)
+        ?.let { json.put("tools", it) }
 
     val payload = json.toString()
     if (BuildConfig.DEBUG) {
@@ -1601,6 +1794,20 @@ internal suspend fun AssistantService.performDirectOllamaChat(baseUrl: String, m
                     val line = source.readUtf8Line() ?: break
                     if (line.isBlank()) continue
                     val obj = JSONObject(line)
+                    val msgObj = obj.optJSONObject("message")
+                    // The first-token rule. A tool call arrives with no content, and capturing it
+                    // here — before `appendPlaceholderIfNeeded` could run — is what keeps a call's
+                    // JSON out of the chat bubble. A stream that opens with prose falls straight
+                    // through and is streamed exactly as before.
+                    //
+                    // **Read from every chunk, including the last one, and that is the whole
+                    // point.** Ollama streams an empty-content chunk per token and delivers the
+                    // call *inside* the `done: true` chunk; a check placed after the done break —
+                    // which is where this started — therefore never saw a call from a real Ollama
+                    // at all, and every tool round fell through to "the model answered nothing".
+                    if (toolSink != null && msgObj?.optJSONArray("tool_calls") != null) {
+                        toolSink(msgObj)
+                    }
                     if (obj.optBoolean("done", false)) {
                         if (BuildConfig.DEBUG) android.util.Log.d(
                             "AssistantService",
@@ -1610,7 +1817,7 @@ internal suspend fun AssistantService.performDirectOllamaChat(baseUrl: String, m
                         )
                         break
                     }
-                    val msgObj = obj.optJSONObject("message") ?: continue
+                    if (msgObj == null) continue
                     val chunk = msgObj.optString("content", "")
                     val thinkChunk = if (persona.enableThinking) msgObj.optString("thinking", "") else ""
                     if (chunk.isEmpty() && thinkChunk.isEmpty()) continue
@@ -1721,7 +1928,17 @@ private suspend fun AssistantService.buildCloudRequest(api: CloudApiSetting, per
         // Phase 0: same room-preamble placement as the direct-Ollama path — appended to
         // the persona's own prompt and applied BEFORE resolveHistoryBudget below, so the
         // budget math and the overflow refusal see the real system prompt.
-        suffix = turnContext.systemPromptSuffix
+        suffix = buildList {
+            add(turnContext.systemPromptSuffix)
+            // The tool contract, on the channel every model reads: a model that does not
+            // know a tool exists will not call it, and a model that does not expect a
+            // refusal will answer "done" when the user denied it.
+            allToolContractFor(turnContext.mcpTools, turnContext.memoryEnabled)?.let { add(it) }
+        }.filter { it.isNotBlank() }.joinToString("\n\n"),
+        // The persona's own notes, inside the system prompt: the history budget trims
+        // history, not this, which is exactly the survival memory exists for. "" for a
+        // room turn, a memory-off persona, and every turn before this feature existed.
+        memory = memoryBlockFor(persona, turnContext),
     )
 
     // A-attachments: the model-facing prompt includes extracted file content. The
@@ -1734,7 +1951,15 @@ private suspend fun AssistantService.buildCloudRequest(api: CloudApiSetting, per
     // Fix #6 (numCtx overflow): same shared budget math + pre-flight refusal as the
     // direct-Ollama path — see resolveHistoryBudget(). A cloud request whose fixed
     // parts don't fit the persona's Context Window Size is refused the same way.
-    val budget = resolveHistoryBudget(contextWindow, reservedOutput, finalSystemPrompt, modelText)
+    // The tool turns and declarations are fixed text here too, for the same reason.
+    val budget = resolveHistoryBudget(
+        contextWindow,
+        reservedOutput,
+        finalSystemPrompt,
+        modelText,
+        extraFixed = fsToolTurnsText(turnContext.toolTurns) +
+            toolDeclarationsText(fsToolProviderFor(api), turnContext.mcpTools, turnContext.memoryEnabled),
+    )
     
     // A1: positional slice — the caller says whether the current user turn is already
     // the last entry in _messages (text flow appends it; voice flow does not). No
@@ -1785,7 +2010,15 @@ private suspend fun AssistantService.buildCloudRequest(api: CloudApiSetting, per
             history.dropWhile { it.role != "user" }.forEach { msg -> appendAnthropicTurn(msg.role, msg.text) }
             // A1: the current user turn always reaches the model.
             appendAnthropicTurn("user", modelText, base64Image)
+            // This turn's earlier tool rounds, carried back so the model can read what its own
+            // calls produced. They are ordinary user/assistant messages in this dialect.
+            turnContext.toolTurns.forEach { toolTurn ->
+                toolTurn.messages.forEach { msgArray.put(it) }
+            }
             json.put("messages", msgArray)
+            // The tool declarations, in Anthropic's dialect. Null ⇒ no `tools` field at all.
+            allToolsJsonFor(FsToolProvider.ANTHROPIC, turnContext.mcpTools, turnContext.memoryEnabled)
+                ?.let { json.put("tools", it) }
             Request.Builder().url("$baseUrl/v1/messages").header("x-api-key", api.apiKey).header("anthropic-version", "2023-06-01").header("content-type", "application/json").post(json.toString().toRequestBody(mediaType)).build()
         }
         "G" -> {
@@ -1817,6 +2050,11 @@ private suspend fun AssistantService.buildCloudRequest(api: CloudApiSetting, per
             history.forEach { appendGeminiTurn(it.role, it.text) }
             // A1: the current user turn always reaches the model.
             appendGeminiTurn("user", modelText, base64Image)
+            // This turn's earlier tool rounds, carried back so the model can read what its own
+            // calls produced.
+            turnContext.toolTurns.forEach { toolTurn ->
+                toolTurn.messages.forEach { contents.put(it) }
+            }
             json.put("contents", contents)
 
             val genConfig = JSONObject()
@@ -1828,6 +2066,9 @@ private suspend fun AssistantService.buildCloudRequest(api: CloudApiSetting, per
             json.put("system_instruction", sysInst)
 
             // S3: pass the key via the x-goog-api-key header
+            // The tool declarations, in Gemini's dialect. Null ⇒ no `tools` field at all.
+            allToolsJsonFor(FsToolProvider.GEMINI, turnContext.mcpTools, turnContext.memoryEnabled)
+                ?.let { json.put("tools", it) }
             Request.Builder()
                 .url("$baseUrl/v1beta/models/$actualModel:generateContent")
                 .header("x-goog-api-key", api.apiKey)
@@ -1849,8 +2090,17 @@ private suspend fun AssistantService.buildCloudRequest(api: CloudApiSetting, per
                 currentMsg.put("content", modelText)
             }
             msgs.put(currentMsg)
-            
+            // This turn's earlier tool rounds, carried back so the model can read what its own
+            // calls produced. In this dialect they are an assistant message with `tool_calls` and
+            // one `role:tool` message per result.
+            turnContext.toolTurns.forEach { toolTurn ->
+                toolTurn.messages.forEach { msgs.put(it) }
+            }
+
             json.put("messages", msgs)
+            // The tool declarations, in the OpenAI dialect. Null ⇒ no `tools` field at all.
+            allToolsJsonFor(FsToolProvider.OPENAI, turnContext.mcpTools, turnContext.memoryEnabled)
+                ?.let { json.put("tools", it) }
             val payload = json.toString()
             if (BuildConfig.DEBUG) {
                 Log.d("Vision", "Request payload: ${payload.take(500)}... [length: ${payload.length}]")
@@ -1859,6 +2109,38 @@ private suspend fun AssistantService.buildCloudRequest(api: CloudApiSetting, per
             Request.Builder().url(url).header("Authorization", "Bearer ${api.apiKey}").post(json.toString().toRequestBody(mediaType)).build()
         }
     }
+}
+
+/**
+ * The dialect a cloud entry speaks, from the same single-letter `icon` that `buildCloudRequest`
+ * branches on. One function so the declaration, the reader and the replay can never disagree about
+ * which provider a request is for.
+ */
+internal fun fsToolProviderFor(api: CloudApiSetting): FsToolProvider = when (api.icon) {
+    "A" -> FsToolProvider.ANTHROPIC
+    "G" -> FsToolProvider.GEMINI
+    else -> FsToolProvider.OPENAI
+}
+
+/**
+ * A cloud tool turn that ends in silence answers with a sentence.
+ *
+ * The twin of the Ollama loop's summary, sharing its words through [toolSummarySentence] — and it
+ * needs no extra state to know whether the turn used tools: [TurnContext.toolTurns] carries that,
+ * and that is why [FsToolTurn] records the number of calls each round made.
+ *
+ * The blank case is not hypothetical: a model that has just run a tool frequently answers with
+ * nothing at all, and an empty bubble tells the user nothing about what happened — while a
+ * sentence is also *spoken*, which is what a hands-free user gets instead of silence.
+ */
+private fun withCloudToolSummary(
+    reply: Triple<String, String?, String?>,
+    turnContext: TurnContext,
+): Triple<String, String?, String?> {
+    val calls = turnContext.toolTurns.sumOf { it.calls }
+    if (reply.first.isNotBlank() || calls == 0) return reply
+    val sentence = toolSummarySentence(calls)
+    return Triple(sentence, reply.second, sentence)
 }
 
 private fun AssistantService.parseCloudResponse(api: CloudApiSetting, persona: Persona, body: String): Triple<String, String?, UsageInfo> {
@@ -2589,8 +2871,13 @@ Do you want a summary?
 // distinguished — a long system prompt, a long message, a large attachment or any
 // combination of them are one and the same problem here, and take the same fix — which is
 // why the check lives in this single shared helper rather than at each call site.
-internal fun AssistantService.resolveHistoryBudget(contextWindow: Int, reservedOutput: Int, systemPrompt: String, modelText: String): Int {
-    val systemPromptTokens = estimateTokens(systemPrompt)
+internal fun AssistantService.resolveHistoryBudget(contextWindow: Int, reservedOutput: Int, systemPrompt: String, modelText: String, extraFixed: String = ""): Int {
+    // The tool turns and the tool declarations are neither history nor the message, so nothing
+    // measured them — a turn that carried 64 KiB of earlier tool results added ~16k uncounted
+    // tokens to a request whose whole point was to be checked for fitting. [extraFixed] is that
+    // text, rendered as the JSON the model will actually be sent — exact enough for an estimate.
+    val extraTokens = if (extraFixed.isBlank()) 0 else estimateTokens(extraFixed)
+    val systemPromptTokens = estimateTokens(systemPrompt) + extraTokens
     val modelTextTokens = estimateTokens(modelText)
     val promptTokens = systemPromptTokens + modelTextTokens
     val rawBudget = contextWindow - reservedOutput - promptTokens
@@ -2634,12 +2921,21 @@ internal fun composeSystemPrompt(
     currentDateTime: String,
     searchContext: String,
     ragContext: String,
-    suffix: String
+    suffix: String,
+    /**
+     * The persona's long-term memory, already framed as data by [memorySystemPrompt], or "".
+     * **Inside the system prompt on purpose**: the history budget trims history, not this, which
+     * is exactly the survival the feature exists for — and because it is part of the prompt,
+     * `resolveHistoryBudget` counts it without a second arithmetic.
+     */
+    memory: String = ""
 ): String {
     val contextPrefix = listOf(searchContext, ragContext).filter { it.isNotEmpty() }.joinToString("\n\n")
     val withContext = if (contextPrefix.isNotEmpty()) "$contextPrefix\n\n" else ""
     val suffixPart = if (suffix.isNotBlank()) "\n\n$suffix" else ""
-    return "$withContext" + "Current date and time: $currentDateTime\n\n${persona.systemPrompt}" + suffixPart
+    val memoryPart = if (memory.isBlank()) "" else "\n\n$memory"
+    return "$withContext" + "Current date and time: $currentDateTime\n\n${persona.systemPrompt}" +
+        memoryPart + suffixPart
 }
 
 /**

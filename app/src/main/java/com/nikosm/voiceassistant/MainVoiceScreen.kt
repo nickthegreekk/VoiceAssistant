@@ -411,6 +411,9 @@ fun MainScreen(
     var ttsWordTimestamps by remember { mutableStateOf<String?>(null) }
     var pendingCert by remember { mutableStateOf<CertApprovalRequest?>(null) }
     var updateInfo by remember { mutableStateOf<UpdateInfo?>(null) }
+    // The MCP tool-call question. At most one is pending at a time, and dismissing it DENIES —
+    // closing a dialog is not an approval.
+    var mcpApproval by remember { mutableStateOf<McpApprovalRequest?>(null) }
 
     LaunchedEffect(service) {
         if (service != null) {
@@ -432,6 +435,7 @@ fun MainScreen(
             launch { service.revealRestartRequest.collect { revealRestartRequest = it } }
             launch { service.pendingCertApproval.collect { pendingCert = it } }
             launch { service.updateAvailable.collect { updateInfo = it } }
+            launch { service.mcpApprovalGate.pending.collect { mcpApproval = it } }
             launch { service.rooms.collect { rooms = it } }
             launch { service.activeRoomId.collect { activeRoomId = it } }
             launch { service.roomMessages.collect { roomMessages = it } }
@@ -1210,6 +1214,15 @@ fun MainScreen(
             personaColor = personaColor,
             openPersonaEditorFor = editPersonaRequest,
             onOpenPersonaEditorConsumed = { editPersonaRequest = null }
+        )
+    }
+
+    if (mcpApproval != null) {
+        McpApprovalDialog(
+            request = mcpApproval!!,
+            onAnswer = { allow, trustServer ->
+                service?.mcpApprovalGate?.answer(allow, trustServer)
+            },
         )
     }
 

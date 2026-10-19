@@ -138,6 +138,27 @@ class AssistantService : Service() {
     val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     lateinit var settingsManager: SettingsManager
 
+    /**
+     * The log sink the ported MCP and memory files carry.
+     *
+     * The rest of this tree calls `android.util.Log` directly; these files were written against the
+     * Linux build's `AppLogger` seam, and this is the one place that turns that seam into Logcat.
+     */
+    internal val logger: AppLogger = AndroidAppLogger
+
+    /**
+     * The live MCP connections. Lazy in the only sense that matters — nothing is opened until a
+     * turn asks for a configured server's tools, and a persona with no servers never asks.
+     *
+     * **HTTP only.** This platform has no stdio transport: a child process is not something an
+     * Android app may spawn, so a server configured for one is refused by the factory below
+     * rather than silently ignored.
+     */
+    internal val mcpRegistry = McpRegistry(AndroidMcpTransportFactory(), logger)
+
+    /** The confirmation an MCP call may need, and the state the dialog reads. */
+    internal val mcpApprovalGate = McpApprovalGate()
+
     val _state = MutableStateFlow(AssistantState.IDLE)
     val assistantState = _state.asStateFlow()
 
@@ -426,6 +447,45 @@ class AssistantService : Service() {
     /** M2: releases THINKING ownership held by [generation] (no-op for a stale owner). */
     internal fun clearThinkingOwnerIfOwned(generation: Long) {
         if (thinkingOwnerGeneration == generation) thinkingOwnerGeneration = null
+    }
+
+    /**
+     * A transient, user-facing message: the app's way of saying something without a chat bubble.
+     *
+     * The tool loop uses it for the two sentences it must say out loud — the refusal that ends a
+     * turn, and the notice that a tool call was not approved. Both are things the user needs to
+     * know about a turn that is otherwise silent, and a bubble would be a permanent record of a
+     * transient event.
+     */
+    private val _transientMessage = MutableStateFlow<String?>(null)
+    val transientMessage = _transientMessage.asStateFlow()
+
+    /** Publishes a transient user-facing message. See [transientMessage]. */
+    internal fun notifyUser(message: String) {
+        android.util.Log.i("AssistantService", "user message: $message")
+        _transientMessage.value = message
+    }
+
+    /** Marks the current [transientMessage] as shown. Called by the UI. */
+    fun consumeTransientMessage() {
+        _transientMessage.value = null
+    }
+
+    /**
+     * Ends a THINKING span this generation owns — leaves the state, releases the ownership
+     * ([clearThinkingOwnerIfOwned]) and says so in the notification.
+     *
+     * One function because one turn is no longer the only thing that can hold the state: the cloud
+     * tool loop wraps several cloud calls in a single span, and both have to end it the same way.
+     * The currency half is the existing rule — a superseded turn must not clear a state that now
+     * belongs to whatever replaced it.
+     */
+    internal fun endThinkingIfOwned(generation: Long) {
+        if (_state.value == AssistantState.THINKING && isChatRequestCurrent(generation)) {
+            clearThinkingOwnerIfOwned(generation)
+            _state.value = AssistantState.IDLE
+            updateNotification("Ready to help")
+        }
     }
 
     val _sessionUsage = MutableStateFlow(UsageInfo())
@@ -2024,6 +2084,12 @@ class AssistantService : Service() {
                 // sentTodayCount are PRESERVED under the new name, never reset, or a
                 // freshly renamed persona could immediately re-message after its rename.
                 settingsManager.migratePersonaHistory(oldName, persona.name)
+                // The name-keyed tool and memory state moves too: both are keyed by persona
+                // name, so a rename that left them behind would give the persona no servers
+                // and no notes — and the old keys would be inherited by any future persona
+                // that took the old name.
+                settingsManager.migratePersonaMcp(oldName, persona.name)
+                settingsManager.migratePersonaMemory(oldName, persona.name)
                 // L5: the migration itself stays synchronous — anything that saves right after
                 // this rename (persistSettings below) must already see the new key. But a
                 // persona-history swap that was already in flight may still be writing this
@@ -2349,6 +2415,11 @@ class AssistantService : Service() {
                 previousHistoryIo?.join()
                 withContext(Dispatchers.IO) {
                     settingsManager.deletePersonaHistory(deletedHistoryName)
+                    // Name-keyed state dies with the persona like the history does: an
+                    // orphaned MCP enablement would be inherited by a future persona of that
+                    // name, and orphaned notes would be too — both invisible forever.
+                    settingsManager.removePersonaMcp(deletedHistoryName)
+                    settingsManager.removePersonaMemory(deletedHistoryName)
                 }
             }
             // Artwork cleanup rides along with the history cleanup above: the persona's

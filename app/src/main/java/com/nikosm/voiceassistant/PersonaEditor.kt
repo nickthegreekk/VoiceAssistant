@@ -34,6 +34,8 @@ import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Dns
+import androidx.compose.material.icons.filled.Extension
+import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material.icons.filled.NotificationsActive
@@ -1116,6 +1118,29 @@ fun PersonaEditor(
             PersonaSkillSection(
                 enabledSkillIds = enabledSkillIds,
                 onToggle = { skillId, enabled -> setSkillEnabled(skillId, enabled) },
+                service = service
+            )
+        }
+
+        // The MCP servers this persona may call. The servers themselves live in Settings → MCP;
+        // this section is only the per-persona enablement, exactly like the skills section is
+        // only the per-persona enablement of a shared library.
+        SettingsSectionHeader(title = "Tool servers (MCP)", icon = Icons.Default.Extension)
+        SettingsSection {
+            PersonaMcpSection(
+                personaName = persona.name,
+                service = service
+            )
+        }
+
+        // Long-term memory: this persona's own notes about its user. The switch is the whole
+        // feature's consent — a persona with memory off never sees a note and never offers the
+        // `remember` tool — so it sits in the editor, where the user can read every note and
+        // delete any of them.
+        SettingsSectionHeader(title = "Memory", icon = Icons.Default.Psychology)
+        SettingsSection {
+            PersonaMemorySection(
+                personaName = persona.name,
                 service = service
             )
         }
