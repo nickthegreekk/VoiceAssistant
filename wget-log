@@ -1,9 +1,0 @@
-Will not apply HSTS. The HSTS database must be a regular and non-world-writable file.
-ERROR: could not open HSTS store at '/home/nikos/.wget-hsts'. HSTS will be disabled.
---2026-09-30 23:01:43--  https://rr4---sn-ixaa5n-5ui6.googlevideo.com/videoplayback?expire=1790819601
-Loaded CA certificate '/etc/ssl/certs/ca-certificates.crt'
-Resolving rr4---sn-ixaa5n-5ui6.googlevideo.com (rr4---sn-ixaa5n-5ui6.googlevideo.com)... 2a02:858:1ff:ff03::10, 62.74.63.144
-Connecting to rr4---sn-ixaa5n-5ui6.googlevideo.com (rr4---sn-ixaa5n-5ui6.googlevideo.com)|2a02:858:1ff:ff03::10|:443... connected.
-HTTP request sent, awaiting response... 403 Forbidden
-2026-09-30 23:01:43 ERROR 403: Forbidden.
-
