@@ -164,7 +164,10 @@ internal val SETTINGS_CATEGORIES = listOf(
     SettingsCategory("Rooms", Icons.Default.Forum, SettingsGroup.ASSISTANTS),
     // After Personas, not beside them: a skill only means something once the persona that
     // can enable it exists, so the order follows "what to configure" rather than the alphabet.
-    SettingsCategory("Skills", Icons.Default.AutoAwesome, SettingsGroup.ASSISTANTS)
+    SettingsCategory("Skills", Icons.Default.AutoAwesome, SettingsGroup.ASSISTANTS),
+    // About sits in the APP group because it describes the application itself, not a connection
+    // or an assistant capability. It renders last in the section, at the bottom of the list.
+    SettingsCategory("About", Icons.Default.Info, SettingsGroup.APP)
 )
 
 /**
@@ -299,6 +302,7 @@ internal fun settingsCategorySummaries(
                 "Personas" -> personasSummary(personas)
                 "Rooms" -> roomsSummary(rooms)
                 "Skills" -> skillsSummary(skills)
+                "About" -> ""
                 else -> ""
             }
         )
@@ -806,6 +810,7 @@ fun SettingsDialog(
                                     personas = personas,
                                     currentThemeColor = personaColor
                                 )
+                                "About" -> SettingsAboutSection()
                             }
                         }
                     }
