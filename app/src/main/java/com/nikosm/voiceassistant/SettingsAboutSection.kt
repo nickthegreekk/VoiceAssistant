@@ -104,7 +104,9 @@ private fun AboutLink(url: String, context: android.content.Context) {
         fontSize = 13.sp,
         color = if (canOpen) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
         modifier = if (canOpen) Modifier.clickable {
-            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            context.startActivity(intent)
         } else Modifier,
     )
 }
