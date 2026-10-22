@@ -927,6 +927,13 @@ fun GeneralSettings(
     var pendingExportPassword by remember { mutableStateOf<String?>(null) }
     var excludeSecrets by remember { mutableStateOf(false) }
     var showPasswordlessWarning by remember { mutableStateOf(false) }
+
+    // S6: plain-text confirmation dialog for unencrypted export without exclusion
+    val EXPORT_PLAINTEXT_DESC = """This file will contain your passwords and API keys in plain text.
+Anyone with access to the file can read your credentials.
+Exclude credentials strips sensitive values while keeping the backup structure usable."""
+
+
     var showImportedMcpServers by remember { mutableStateOf(false) }
     var importedServersForDialog by remember { mutableStateOf<List<McpServerConfig>>(emptyList()) }
 
@@ -958,6 +965,7 @@ fun GeneralSettings(
     }
 
     var showImportPasswordDialog by remember { mutableStateOf(false) }
+    var showExportPlaintextWarning by remember { mutableStateOf(false) }
     var importPassword by remember { mutableStateOf("") }
     LaunchedEffect(Unit) {
         service.backupPasswordRequested.collect { requested ->
@@ -1223,8 +1231,16 @@ Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
                                 exportLauncher.launch("voice_assistant_backup_${System.currentTimeMillis()}.json")
                             }
                         }
+                        } else if (!excludeSecrets) {
+                        // Show plain-text confirmation dialog before file picker
+                        showExportPlaintextWarning = true
                     } else {
-                        showPasswordlessWarning = true
+                        // Exclude credentials is on, skip straight to file picker
+                        exportPasswordError = null
+                        pendingExportPassword = null
+                        exportLauncher.launch(
+                            "voice_assistant_backup_${System.currentTimeMillis()}.json"
+                        )
                     }
                 },
                 modifier = Modifier.fillMaxWidth(),
@@ -1299,22 +1315,27 @@ Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
         )
     }
 
-    // S5: passwordless export warning modal
-    if (showPasswordlessWarning) {
+    // S5: passwordless export warning modal - no longer shown; handled via showExportPlaintextWarning below
+
+    // S6: plain-text confirmation dialog for unencrypted export without exclusion
+    if (showExportPlaintextWarning) {
         AlertDialog(
-            onDismissRequest = { showPasswordlessWarning = false },
+            onDismissRequest = { showExportPlaintextWarning = false },
             title = { Text("Unencrypted Backup") },
-            text = { Text("This backup will contain API keys, server passwords, RAG credentials and MCP environment/header secrets in plaintext. Anyone with access to the file can read them.\n\nExclude credentials strips:\n- Server passwords and API keys\n- Ollama passwords and API keys\n- Image-gen API keys and passwords\n- Cloud API keys\n- RAG usernames and passwords\n- MCP environment variables and headers\n- MCP URL userinfo and query values\n- MCP args with --token, --key, --password, --api-key flags\n\nDoes NOT strip:\n- Non-secret URLs (server URLs remain for API access)\n- Usernames in server entries\n- Chat conversation contents\n- Location data\n- Room transcripts and skills\n\nUse encryption for full protection, or check \"Exclude credentials\" to strip sensitive values while keeping the structure.") },
+            text = { Text(EXPORT_PLAINTEXT_DESC) },
             confirmButton = {
                 TextButton(onClick = {
-                    showPasswordlessWarning = false
+                    showExportPlaintextWarning = false
                     exportPasswordError = null
                     pendingExportPassword = null
-                    exportLauncher.launch("voice_assistant_backup_${System.currentTimeMillis()}.json")
-                }) { Text("Export Anyway") }
+                    excludeSecrets = true
+                    exportLauncher.launch(
+                        "voice_assistant_backup_${System.currentTimeMillis()}.json"
+                    )
+                }) { Text("Exclude credentials and export") }
             },
             dismissButton = {
-                TextButton(onClick = { showPasswordlessWarning = false }) { Text("Cancel") }
+                TextButton(onClick = { showExportPlaintextWarning = false }) { Text("Cancel") }
             }
         )
     }
