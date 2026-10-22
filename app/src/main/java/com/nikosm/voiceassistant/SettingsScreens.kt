@@ -1207,7 +1207,7 @@ Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
                     checked = excludeSecrets,
                     onCheckedChange = { excludeSecrets = it }
                 )
-                Text("Exclude secrets (API keys, passwords, RAG credentials, MCP env/headers)")
+                Text("Exclude credentials")
             }
             OutlinedButton(
                 onClick = {
@@ -1304,7 +1304,7 @@ Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
         AlertDialog(
             onDismissRequest = { showPasswordlessWarning = false },
             title = { Text("Unencrypted Backup") },
-            text = { Text("This backup will contain API keys, server passwords, RAG credentials and MCP environment/header secrets in plaintext. Anyone with access to the file can read them. Use encryption instead, or check \"Exclude secrets\" to strip sensitive values while keeping the structure.") },
+            text = { Text("This backup will contain API keys, server passwords, RAG credentials and MCP environment/header secrets in plaintext. Anyone with access to the file can read them.\n\nExclude credentials strips:\n- Server passwords and API keys\n- Ollama passwords and API keys\n- Image-gen API keys and passwords\n- Cloud API keys\n- RAG usernames and passwords\n- MCP environment variables and headers\n- MCP URL userinfo and query values\n- MCP args with --token, --key, --password, --api-key flags\n\nDoes NOT strip:\n- Non-secret URLs (server URLs remain for API access)\n- Usernames in server entries\n- Chat conversation contents\n- Location data\n- Room transcripts and skills\n\nUse encryption for full protection, or check \"Exclude credentials\" to strip sensitive values while keeping the structure.") },
             confirmButton = {
                 TextButton(onClick = {
                     showPasswordlessWarning = false
@@ -1357,7 +1357,7 @@ Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
                                 Spacer(Modifier.height(4.dp))
                                 Button(
                                     onClick = {
-                                        service.enableMcpServer(server.name)
+                                        service.enableMcpServer(server.id)
                                     },
                                     modifier = Modifier.align(Alignment.End)
                                 ) {

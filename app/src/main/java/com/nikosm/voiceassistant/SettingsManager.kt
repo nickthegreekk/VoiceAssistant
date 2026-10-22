@@ -1052,11 +1052,36 @@ class SettingsManager(context: Context) {
             getCustomCloudApis() ?: emptyList()
         }
         val mcpServersSanitized = if (excludeSecrets) {
-            getMcpServers().map {
-                it.copy(
+            getMcpServers().map { mcp ->
+                // Redact URL userinfo and query values (credentials in URL should not travel in backup)
+                val url = mcp.url!!
+                val hasUserinfo = url.contains("@")
+                val hasQuery = url.contains("?")
+                val redactedUrl = if (hasUserinfo || hasQuery) {
+                    // Strip query string first, then remove userinfo if present
+                    val noQuery = url.replace("\\?.*".toRegex(), "").trimEnd()
+                    if (hasUserinfo) {
+                        // Remove user:pass@host, keep just host
+                        val atIdx = noQuery.indexOf("@")
+                        if (atIdx >= 0) noQuery.substring(atIdx + 1) else noQuery
+                    } else noQuery
+                } else url
+                
+                // Clear args that follow credential-like flags
+                val filteredArgs = mcp.args.filterNot { arg ->
+                    arg.startsWith("--token") || arg.startsWith("--key") ||
+                    arg.startsWith("--password") || arg.startsWith("--api-key") ||
+                    arg.startsWith("-t") || arg.startsWith("-k") || arg.startsWith("-p")
+                }
+                
+                mcp.copy(
                     trust = McpTrust.ASK,
                     env = emptyMap(),
                     headers = emptyMap(),
+                    url = redactedUrl,
+                    args = if (filteredArgs.isEmpty()) mcp.args else filteredArgs,
+                    // Mark server as needs setup if credentials were removed
+                    enabled = mcp.enabled && (redactedUrl != mcp.url || filteredArgs != mcp.args)
                 )
             }
         } else {
@@ -1073,7 +1098,7 @@ class SettingsManager(context: Context) {
             getOllamaBases() ?: emptyList()
         }
         val imageGenBasesSanitized = if (excludeSecrets) {
-            getImageGenBases()?.map { it.copy(apiKey = null) } ?: emptyList()
+            getImageGenBases()?.map { it.copy(apiKey = null, password = null) } ?: emptyList()
         } else {
             getImageGenBases() ?: emptyList()
         }
