@@ -1051,6 +1051,10 @@ class SettingsManager(context: Context) {
         } else {
             getCustomCloudApis() ?: emptyList()
         }
+        val mcpServersRaw = getMcpServers() ?: emptyList()
+        val serverBasesRaw = getServerBases() ?: emptyList()
+        val ollamaBasesRaw = getOllamaBases() ?: emptyList()
+        val imageGenBasesRaw = getImageGenBases() ?: emptyList()
         val mcpServersSanitized = if (excludeSecrets) {
             getMcpServers().map { mcp ->
                 // Redact URL userinfo and query values (credentials in URL should not travel in backup)
@@ -1103,9 +1107,9 @@ class SettingsManager(context: Context) {
             getImageGenBases() ?: emptyList()
         }
         val backup = BackupData(
-            serverBases = serverBasesSanitized,
-            ollamaBases = ollamaBasesSanitized,
-            imageGenBases = imageGenBasesSanitized,
+            serverBases = serverBasesRaw,
+            ollamaBases = ollamaBasesRaw,
+            imageGenBases = imageGenBasesRaw,
             cloudApis = cloudApis,
             customCloudApis = customCloudApis,
             personas = personas,
@@ -1118,8 +1122,8 @@ class SettingsManager(context: Context) {
             searxngUrl = getSearxngUrl(),
             userLocation = getUserLocation(),
             ragServerUrl = getRagServerUrl(),
-            ragUsername = if (excludeSecrets) null else getRagUsername(),
-            ragPassword = if (excludeSecrets) null else getRagPassword(),
+            ragUsername = getRagUsername(),
+            ragPassword = getRagPassword(),
             // Rooms + their transcripts, keyed by room UUID. Resolved once: the
             // transcript map must be built from the SAME room list the backup carries.
             rooms = exportedRooms,
@@ -1135,7 +1139,7 @@ class SettingsManager(context: Context) {
             activeImageGenBackend = getActiveImageGenBackend(),
             // MCP definitions only — the grant is stripped below. Per-persona enablement is
             // name-keyed state like the filesystem pair and is deliberately not on the allowlist.
-            mcpServers = mcpServersSanitized,
+            mcpServers = mcpServersRaw,
             // Memory travels with the personas it belongs to: notes keyed by persona name, and the
             // names of the personas whose memory is switched on. Unlike a tool trust, this is the
             // conversation's own content, which is what a backup is for.
@@ -1144,7 +1148,12 @@ class SettingsManager(context: Context) {
                 .filterValues { it.isNotEmpty() },
             personaMemoryEnabled = personas.filter { isPersonaMemoryEnabled(it.name) }.map { it.name },
         )
-        return json.encodeToString(backup)
+        val redactedBackup = if (excludeSecrets) {
+            redactBackupCredentials(backup)
+        } else {
+            backup
+        }
+        return json.encodeToString(redactedBackup)
     }
 
     /**
