@@ -1260,7 +1260,7 @@ class AssistantService : Service() {
         vadRecorder?.muted = _micMuted.value
     }
 
-    internal val client: OkHttpClient by lazy { createUnsafeOkHttpClient() }
+    internal val client: OkHttpClient by lazy { createPinnedOkHttpClient() }
     internal val publicClient: OkHttpClient by lazy { OkHttpClient.Builder().build() }
     internal val standardClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
@@ -2494,7 +2494,7 @@ class AssistantService : Service() {
     fun getRagPassword(): String? = settingsManager.getRagPassword()
     fun saveRagPassword(password: String) = settingsManager.saveRagPassword(password)
 
-    fun exportBackup(): String = settingsManager.exportBackup()
+    fun exportBackup(excludeSecrets: Boolean = false): String = settingsManager.exportBackup(excludeSecrets)
 
     // Persona artwork import. Suspends on Dispatchers.IO because it decodes and
     // re-encodes a full-sized photo — far too heavy for the main thread. Returns the
@@ -2530,8 +2530,13 @@ class AssistantService : Service() {
         // loadSettings republishes it — after either, the vanished names are unrecoverable,
         // and they are exactly what the post-import reconciliation has to disarm.
         val preImportNames = personas.value.map { it.name }.toSet()
+        val importedServers = settingsManager.extractImportedMcpServers(json)
         val success = settingsManager.importBackup(json)
         if (success) {
+            // S4: publish the imported MCP servers so the UI can show a summary dialog
+            // letting the user enable servers one-by-one after review. They are restored
+            // disabled-and-untrusted (trust = ASK), so nothing runs until explicitly enabled.
+            importedServers?.let { _importedMcpServers.value = it }
             loadSettings()
             reconcileSpontaneousSchedulesAfterImport(preImportNames)
             warnOnImportedDuplicateNames()
@@ -2638,6 +2643,12 @@ class AssistantService : Service() {
     private val _backupPasswordRequested = MutableStateFlow(false)
     val backupPasswordRequested = _backupPasswordRequested.asStateFlow()
 
+    // S4: imported MCP servers for the post-import summary dialog. Populated on a
+    // successful import; the UI observes this and shows the summary letting the
+    // user enable servers one-by-one after review.
+    internal val _importedMcpServers = MutableStateFlow<List<McpServerConfig>>(emptyList())
+    val importedMcpServers = _importedMcpServers.asStateFlow()
+
     fun submitBackupPassword(password: String?) {
         backupPasswordDeferred?.complete(password)
     }
@@ -2650,10 +2661,10 @@ class AssistantService : Service() {
     // so closing the dialog mid-operation can no longer cancel them and leave a
     // truncated export file or a half-applied import. Toasts work from the foreground
     // service regardless of what's on screen.
-    fun exportBackupToFile(uri: Uri, password: String? = null) {
+    fun exportBackupToFile(uri: Uri, password: String? = null, excludeSecrets: Boolean = false) {
         serviceScope.launch {
             try {
-                val backup = exportBackup()
+                val backup = exportBackup(excludeSecrets)
                 val output = if (password.isNullOrBlank()) backup
                 else withContext(Dispatchers.IO) { encryptBackupJson(backup, password) }
                 withContext(Dispatchers.IO) {
@@ -3250,7 +3261,7 @@ class AssistantService : Service() {
     }
 
 
-    private fun createUnsafeOkHttpClient(): OkHttpClient {
+    private fun createPinnedOkHttpClient(): OkHttpClient {
         val pinnedTrustManager = object : javax.net.ssl.X509ExtendedTrustManager() {
             override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?, socket: java.net.Socket?) {}
             override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?, socket: java.net.Socket?) {
@@ -3269,7 +3280,12 @@ class AssistantService : Service() {
             override fun getAcceptedIssuers(): Array<X509Certificate> = arrayOf()
 
             private fun verify(chain: Array<out X509Certificate>?, host: String) {
-                if (chain == null || chain.isEmpty()) return
+                // S2: fail closed. A null or empty certificate chain is not "trust" — it is
+                // a protocol error or an active attack. Returning silently would let the
+                // SSL engine treat the connection as trusted with no certificate validated.
+                if (chain == null || chain.isEmpty()) {
+                    throw javax.net.ssl.SSLHandshakeException("Empty certificate chain — connection rejected")
+                }
                 val cert = chain[0]
                 val fingerprint = sha256Fingerprint(cert)
                 val trusted = settingsManager.getTrustedCertificates()

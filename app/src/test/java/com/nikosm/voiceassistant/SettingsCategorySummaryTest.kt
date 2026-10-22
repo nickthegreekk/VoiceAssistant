@@ -103,8 +103,8 @@ class SettingsCategorySummaryTest {
             listOf("App", "Connections", "Assistants"),
             groups.map { it.caption }
         )
-        assertEquals(listOf("General"), groups[0].categories.map { it.title })
-        assertEquals(listOf("Servers", "Cloud"), groups[1].categories.map { it.title })
+        assertEquals(listOf("General", "About"), groups[0].categories.map { it.title })
+        assertEquals(listOf("Servers", "Cloud", "MCP"), groups[1].categories.map { it.title })
         assertEquals(listOf("Personas", "Rooms", "Skills"), groups[2].categories.map { it.title })
     }
 
@@ -121,14 +121,14 @@ class SettingsCategorySummaryTest {
         )
         val groups = settingsCategoryGroups(extended)
         assertEquals(
-            listOf("Servers", "Cloud", "Knowledge"),
+            listOf("Servers", "Cloud", "MCP", "Knowledge"),
             groups.first { it.caption == "Connections" }.categories.map { it.title }
         )
         // Note the order: the new entry is filed UNDER its section, so it appears with
         // Connections rather than where it was appended to the flat list. That is the
         // grouping being derived from the registry rather than from append order.
         assertEquals(
-            listOf("General", "Servers", "Cloud", "Knowledge", "Personas", "Rooms", "Skills"),
+            listOf("General", "About", "Servers", "Cloud", "MCP", "Knowledge", "Personas", "Rooms", "Skills"),
             groups.flatMap { it.categories }.map { it.title }
         )
         assertEquals(
@@ -149,11 +149,15 @@ class SettingsCategorySummaryTest {
             customCloudProviders = 0,
             personas = 14,
             rooms = 2,
-            skills = 4
+            skills = 4,
+            mcpServers = 1
         )
         assertEquals(SETTINGS_CATEGORIES, summaries.keys.toList())
         summaries.forEach { (category, summary) ->
-            assertTrue("'${category.title}' must have a summary", summary.isNotBlank())
+            // "About" intentionally has no summary -- it's the screen's own landing label.
+            if (category.title != "About") {
+                assertTrue("'" + category.title + "'" + " must have a summary", summary.isNotBlank())
+            }
         }
         assertEquals("2 Ollama, 1 gateway", summaries[SETTINGS_CATEGORIES.first { it.title == "Servers" }])
         assertEquals("14 personas", summaries[SETTINGS_CATEGORIES.first { it.title == "Personas" }])
@@ -162,15 +166,17 @@ class SettingsCategorySummaryTest {
 
     @Test fun `an empty configuration still describes every category`() {
         val summaries = settingsCategorySummaries(0, 0, 0, 0, 0, 0, 0, 0)
+        // About is excluded because it intentionally has a blank summary.
         assertEquals(
             listOf(
                 "No servers yet",
                 "None set up yet",
+                "No tool servers yet",
                 "No personas yet",
                 "No rooms yet",
                 "No skills yet"
             ),
-            summaries.filterKeys { it.title != "General" }.values.toList()
+            summaries.filterKeys { it.title != "General" && it.title != "About" }.values.toList()
         )
     }
 }

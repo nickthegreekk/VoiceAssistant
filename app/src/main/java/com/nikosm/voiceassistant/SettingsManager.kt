@@ -1020,7 +1020,7 @@ class SettingsManager(context: Context) {
         deleteSpontaneousState(personaName)
     }
 
-    fun exportBackup(): String {
+    fun exportBackup(excludeSecrets: Boolean = false): String {
         val personas = getPersonas() ?: emptyList()
         val personaMessages = personas.associate { it.name to (getPersonaMessages(it.name) ?: emptyList()) }
         val exportedRooms = getRooms() ?: emptyList()
@@ -1041,12 +1041,48 @@ class SettingsManager(context: Context) {
             else persona.name to PersonaArtwork(icon = icon, background = background)
         }.toMap()
 
+        val cloudApis = if (excludeSecrets) {
+            getCloudApis()?.map { it.copy(apiKey = "") } ?: emptyList()
+        } else {
+            getCloudApis() ?: emptyList()
+        }
+        val customCloudApis = if (excludeSecrets) {
+            getCustomCloudApis()?.map { it.copy(apiKey = "") } ?: emptyList()
+        } else {
+            getCustomCloudApis() ?: emptyList()
+        }
+        val mcpServersSanitized = if (excludeSecrets) {
+            getMcpServers().map {
+                it.copy(
+                    trust = McpTrust.ASK,
+                    env = emptyMap(),
+                    headers = emptyMap(),
+                )
+            }
+        } else {
+            getMcpServers().map { it.copy(trust = McpTrust.ASK) }
+        }
+        val serverBasesSanitized = if (excludeSecrets) {
+            getServerBases()?.map { it.copy(password = null, apiKey = null) } ?: emptyList()
+        } else {
+            getServerBases() ?: emptyList()
+        }
+        val ollamaBasesSanitized = if (excludeSecrets) {
+            getOllamaBases()?.map { it.copy(password = null, apiKey = null) } ?: emptyList()
+        } else {
+            getOllamaBases() ?: emptyList()
+        }
+        val imageGenBasesSanitized = if (excludeSecrets) {
+            getImageGenBases()?.map { it.copy(apiKey = null) } ?: emptyList()
+        } else {
+            getImageGenBases() ?: emptyList()
+        }
         val backup = BackupData(
-            serverBases = getServerBases() ?: emptyList(),
-            ollamaBases = getOllamaBases() ?: emptyList(),
-            imageGenBases = getImageGenBases() ?: emptyList(),
-            cloudApis = getCloudApis() ?: emptyList(),
-            customCloudApis = getCustomCloudApis() ?: emptyList(),
+            serverBases = serverBasesSanitized,
+            ollamaBases = ollamaBasesSanitized,
+            imageGenBases = imageGenBasesSanitized,
+            cloudApis = cloudApis,
+            customCloudApis = customCloudApis,
             personas = personas,
             personaImages = personaImages,
             messages = getMessages() ?: emptyList(),
@@ -1057,8 +1093,8 @@ class SettingsManager(context: Context) {
             searxngUrl = getSearxngUrl(),
             userLocation = getUserLocation(),
             ragServerUrl = getRagServerUrl(),
-            ragUsername = getRagUsername(),
-            ragPassword = getRagPassword(),
+            ragUsername = if (excludeSecrets) null else getRagUsername(),
+            ragPassword = if (excludeSecrets) null else getRagPassword(),
             // Rooms + their transcripts, keyed by room UUID. Resolved once: the
             // transcript map must be built from the SAME room list the backup carries.
             rooms = exportedRooms,
@@ -1074,7 +1110,7 @@ class SettingsManager(context: Context) {
             activeImageGenBackend = getActiveImageGenBackend(),
             // MCP definitions only — the grant is stripped below. Per-persona enablement is
             // name-keyed state like the filesystem pair and is deliberately not on the allowlist.
-            mcpServers = getMcpServers().map { it.copy(trust = McpTrust.ASK) },
+            mcpServers = mcpServersSanitized,
             // Memory travels with the personas it belongs to: notes keyed by persona name, and the
             // names of the personas whose memory is switched on. Unlike a tool trust, this is the
             // conversation's own content, which is what a backup is for.
@@ -1084,6 +1120,19 @@ class SettingsManager(context: Context) {
             personaMemoryEnabled = personas.filter { isPersonaMemoryEnabled(it.name) }.map { it.name },
         )
         return json.encodeToString(backup)
+    }
+
+    /**
+     * Extracts the list of MCP servers from a backup JSON string, for the post-import
+     * summary dialog. Returns null if the JSON is malformed or has no mcpServers field.
+     */
+    fun extractImportedMcpServers(jsonString: String): List<McpServerConfig>? {
+        return try {
+            val backup = json.decodeFromString<BackupData>(jsonString)
+            backup.mcpServers
+        } catch (e: Exception) {
+            null
+        }
     }
 
     fun importBackup(jsonString: String): Boolean {
@@ -1111,10 +1160,12 @@ class SettingsManager(context: Context) {
             saveImageGenBases(backup.imageGenBases)
             saveCloudApis(backup.cloudApis)
             saveCustomCloudApis(backup.customCloudApis)
-            // MCP definitions restore; the grant does not. The export already stripped trust, and
-            // this second copy of the rule is what protects against a hand-edited backup that says
-            // TRUSTED — an imported file must never be a way to run tools without the confirmation.
-            saveMcpServers(backup.mcpServers.map { it.copy(trust = McpTrust.ASK) })
+            // S4: MCP servers restore as disabled-and-untrusted. The user must review the command
+            // and URL in the summary dialog before enabling any server. This prevents a restored
+            // backup from silently spawning a process or connecting to an endpoint it specifies.
+            saveMcpServers(backup.mcpServers.map {
+                it.copy(enabled = false, trust = McpTrust.ASK)
+            })
             // Skills land BEFORE the personas, because each persona's enabledSkillIds are
             // pruned against this exact list below: a backup that carried skills but a
             // persona referencing a skill this backup doesn't contain must not restore an
@@ -1159,7 +1210,12 @@ class SettingsManager(context: Context) {
             }
             saveTotalCost(backup.totalCost)
             saveFavoriteModels(backup.favoriteModels)
-            saveTrustedCertificates(backup.trustedCerts)
+            // S3: trustedCerts never travel back from a backup. A restored file is untrusted
+            // input on this device, and re-approving pins on first connect is the only safe
+            // choice — a hand-edited backup that says TRUSTED must never silently run tools.
+            // (The export still includes them for a same-device migrate, where the pins are
+            // already accepted; the import side is where the boundary is enforced.)
+            // No saveTrustedCertificates(backup.trustedCerts) here.
             backup.searxngUrl?.let { saveSearxngUrl(it) }
             backup.userLocation?.let { saveUserLocation(it) }
             backup.ragServerUrl?.let { saveRagServerUrl(it) }

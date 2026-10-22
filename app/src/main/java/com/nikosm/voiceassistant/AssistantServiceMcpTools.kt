@@ -271,3 +271,16 @@ internal fun AssistantService.forgetMcpTrust(serverId: String) {
     settingsManager.saveMcpTrust(serverId, McpTrust.ASK)
     logger.i("McpTools", "trust revoked for MCP server '$serverId'")
 }
+
+/** S4: Enable a single MCP server (used by the post-import summary dialog).
+ *  Servers are restored disabled-and-untrusted on import, so the user must
+ *  explicitly opt each one in after reviewing its command/URL. */
+internal fun AssistantService.enableMcpServer(serverId: String?) {
+    if (serverId == null) return
+    val servers = settingsManager.getMcpServers()
+    val updated = servers.map { if (it.id == serverId) it.copy(enabled = true) else it }
+    settingsManager.saveMcpServers(updated)
+    // Clear the summary so it doesn't keep re-triggering from the same import
+    _importedMcpServers.value = emptyList()
+    logger.i("McpTools", "MCP server '$serverId' enabled by user after import")
+}

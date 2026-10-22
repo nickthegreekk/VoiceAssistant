@@ -154,6 +154,9 @@ private val CloudApiSettingSaver = Saver<CloudApiSetting?, String>(
  */
 internal val SETTINGS_CATEGORIES = listOf(
     SettingsCategory("General", Icons.Default.Settings, SettingsGroup.APP),
+    // About sits in the APP group because it describes the application itself, not a connection
+    // or an assistant capability. Filed under APP so grouped order matches the flat registry.
+    SettingsCategory("About", Icons.Default.Info, SettingsGroup.APP),
     SettingsCategory("Servers", Icons.Default.Dns, SettingsGroup.CONNECTIONS),
     SettingsCategory("Cloud", Icons.Default.Cloud, SettingsGroup.CONNECTIONS),
     // The MCP servers ARE connections — the app talks to them over the network, the same way it
@@ -165,9 +168,6 @@ internal val SETTINGS_CATEGORIES = listOf(
     // After Personas, not beside them: a skill only means something once the persona that
     // can enable it exists, so the order follows "what to configure" rather than the alphabet.
     SettingsCategory("Skills", Icons.Default.AutoAwesome, SettingsGroup.ASSISTANTS),
-    // About sits in the APP group because it describes the application itself, not a connection
-    // or an assistant capability. It renders last in the section, at the bottom of the list.
-    SettingsCategory("About", Icons.Default.Info, SettingsGroup.APP)
 )
 
 /**
@@ -920,16 +920,30 @@ fun GeneralSettings(
     // collected HERE (checkbox + fields + validation below), but the actual
     // encryption/decryption runs service-side on serviceScope — see
     // exportBackupToFile/importBackupFromFile — so it stays dialog-closure-safe.
-    var encryptExport by remember { mutableStateOf(false) }
+    var encryptExport by remember { mutableStateOf(true) }
     var exportPassword by remember { mutableStateOf("") }
     var exportConfirmPassword by remember { mutableStateOf("") }
     var exportPasswordError by remember { mutableStateOf<String?>(null) }
     var pendingExportPassword by remember { mutableStateOf<String?>(null) }
+    var excludeSecrets by remember { mutableStateOf(false) }
+    var showPasswordlessWarning by remember { mutableStateOf(false) }
+    var showImportedMcpServers by remember { mutableStateOf(false) }
+    var importedServersForDialog by remember { mutableStateOf<List<McpServerConfig>>(emptyList()) }
+
+    // S4: observe imported MCP servers from the service for the summary dialog
+    LaunchedEffect(Unit) {
+        service.importedMcpServers.collect { servers ->
+            if (servers.isNotEmpty()) {
+                importedServersForDialog = servers
+                showImportedMcpServers = true
+            }
+        }
+    }
 
     val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
         // Runs on serviceScope (inside the service) so closing the Settings dialog can
         // no longer cancel the export mid-write and leave a truncated file.
-        uri?.let { service.exportBackupToFile(it, pendingExportPassword) }
+        uri?.let { service.exportBackupToFile(it, pendingExportPassword, excludeSecrets) }
         pendingExportPassword = null
     }
 
@@ -1181,6 +1195,19 @@ Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
                 exportPasswordError?.let { err ->
                     Text(err, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
                 }
+            } else {
+                Text(
+                    "Security: this file will contain API keys, server passwords, RAG credentials and MCP secrets in plaintext.",
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Checkbox(
+                    checked = excludeSecrets,
+                    onCheckedChange = { excludeSecrets = it }
+                )
+                Text("Exclude secrets (API keys, passwords, RAG credentials, MCP env/headers)")
             }
             OutlinedButton(
                 onClick = {
@@ -1197,9 +1224,7 @@ Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
                             }
                         }
                     } else {
-                        exportPasswordError = null
-                        pendingExportPassword = null
-                        exportLauncher.launch("voice_assistant_backup_${System.currentTimeMillis()}.json")
+                        showPasswordlessWarning = true
                     }
                 },
                 modifier = Modifier.fillMaxWidth(),
@@ -1271,6 +1296,87 @@ Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
                     Text("Cancel")
                 }
             }
+        )
+    }
+
+    // S5: passwordless export warning modal
+    if (showPasswordlessWarning) {
+        AlertDialog(
+            onDismissRequest = { showPasswordlessWarning = false },
+            title = { Text("Unencrypted Backup") },
+            text = { Text("This backup will contain API keys, server passwords, RAG credentials and MCP environment/header secrets in plaintext. Anyone with access to the file can read them. Use encryption instead, or check \"Exclude secrets\" to strip sensitive values while keeping the structure.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    showPasswordlessWarning = false
+                    exportPasswordError = null
+                    pendingExportPassword = null
+                    exportLauncher.launch("voice_assistant_backup_${System.currentTimeMillis()}.json")
+                }) { Text("Export Anyway") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showPasswordlessWarning = false }) { Text("Cancel") }
+            }
+        )
+    }
+
+    // S4: post-import MCP server summary dialog. Servers are restored disabled-and-untrusted,
+    // so the user must explicitly enable each one after review. The dialog lists each server
+    // with its command/URL so the user can verify what will be started.
+    if (showImportedMcpServers && importedServersForDialog.isNotEmpty()) {
+        AlertDialog(
+            onDismissRequest = {
+                showImportedMcpServers = false
+                importedServersForDialog = emptyList()
+            },
+            title = { Text("Imported MCP Servers") },
+            text = {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    Text(
+                        "The backup contained the following MCP server definitions. They have been imported as DISABLED and untrusted. Review each command before enabling — click \"Enable\" next to a server to turn it on.",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    importedServersForDialog.forEach { server ->
+                        Card(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 4.dp),
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.onSurface.copy(alpha = 0.1f))
+                        ) {
+                            Column(Modifier.padding(12.dp)) {
+                                Text(server.name.ifEmpty { server.command.ifEmpty { "Unnamed" } }, fontWeight = FontWeight.Bold)
+                                if (server.command.isNotBlank()) {
+                                    Text("Command: ${server.command}", style = MaterialTheme.typography.bodySmall)
+                                }
+                                if (server.args.isNotEmpty()) {
+                                    Text("Args: ${server.args.joinToString(" ")}", style = MaterialTheme.typography.bodySmall)
+                                }
+                                if (server.url.isNotBlank()) {
+                                    Text("URL: ${server.url}", style = MaterialTheme.typography.bodySmall)
+                                }
+                                Spacer(Modifier.height(4.dp))
+                                Button(
+                                    onClick = {
+                                        service.enableMcpServer(server.name)
+                                    },
+                                    modifier = Modifier.align(Alignment.End)
+                                ) {
+                                    Text("Enable")
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    showImportedMcpServers = false
+                    importedServersForDialog = emptyList()
+                }) {
+                    Text("Done")
+                }
+            },
+            dismissButton = {}
         )
     }
 }
