@@ -78,37 +78,19 @@ internal fun redactBackupCredentials(backup: BackupData): BackupData {
         )
     }
 
-    // Rag credentials - cleared
-    val ragUsernameSanitized = null
-    val ragPasswordSanitized = null
-
-    // URL userinfo stripping for ragServerUrl and searxngUrl
-    val ragServerUrlSanitized = backup.ragServerUrl?.let { redactMcpUrl(it) }
-    val searxngUrlSanitized = backup.searxngUrl?.let { redactMcpUrl(it) }
-
-    return BackupData(
+    // copy() keeps every field NOT named here — including any field added to BackupData
+    // later — identical to the backup. The previous constructor rebuild silently reset
+    // personaMessages and personaImages to their defaults.
+    return backup.copy(
         serverBases = serverBasesSanitized,
         ollamaBases = ollamaBasesSanitized,
         imageGenBases = imageGenBasesSanitized,
         cloudApis = cloudApisSanitized,
         customCloudApis = customCloudApisSanitized,
-        personas = backup.personas,
-        messages = backup.messages,
-        totalCost = backup.totalCost,
-        favoriteModels = backup.favoriteModels,
-        trustedCerts = backup.trustedCerts,
-        searxngUrl = searxngUrlSanitized,
-        userLocation = backup.userLocation,
-        ragServerUrl = ragServerUrlSanitized,
-        ragUsername = ragUsernameSanitized,
-        ragPassword = ragPasswordSanitized,
-        rooms = backup.rooms,
-        roomMessages = backup.roomMessages,
-        skills = backup.skills,
-        imageWorkflows = backup.imageWorkflows,
-        activeImageGenBackend = backup.activeImageGenBackend,
         mcpServers = mcpServersSanitized,
-        personaMemories = backup.personaMemories,
-        personaMemoryEnabled = backup.personaMemoryEnabled
+        searxngUrl = backup.searxngUrl?.let { redactMcpUrl(it) },
+        ragServerUrl = backup.ragServerUrl?.let { redactMcpUrl(it) },
+        ragUsername = null,
+        ragPassword = null
     )
 }
