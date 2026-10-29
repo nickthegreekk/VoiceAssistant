@@ -1,6 +1,7 @@
 package com.nikosm.voiceassistant
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Test
 
 class AssistantServiceAudioPureTest {
@@ -192,5 +193,16 @@ class AssistantServiceAudioPureTest {
             curGen = 1L
         )
         assertEquals("Must complete when all chunks played and synthesis complete", ChunkSynthesisTracker.Action.COMPLETED, decisionAtEnd)
+    }
+
+    // (4) D, F, G: Generation gate and teardown checks
+    @Test
+    fun testGenerationCheckRejectsSupersededTurn() {
+        val startGen = 42L
+        var activeGen = 42L
+        val capturedGen = startGen
+        // When user stops or new turn starts, active generation increments
+        activeGen++
+        assertFalse("Stale generation must not proceed to playback", isPlaybackGenerationCurrent(activeGen, capturedGen))
     }
 }

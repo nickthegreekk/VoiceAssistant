@@ -202,15 +202,7 @@ internal fun AssistantService.abandonAssistantFocus() {
 }
 
 fun AssistantService.speakTextOnDevice(text: String) {
-    // Fix #1b: System TTS is the ONE playback entry point that never routes through
-    // stopAudio() — this function requests audio focus itself (below), and no live flow calls
-    // a teardown beforehand. The per-sequence Stage-2 state therefore has to be cleared here,
-    // or an unrelated earlier turn's values satisfy the UI's karaoke gate during THIS
-    // playback (`SPEAKING && ttsPlaybackFraction != null && voiceDuration > 0`): the chunked
-    // pipeline deliberately leaves `_ttsPlaybackFraction` at 1f when a Gateway turn ends, and
-    // `_voiceDuration` keeps an earlier eSpeak turn's length, so the new response would be
-    // pinned to full text (reveal suppressed) with a nonsense highlight painted from the old
-    // fraction. Cleared before the no-play bail: a muted/unready engine must land clean too.
+    stopAudio(abandonFocus = false)
     _ttsPlaybackFraction.value = null
     _ttsWordTimestamps.value = null
     _voiceDuration.value = 0
@@ -283,11 +275,15 @@ fun AssistantService.speakTextOnDevice(text: String) {
 
 internal fun espeakMarkerFrames(sampleCount: Int): Int = sampleCount.coerceAtLeast(1)
 
+internal fun isPlaybackGenerationCurrent(currentGen: Long, expectedGen: Long): Boolean =
+    currentGen == expectedGen
+
 internal fun AssistantService.speakWithEspeak(text: String, persona: Persona) {
     // abandonFocus=false: a new playback starts right after this teardown and
     // re-requests focus — keep the (possibly retained-through-THINKING) request
     // held so other apps stay ducked continuously (see stopAudio()).
     stopAudio(abandonFocus = false)
+    val myGeneration = ttsGeneration
     // C4: check silence BEFORE any synthesis work — when silent mode is on, skip the
     // entire pipeline (engine initialization, voice selection, setVoice, synthesize)
     // since the result would be discarded anyway. Same synchronous early-bail pattern
@@ -336,6 +332,7 @@ internal fun AssistantService.speakWithEspeak(text: String, persona: Persona) {
         val samples = engine.synthesize(text)
         
         withContext(Dispatchers.Main) {
+            if (!isPlaybackGenerationCurrent(ttsGeneration, myGeneration)) return@withContext
             if (!requestAssistantFocus()) {
                 abandonAssistantFocus()
                 _state.value = AssistantState.IDLE
@@ -478,19 +475,16 @@ internal fun AssistantService.playAudioFile(file: File) {
             mp.start()
         }
         // With prepareAsync(), preparation failures arrive here instead of the catch
-        // block below. Same cleanup as the completion path; returning true consumes
-        // the error so no spurious onCompletion follows.
+        // block below. stopAudio() is the single teardown path — it bumps ttsGeneration
+        // (invalidating any in-flight chunked sequence), releases the player found in
+        // currentPlayer, stops TTS, and calls abandonAssistantFocus when requested.
+        // The player's identity check is intentionally loose (== not ===) to match the
+        // original guard logic; stopAudio() nulls currentPlayer atomically so spurious
+        // onCompletion is suppressed. Returns true to consume the error.
         player.setOnErrorListener { mp, what, extra ->
             android.util.Log.e("AssistantService", "playAudioFile: MediaPlayer error what=$what extra=$extra")
             if (currentPlayer == mp) {
-                _state.value = AssistantState.IDLE
-                updateNotification("Ready to help")
-                mp.release()
-                currentPlayer = null
-                _voiceDuration.value = 0
-                abandonAssistantFocus()
-                audioManager.mode = AudioManager.MODE_NORMAL
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) audioManager.clearCommunicationDevice()
+                stopAudio(abandonFocus = true)
             } else {
                 mp.release()
             }
@@ -502,14 +496,12 @@ internal fun AssistantService.playAudioFile(file: File) {
         // keeps the B1 guarantee that a newer playAudioFile() stops the older one.
         currentPlayer = player
         player.prepareAsync()
-    } catch (e: Exception) {
+    } catch (_: Exception) {
         // prepareAsync() now runs after the currentPlayer registration; if it throws
         // synchronously, don't leave a dangling reference to the released player.
         if (currentPlayer === player) currentPlayer = null
-        _state.value = AssistantState.IDLE
-        updateNotification("Ready to help")
         player.release()
-        abandonAssistantFocus()
+        stopAudio(abandonFocus = true)
     }
 }
 
@@ -526,6 +518,7 @@ fun AssistantService.stopAudio(abandonFocus: Boolean = true) {
         try { if (it.playState == AudioTrack.PLAYSTATE_PLAYING) it.stop() } catch (e: Exception) {} finally { it.release() }
     }
     currentAudioTrack = null
+    currentUtteranceId = null
     tts.stop()
     if (assistantState.value == AssistantState.SPEAKING) {
         _state.value = AssistantState.IDLE
@@ -1142,11 +1135,9 @@ private fun AssistantService.startChunkPlayback(
                     mp.prepareAsync()
                 } catch (e: Exception) {
                     android.util.Log.e("AssistantService", "Chunk playback error: ${e.message}")
+                    if (currentPlayer === mp) currentPlayer = null
                     mp.release()
-                    currentPlayer = null
-                    _state.value = AssistantState.IDLE
-                    updateNotification("Ready to help")
-                    abandonAssistantFocus()
+                    stopAudio(abandonFocus = true)
                 }
             } else {
                 // Next chunk not yet written - synthesis still in flight. Poll while active.
@@ -1155,11 +1146,9 @@ private fun AssistantService.startChunkPlayback(
                 pollRunnable = Runnable {
                     val action = tracker.nextAction(currentChunkIdx, nextFile.exists(), waitElapsedMs, ttsGeneration)
                     if (currentPlayer !== mp || action == ChunkSynthesisTracker.Action.ABORT) {
-                        mp.release()
                         if (currentPlayer === mp) currentPlayer = null
-                        _state.value = AssistantState.IDLE
-                        updateNotification("Ready to help")
-                        abandonAssistantFocus()
+                        mp.release()
+                        stopAudio(abandonFocus = true)
                         return@Runnable
                     }
                     when (action) {
@@ -1176,11 +1165,9 @@ private fun AssistantService.startChunkPlayback(
                                 mp.prepareAsync()
                             } catch (e: Exception) {
                                 android.util.Log.e("AssistantService", "Chunk retry error: ${e.message}")
+                                if (currentPlayer === mp) currentPlayer = null
                                 mp.release()
-                                currentPlayer = null
-                                _state.value = AssistantState.IDLE
-                                updateNotification("Ready to help")
-                                abandonAssistantFocus()
+                                stopAudio(abandonFocus = true)
                             }
                         }
                         ChunkSynthesisTracker.Action.COMPLETED -> {
@@ -1268,17 +1255,10 @@ private fun AssistantService.startChunkPlayback(
         player.setOnErrorListener { mp, what, extra ->
             android.util.Log.e("AssistantService", "playChunkedTtsGateway: MediaPlayer error what=$what extra=$extra")
             pollJob?.cancel()
-            _ttsPlaybackFraction.value = null
-            _ttsWordTimestamps.value = null
             if (currentPlayer === mp) {
-                _state.value = AssistantState.IDLE
-                updateNotification("Ready to help")
-                mp.release()
                 currentPlayer = null
-                _voiceDuration.value = 0
-                abandonAssistantFocus()
-                audioManager.mode = AudioManager.MODE_NORMAL
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) audioManager.clearCommunicationDevice()
+                mp.release()
+                stopAudio(abandonFocus = true)
             } else {
                 mp.release()
             }
@@ -1289,10 +1269,8 @@ private fun AssistantService.startChunkPlayback(
         player.prepareAsync()
     } catch (e: Exception) {
         if (currentPlayer === player) currentPlayer = null
-        _state.value = AssistantState.IDLE
-        updateNotification("Ready to help")
         player.release()
-        abandonAssistantFocus()
+        stopAudio(abandonFocus = true)
     }
 }
 
