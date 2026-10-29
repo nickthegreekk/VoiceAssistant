@@ -816,6 +816,25 @@ internal fun formatWordTimestampsJson(timestamps: List<Map<String, Any>>): Strin
     return arr.toString()
 }
 
+internal class ChunkSynthesisTracker(
+    val generation: Long,
+    val maxWaitCapMs: Long = 20_000L,
+    val pollIntervalMs: Long = 100L
+) {
+    @Volatile var isSynthesisComplete: Boolean = false
+    @Volatile var successfulCount: Int = 0
+
+    enum class Action { PLAY, WAIT, COMPLETED, ABORT }
+
+    fun nextAction(currentIdx: Int, fileExists: Boolean, waitElapsedMs: Long, curGen: Long): Action {
+        if (curGen != generation) return Action.ABORT
+        if (fileExists) return Action.PLAY
+        if (isSynthesisComplete && currentIdx >= successfulCount) return Action.COMPLETED
+        if (waitElapsedMs >= maxWaitCapMs) return Action.ABORT
+        return Action.WAIT
+    }
+}
+
 fun AssistantService.playResponse(persona: Persona, file: File? = null, deviceText: String? = null) {
     // deviceText arrives PRE-CLEANED: cleanTextForTts() now runs in the background
     // parse blocks (Dispatchers.IO) right after the LLM response is received, so the
@@ -953,92 +972,83 @@ internal suspend fun AssistantService.playChunkedTtsGateway(
     val chunkFiles = mutableListOf<String>()
     val accumulatedTimestamps = mutableListOf<Map<String, Any>>()  // [{word, start, end}] absolute
     var cumulativeAudioS = 0.0  // full AUDIO duration of prior chunks (matches mp.duration timeline)
+    val tracker = ChunkSynthesisTracker(myTtsGeneration)
 
-    for ((idx, chunkText) in chunks.withIndex()) {
-        // Generation check BEFORE each synthesis: if stopAudio() bumped the
-        // counter, the entire sequence is stale - bail immediately.
-        if (ttsGeneration != myTtsGeneration) return chunkFiles
+    try {
+        for (chunkText in chunks) {
+            // Generation check BEFORE each synthesis: if stopAudio() bumped the
+            // counter, the entire sequence is stale - bail immediately.
+            if (ttsGeneration != myTtsGeneration) return chunkFiles
 
-        // Clean the chunk text (strip markdown that Kokoro reads literally).
-        val cleaned = cleanTextForTts(chunkText)
-        if (cleaned.isBlank()) continue
+            // Clean the chunk text (strip markdown that Kokoro reads literally).
+            val cleaned = cleanTextForTts(chunkText)
+            if (cleaned.isBlank()) continue
 
-        // Sequential synthesis: one chunk at a time, via the existing
-        // single-text synthesizeWithGateway (tracks currentCall for Stop).
-        val (audioBytes, tsJson) = synthesizeWithGateway(cleaned, persona)
-        if (audioBytes == null || audioBytes.isEmpty()) continue
+            // Sequential synthesis: one chunk at a time, via the existing
+            // single-text synthesizeWithGateway (tracks currentCall for Stop).
+            val (audioBytes, tsJson) = synthesizeWithGateway(cleaned, persona)
+            if (audioBytes == null || audioBytes.isEmpty()) continue
 
-        // Parse and adjust word timestamps: Kokoro returns them relative to
-        // the chunk start; add the cumulative AUDIO duration offset for
-        // absolute position. The offset is the full WAV duration of prior
-        // chunks (parsed from the RIFF header) — NOT the prior chunk's last
-        // word .end, which excludes Kokoro's trailing pad (~0.1s per chunk)
-        // and would drift the reveal progressively early across chunks.
-        // Using full audio durations keeps the timestamp timeline identical
-        // to the ttsPlaybackFraction timeline (which is built from each
-        // chunk's actual mp.duration), so word positions and playback
-        // position stay on the same clock.
-        if (tsJson != null) {
-            try {
-                val chunkTimestamps = org.json.JSONArray(tsJson)
-                for (i in 0 until chunkTimestamps.length()) {
-                    val t = chunkTimestamps.getJSONObject(i)
-                    accumulatedTimestamps.add(mapOf(
-                        "word" to t.optString("word", ""),
-                        "start" to (t.optDouble("start", 0.0) + cumulativeAudioS),
-                        "end" to (t.optDouble("end", 0.0) + cumulativeAudioS)
-                    ))
+            if (tsJson != null) {
+                try {
+                    val chunkTimestamps = org.json.JSONArray(tsJson)
+                    for (i in 0 until chunkTimestamps.length()) {
+                        val t = chunkTimestamps.getJSONObject(i)
+                        accumulatedTimestamps.add(mapOf(
+                            "word" to t.optString("word", ""),
+                            "start" to (t.optDouble("start", 0.0) + cumulativeAudioS),
+                            "end" to (t.optDouble("end", 0.0) + cumulativeAudioS)
+                        ))
+                    }
+                    // Publish the accumulated timestamps to the service StateFlow
+                    _ttsWordTimestamps.value = formatWordTimestampsJson(accumulatedTimestamps)
+                } catch (e: Exception) {
+                    android.util.Log.w("AssistantService", "Failed to parse word timestamps: ${e.message}")
                 }
-                // Publish the accumulated timestamps to the service StateFlow
-                _ttsWordTimestamps.value = formatWordTimestampsJson(accumulatedTimestamps)
-            } catch (e: Exception) {
-                android.util.Log.w("AssistantService", "Failed to parse word timestamps: ${e.message}")
+            }
+
+            // Advance the audio clock by THIS chunk's full WAV duration so the
+            // next chunk's words land at the correct absolute position.
+            cumulativeAudioS += wavDurationSeconds(audioBytes)
+
+            // Generation check AFTER synthesis (it may have taken seconds -
+            // Stop could have fired while we were waiting for Kokoro).
+            if (ttsGeneration != myTtsGeneration) return chunkFiles
+
+            // Write chunk to a transient file for the MediaPlayer, indexed by successful count (no gaps)
+            val chunkIdx = tracker.successfulCount
+            val chunkFile = File(cacheDir, "tts_chunk_${myTtsGeneration}_${chunkIdx}.wav")
+            chunkFile.writeBytes(audioBytes)
+            chunkFiles.add(chunkFile.absolutePath)
+            tracker.successfulCount++
+
+            if (tracker.successfulCount == 1) {
+                // First successful chunk: enter SPEAKING and start the player.
+                // Only enter SPEAKING once for the entire sequence.
+                if (!requestAssistantFocus()) {
+                    abandonAssistantFocus()
+                    _state.value = AssistantState.IDLE
+                    updateNotification("Ready to help")
+                    return chunkFiles
+                }
+                _state.value = AssistantState.SPEAKING
+                updateNotification("Speaking (streaming TTS)...")
+
+                val cleanedChunks = chunks.map { cleanTextForTts(it) }.filter { it.isNotBlank() }
+                val fullTextLen = cleanedChunks.sumOf { it.length }.coerceAtLeast(1)
+
+                startChunkPlayback(
+                    chunkFile, persona, tracker,
+                    fullTextLen, cleanedChunks
+                )
             }
         }
-
-        // Advance the audio clock by THIS chunk's full WAV duration so the
-        // next chunk's words land at the correct absolute position.
-        cumulativeAudioS += wavDurationSeconds(audioBytes)
-
-        // Generation check AFTER synthesis (it may have taken seconds -
-        // Stop could have fired while we were waiting for Kokoro).
-        if (ttsGeneration != myTtsGeneration) return chunkFiles
-
-        // Write chunk to a transient file for the MediaPlayer
-        val chunkFile = File(cacheDir, "tts_chunk_${myTtsGeneration}_${idx}.wav")
-        chunkFile.writeBytes(audioBytes)
-        chunkFiles.add(chunkFile.absolutePath)
-
-        if (idx == 0) {
-            // First chunk: enter SPEAKING and start the player.
-            // Only enter SPEAKING once for the entire sequence.
-            if (!requestAssistantFocus()) {
-                abandonAssistantFocus()
-                _state.value = AssistantState.IDLE
-                updateNotification("Ready to help")
-                return chunkFiles
-            }
-            _state.value = AssistantState.SPEAKING
-            updateNotification("Speaking (streaming TTS)...")
-
-            // Duration scale: full text vs first chunk text. Used to estimate
-            // the total audio duration from chunk 0's actual MediaPlayer
-            // duration, so the word-by-word sync in the HUD covers the FULL
-            // response (not just chunk 0's few seconds).
-            val cleanedChunks = chunks.map { cleanTextForTts(it) }
-            val fullTextLen = cleanedChunks.sumOf { it.length }.coerceAtLeast(1)
-
-            startChunkPlayback(
-                chunkFile, persona, myTtsGeneration, chunks.size,
-                fullTextLen, cleanedChunks
-            )
-        }
-        // Subsequent chunks: just write the file. The onCompletion callback
-        // from the previous chunk picks it up via the file naming convention.
+    } finally {
+        tracker.isSynthesisComplete = true
     }
 
-    // No-play guard: the loop ended without ever starting a chunk (chunk 0
-    // synthesis failed/empty, or every chunk cleaned to blank) — playback will
+    // No-play guard: the loop ended without ever starting a chunk (all
+    // syntheses failed/empty, or every chunk cleaned to blank) — playback will
     // never start, so release the focus stopRecording() retained through
     // THINKING and land the turn. The early generation-stale returns above are
     // excluded: those run after Stop, whose stopEverything() already abandoned.
@@ -1054,15 +1064,15 @@ internal suspend fun AssistantService.playChunkedTtsGateway(
     return chunkFiles
 }
 
-/** Starts chunk playback - called for chunk 0 and re-invoked per chunk via onCompletion. */
+/** Starts chunk playback - called for first chunk and re-invoked per chunk via onCompletion. */
 private fun AssistantService.startChunkPlayback(
     firstChunkFile: File,
     persona: Persona,
-    myTtsGeneration: Long,
-    totalChunks: Int,
+    tracker: ChunkSynthesisTracker,
     fullTextLen: Int,
     cleanedChunks: List<String>
 ) {
+    val myTtsGeneration = tracker.generation
     val player = MediaPlayer()
     var pollJob: kotlinx.coroutines.Job? = null
     try {
@@ -1100,7 +1110,7 @@ private fun AssistantService.startChunkPlayback(
 
             currentChunkIdx++
 
-            if (currentChunkIdx >= totalChunks) {
+            if (tracker.isSynthesisComplete && currentChunkIdx >= tracker.successfulCount) {
                 // Last chunk finished - full cleanup, exactly like the classic
                 // playAudioFile() onCompletion.
                 pollJob?.cancel()
@@ -1139,68 +1149,60 @@ private fun AssistantService.startChunkPlayback(
                     abandonAssistantFocus()
                 }
             } else {
-                // Next chunk not yet written - synthesis still in flight. Poll.
-                mainHandler.postDelayed({
-                    if (ttsGeneration != myTtsGeneration || currentPlayer !== mp) {
+                // Next chunk not yet written - synthesis still in flight. Poll while active.
+                var waitElapsedMs = 0L
+                lateinit var pollRunnable: Runnable
+                pollRunnable = Runnable {
+                    val action = tracker.nextAction(currentChunkIdx, nextFile.exists(), waitElapsedMs, ttsGeneration)
+                    if (currentPlayer !== mp || action == ChunkSynthesisTracker.Action.ABORT) {
                         mp.release()
                         if (currentPlayer === mp) currentPlayer = null
-                        return@postDelayed
+                        _state.value = AssistantState.IDLE
+                        updateNotification("Ready to help")
+                        abandonAssistantFocus()
+                        return@Runnable
                     }
-                    if (nextFile.exists()) {
-                        try {
-                            mp.reset()
-                            mp.setAudioAttributes(
-                                AudioAttributes.Builder()
-                                    .setUsage(if (earpieceMode.value) AudioAttributes.USAGE_VOICE_COMMUNICATION else AudioAttributes.USAGE_ASSISTANT)
-                                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                                    .build()
-                            )
-                            mp.setDataSource(nextFile.absolutePath)
-                            mp.prepareAsync()
-                        } catch (e: Exception) {
-                            android.util.Log.e("AssistantService", "Chunk retry error: ${e.message}")
-                            mp.release()
-                            currentPlayer = null
-                            _state.value = AssistantState.IDLE
-                            updateNotification("Ready to help")
-                            abandonAssistantFocus()
-                        }
-                    } else {
-                        mainHandler.postDelayed({
-                            if (ttsGeneration != myTtsGeneration || currentPlayer !== mp) {
-                                mp.release()
-                                if (currentPlayer === mp) currentPlayer = null
-                                return@postDelayed
-                            }
-                            if (nextFile.exists()) {
-                                try {
-                                    mp.reset()
-                                    mp.setAudioAttributes(
-                                        AudioAttributes.Builder()
-                                            .setUsage(if (earpieceMode.value) AudioAttributes.USAGE_VOICE_COMMUNICATION else AudioAttributes.USAGE_ASSISTANT)
-                                            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                                            .build()
-                                    )
-                                    mp.setDataSource(nextFile.absolutePath)
-                                    mp.prepareAsync()
-                                } catch (e: Exception) {
-                                    android.util.Log.e("AssistantService", "Chunk retry-2 error: ${e.message}")
-                                    mp.release()
-                                    currentPlayer = null
-                                    _state.value = AssistantState.IDLE
-                                    updateNotification("Ready to help")
-                                    abandonAssistantFocus()
-                                }
-                            } else {
-                                _state.value = AssistantState.IDLE
-                                updateNotification("Ready to help")
+                    when (action) {
+                        ChunkSynthesisTracker.Action.PLAY -> {
+                            try {
+                                mp.reset()
+                                mp.setAudioAttributes(
+                                    AudioAttributes.Builder()
+                                        .setUsage(if (earpieceMode.value) AudioAttributes.USAGE_VOICE_COMMUNICATION else AudioAttributes.USAGE_ASSISTANT)
+                                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                                        .build()
+                                )
+                                mp.setDataSource(nextFile.absolutePath)
+                                mp.prepareAsync()
+                            } catch (e: Exception) {
+                                android.util.Log.e("AssistantService", "Chunk retry error: ${e.message}")
                                 mp.release()
                                 currentPlayer = null
+                                _state.value = AssistantState.IDLE
+                                updateNotification("Ready to help")
                                 abandonAssistantFocus()
                             }
-                        }, 200)
+                        }
+                        ChunkSynthesisTracker.Action.COMPLETED -> {
+                            pollJob?.cancel()
+                            _ttsPlaybackFraction.value = 1f
+                            _ttsWordTimestamps.value = null
+                            _state.value = AssistantState.IDLE
+                            updateNotification("Ready to help")
+                            mp.release()
+                            currentPlayer = null
+                            _voiceDuration.value = 0
+                            abandonAssistantFocus()
+                            audioManager.mode = AudioManager.MODE_NORMAL
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) audioManager.clearCommunicationDevice()
+                        }
+                        ChunkSynthesisTracker.Action.WAIT -> {
+                            waitElapsedMs += tracker.pollIntervalMs
+                            mainHandler.postDelayed(pollRunnable, tracker.pollIntervalMs)
+                        }
                     }
-                }, 200)
+                }
+                mainHandler.postDelayed(pollRunnable, tracker.pollIntervalMs)
             }
         }
 

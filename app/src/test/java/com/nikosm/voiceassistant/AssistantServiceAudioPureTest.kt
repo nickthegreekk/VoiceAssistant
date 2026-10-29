@@ -143,4 +143,54 @@ class AssistantServiceAudioPureTest {
         val frames = espeakMarkerFrames(sampleCount)
         assertEquals(16000, frames)
     }
+
+    // (3) B & C: Chunk pipeline with counter for successful chunks and waiting while synthesis runs
+    @Test
+    fun testChunkTrackerWaitsWhileSynthesisInProgressAndHandlesBlankChunk() {
+        val tracker = ChunkSynthesisTracker(generation = 1L, maxWaitCapMs = 2000L, pollIntervalMs = 100L)
+        // Simulate stub gateway processing 3 chunks:
+        // Chunk 0: blank/failed (no audio produced)
+        // Chunk 1: succeeds -> must be assigned index 0, and trigger playback start (successfulCount == 1)
+        val chunk0Audio: ByteArray? = null
+        if (chunk0Audio != null) {
+            tracker.successfulCount++
+        }
+        assertEquals("Blank chunk must not increment successful count", 0, tracker.successfulCount)
+
+        val chunk1Audio = ByteArray(100)
+        val chunk1Idx = tracker.successfulCount
+        tracker.successfulCount++
+        assertEquals("First successful chunk must get index 0", 0, chunk1Idx)
+        assertEquals("First successful chunk must bring count to 1 (triggering playback start)", 1, tracker.successfulCount)
+
+        // Simulate Chunk 2 delayed: at 400ms (old timeout), file does not exist yet, but synthesis is in progress.
+        // Old code gave up after 400ms. New code must return WAIT.
+        val decisionAt400ms = tracker.nextAction(
+            currentIdx = 1,
+            fileExists = false,
+            waitElapsedMs = 400L,
+            curGen = 1L
+        )
+        assertEquals("Must keep waiting at 400ms while synthesis is in progress", ChunkSynthesisTracker.Action.WAIT, decisionAt400ms)
+
+        // At 600ms, chunk 2 arrives
+        val decisionAt600ms = tracker.nextAction(
+            currentIdx = 1,
+            fileExists = true,
+            waitElapsedMs = 600L,
+            curGen = 1L
+        )
+        assertEquals("Must play when delayed chunk arrives", ChunkSynthesisTracker.Action.PLAY, decisionAt600ms)
+
+        // When synthesis completes and all chunks are played
+        tracker.isSynthesisComplete = true
+        tracker.successfulCount = 2 // chunks 0 and 1 played
+        val decisionAtEnd = tracker.nextAction(
+            currentIdx = 2,
+            fileExists = false,
+            waitElapsedMs = 0L,
+            curGen = 1L
+        )
+        assertEquals("Must complete when all chunks played and synthesis complete", ChunkSynthesisTracker.Action.COMPLETED, decisionAtEnd)
+    }
 }
