@@ -199,7 +199,7 @@ class ImageGenAuthInstrumentedTest {
             // matches no Image Gen entry. The inline trigger must IGNORE it and use the active
             // generator (A1111), which is where the probe entry is; honouring it is what used to
             // produce "No image server is configured for this persona".
-            val persona = probePersona("ProbeInline", "http://192.168.1.44:11434/", isImageGenerator = false)
+            val persona = probePersona("ProbeInline", "http://192.0.2.44:11434/", isImageGenerator = false)
             val genBefore = genFiles()
             mainSync { service._messages.value = emptyList() }
 

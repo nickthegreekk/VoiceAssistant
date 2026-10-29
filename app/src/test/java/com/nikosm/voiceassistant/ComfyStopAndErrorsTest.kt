@@ -69,8 +69,8 @@ class ComfyStopAndErrorsTest {
     @Test
     fun theUnreachableMessageNamesTheAddress() {
         assertEquals(
-            "ComfyUI at http://192.168.1.9:8188 stopped responding",
-            comfyUnreachableMessage("http://192.168.1.9:8188")
+            "ComfyUI at http://192.0.2.9:8188 stopped responding",
+            comfyUnreachableMessage("http://192.0.2.9:8188")
         )
     }
 

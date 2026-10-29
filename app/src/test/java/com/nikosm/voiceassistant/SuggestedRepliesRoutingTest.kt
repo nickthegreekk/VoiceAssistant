@@ -27,14 +27,14 @@ class SuggestedRepliesRoutingTest {
 
     private val ollama = ServerConfig(
         name = "5800x",
-        url = "http://192.168.1.5:11434",
+        url = "http://192.0.2.5:11434",
         username = "nikos",
         password = "s3cret",
         authType = AuthType.BASIC
     )
     private val gateway = ServerConfig(
         name = "Home Gateway",
-        url = "http://192.168.1.42:8880",
+        url = "http://192.0.2.42:8880",
         username = "gw",
         password = "gwpass",
         authType = AuthType.BASIC

@@ -90,7 +90,7 @@ Once running, add your Gateway's URL in Settings → Servers, and select it as t
 ### Ollama (Local)
 1. Install Ollama on your server
 2. Pull your desired model: `ollama pull llama3`
-3. In the app, add your Ollama server URL (e.g., `http://192.168.1.100:11434`)
+3. In the app, add your Ollama server URL (e.g., `http://192.0.2.100:11434`)
 4. Choose an **Auth Type** for the server — None (default, for an open local server on your own trusted network), Username + Password, or API Key — matching whatever (if anything) protects your server
 5. Select a persona and start chatting
 

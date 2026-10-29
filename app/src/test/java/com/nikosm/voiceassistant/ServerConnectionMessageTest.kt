@@ -103,11 +103,11 @@ class ServerConnectionMessageTest {
 
     @Test fun `other transport errors still surface the raw message`() {
         val text = serverConnectionFailureMessage(
-            ServerConnectionResult(success = false, httpCode = null, detail = "Hostname 192.168.1.10 not verified"),
+            ServerConnectionResult(success = false, httpCode = null, detail = "Hostname 192.0.2.10 not verified"),
             AuthType.BASIC
         )
         assertEquals(
-            "Couldn't reach the server — check the address and that it's running (Hostname 192.168.1.10 not verified)",
+            "Couldn't reach the server — check the address and that it's running (Hostname 192.0.2.10 not verified)",
             text
         )
     }

@@ -91,7 +91,7 @@ fun WelcomeScreen(service: AssistantService?, onFinish: () -> Unit, personaColor
 
                     OutlinedTextField(value = ollamaName, onValueChange = { ollamaName = it }, label = { Text("Server Name") }, modifier = Modifier.fillMaxWidth())
                     Spacer(modifier = Modifier.height(12.dp))
-                    OutlinedTextField(value = ollamaUrl, onValueChange = { ollamaUrl = it }, label = { Text("URL (e.g. http://192.168.1.10:11434)") }, modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(value = ollamaUrl, onValueChange = { ollamaUrl = it }, label = { Text("URL (e.g. http://192.0.2.10:11434)") }, modifier = Modifier.fillMaxWidth())
 
                     Spacer(modifier = Modifier.height(12.dp))
                     Text("Authentication", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f))
@@ -149,7 +149,7 @@ fun WelcomeScreen(service: AssistantService?, onFinish: () -> Unit, personaColor
 
                     OutlinedTextField(value = gwName, onValueChange = { gwName = it }, label = { Text("Gateway Name") }, modifier = Modifier.fillMaxWidth())
                     Spacer(modifier = Modifier.height(12.dp))
-                    OutlinedTextField(value = gwUrl, onValueChange = { gwUrl = it }, label = { Text("URL (e.g. http://192.168.1.10:8880)") }, modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(value = gwUrl, onValueChange = { gwUrl = it }, label = { Text("URL (e.g. http://192.0.2.10:8880)") }, modifier = Modifier.fillMaxWidth())
 
                     Spacer(modifier = Modifier.height(12.dp))
                     Text("Authentication", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f))

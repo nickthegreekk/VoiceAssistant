@@ -305,7 +305,7 @@ class ComfyImageInstrumentedTest {
             // without the persona having to become an image-only generator (which would turn EVERY
             // one of its messages into an image request).
             val character = ImageWorkflow(name = "ChatCharacter", workflow = CHARACTER_WORKFLOW)
-            val persona = probePersona("ComfyChatCharacter", "http://192.168.1.44:11434", isImageGenerator = false)
+            val persona = probePersona("ComfyChatCharacter", "http://192.0.2.44:11434", isImageGenerator = false)
                 .copy(imageWorkflowId = character.id)
             val genBefore = genFiles()
             mainSync {
@@ -340,7 +340,7 @@ class ComfyImageInstrumentedTest {
             registerComfyServer(stub)
             // A normal persona whose Backend URL is where its CHAT goes. The inline trigger must
             // ignore it and follow the active generator, which is ComfyUI here.
-            val persona = probePersona("ComfyInline", "http://192.168.1.44:11434", isImageGenerator = false)
+            val persona = probePersona("ComfyInline", "http://192.0.2.44:11434", isImageGenerator = false)
             val genBefore = genFiles()
             mainSync { service._messages.value = emptyList() }
 
@@ -413,7 +413,7 @@ class ComfyImageInstrumentedTest {
         ComfyUiStub().use { stub ->
             registerComfyServer(stub)
             // What the persona still points at after its entry was edited to the ComfyUI address.
-            val persona = probePersona("ComfyStalePin", "http://192.168.1.50:7860", isImageGenerator = true)
+            val persona = probePersona("ComfyStalePin", "http://192.0.2.50:7860", isImageGenerator = true)
             val genBefore = genFiles()
             mainSync { service._messages.value = emptyList() }
 

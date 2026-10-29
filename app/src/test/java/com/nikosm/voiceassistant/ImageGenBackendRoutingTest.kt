@@ -20,7 +20,7 @@ class ImageGenBackendRoutingTest {
     @Test
     fun anEntryStoredBeforeComfyuiExistedDecodesAsA1111() {
         val legacy = """
-            {"name":"Local A1111","url":"http://192.168.1.50:7860",
+            {"name":"Local A1111","url":"http://192.0.2.50:7860",
              "username":"nikos","password":"s3cret","authType":"BASIC"}
         """.trimIndent()
 
@@ -38,7 +38,7 @@ class ImageGenBackendRoutingTest {
     fun aComfyuiEntryRoundTripsThroughTheStoredJson() {
         val entry = ServerConfig(
             name = "Attic Comfy",
-            url = "http://192.168.1.9:8188",
+            url = "http://192.0.2.9:8188",
             backendType = ImageGenBackend.COMFYUI,
             comfyWorkflow = ComfyFixtures.SAMPLE_WORKFLOW
         )
@@ -96,7 +96,7 @@ class ImageGenBackendRoutingTest {
     fun theComfyuiProbeGoesThroughTheSharedBuilderWithTheEntrysCredentials() {
         val entry = ServerConfig(
             name = "Attic Comfy",
-            url = "http://192.168.1.9:8188/",
+            url = "http://192.0.2.9:8188/",
             username = "nikos",
             password = "s3cret",
             authType = AuthType.BASIC,
@@ -107,7 +107,7 @@ class ImageGenBackendRoutingTest {
 
         assertEquals("GET", request.method)
         // A trailing slash on the saved URL must not produce "//system_stats".
-        assertEquals("http://192.168.1.9:8188/system_stats", request.url.toString())
+        assertEquals("http://192.0.2.9:8188/system_stats", request.url.toString())
         assertEquals(Credentials.basic("nikos", "s3cret"), request.header("Authorization"))
     }
 
@@ -115,14 +115,14 @@ class ImageGenBackendRoutingTest {
     fun theA1111ProbeIsStillTheModelList() {
         val entry = ServerConfig(
             name = "Local A1111",
-            url = "http://192.168.1.50:7860",
+            url = "http://192.0.2.50:7860",
             backendType = ImageGenBackend.A1111
         )
 
         val request = imageGenRequestBuilder(entry, imageGenProbePath(entry.backendType)).build()
 
         assertEquals("GET", request.method)
-        assertEquals("http://192.168.1.50:7860/sdapi/v1/sd-models", request.url.toString())
+        assertEquals("http://192.0.2.50:7860/sdapi/v1/sd-models", request.url.toString())
     }
 
     // ---------------------------------------------------------------- A1111 payload capture

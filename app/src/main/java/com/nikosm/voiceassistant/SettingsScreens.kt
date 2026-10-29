@@ -1561,7 +1561,7 @@ Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
                 service.saveSearxngUrl(it)
             },
             label = { Text("SearXNG URL") },
-            placeholder = { Text("e.g. http://192.168.1.10:8080") },
+            placeholder = { Text("e.g. http://192.0.2.10:8080") },
             modifier = Modifier.fillMaxWidth()
         )
         Text(
@@ -1600,7 +1600,7 @@ Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
                 docCount = null
             },
             label = { Text("RAG Server URL") },
-            placeholder = { Text("e.g. https://192.168.1.10:8882") },
+            placeholder = { Text("e.g. https://192.0.2.10:8882") },
             modifier = Modifier.fillMaxWidth()
         )
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -1935,7 +1935,7 @@ fun ServerListSection(
                     Column {
                         OutlinedTextField(value = newName, onValueChange = { newName = it }, label = { Text("Name") }, modifier = Modifier.fillMaxWidth())
                         Spacer(Modifier.height(8.dp))
-                        OutlinedTextField(value = newUrl, onValueChange = { newUrl = it }, label = { Text("URL (e.g. http://192.168.1.10:8880)") }, modifier = Modifier.fillMaxWidth())
+                        OutlinedTextField(value = newUrl, onValueChange = { newUrl = it }, label = { Text("URL (e.g. http://192.0.2.10:8880)") }, modifier = Modifier.fillMaxWidth())
 
                         Spacer(Modifier.height(12.dp))
                         // Auth Type selector
