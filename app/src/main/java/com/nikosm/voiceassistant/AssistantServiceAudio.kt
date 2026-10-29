@@ -281,6 +281,8 @@ fun AssistantService.speakTextOnDevice(text: String) {
     }
 }
 
+internal fun espeakMarkerFrames(sampleCount: Int): Int = sampleCount.coerceAtLeast(1)
+
 internal fun AssistantService.speakWithEspeak(text: String, persona: Persona) {
     // abandonFocus=false: a new playback starts right after this teardown and
     // re-requests focus — keep the (possibly retained-through-THINKING) request
@@ -396,16 +398,9 @@ internal fun AssistantService.speakWithEspeak(text: String, persona: Persona) {
             val durationMs = (samples.size.toFloat() / sampleRate * 1000).toInt()
             _voiceDuration.value = durationMs
 
-            // A7: genuine-completion detection via the playback-position marker —
-            // no sleep-based estimate. Marker position = total frames actually written
-            // (PCM16 mono = 2 bytes/frame) so onMarkerReached fires precisely when real
-            // playback finishes. The callback runs on AudioTrack's handler thread, so
-            // all state/focus work hops to Main via serviceScope.launch. The identity
-            // guard (currentAudioTrack == audioTrack) preserves the B1/A12 guarantees:
-            // a newer playback that released this track skips here, and a superseded
-            // track can't double-release. If stopAudio() releases the track before the
-            // marker fires, it simply never fires — no hanging coroutine.
-            val totalFrames = samples.size / 2
+            // A7: genuine-completion detection via the playback-position marker.
+            // In PCM16 mono, 1 Short = 1 frame.
+            val totalFrames = espeakMarkerFrames(samples.size)
             audioTrack.setNotificationMarkerPosition(totalFrames)
             audioTrack.setPlaybackPositionUpdateListener(object : AudioTrack.OnPlaybackPositionUpdateListener {
                 override fun onMarkerReached(track: AudioTrack) {

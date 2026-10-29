@@ -133,4 +133,14 @@ class AssistantServiceAudioPureTest {
         // Old code fallback missed sampleRate: (1 * 16 / 8 = 2 bytes/sec), resulting in 8000.0s
         assertEquals(0.5, duration, 0.001)
     }
+
+    // (2) A: eSpeak marker frame calculation
+    @Test
+    fun testEspeakMarkerFramesEqualsShortSampleCount() {
+        // In PCM 16-bit mono, 1 Short = 1 sample = 1 frame.
+        // For 16000 shorts at 16kHz (1.0 second), total frames must be 16000, NOT 8000.
+        val sampleCount = 16000
+        val frames = espeakMarkerFrames(sampleCount)
+        assertEquals(16000, frames)
+    }
 }
