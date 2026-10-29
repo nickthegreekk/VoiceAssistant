@@ -642,32 +642,65 @@ fun AssistantService.stopEverything() {
  * the MediaPlayer durations (mp.duration) that drive ttsPlaybackFraction.
  */
 internal fun wavDurationSeconds(wavBytes: ByteArray): Double {
-    if (wavBytes.size < 44) return 0.0
+    if (wavBytes.size < 12) return 0.0
     // "RIFF" magic
-    if (wavBytes[0] != 0x52.toByte() || wavBytes[1] != 0x49.toByte()) return 0.0
-    if (wavBytes[2] != 0x46.toByte() || wavBytes[3] != 0x46.toByte()) return 0.0
+    if (wavBytes[0] != 0x52.toByte() || wavBytes[1] != 0x49.toByte() ||
+        wavBytes[2] != 0x46.toByte() || wavBytes[3] != 0x46.toByte()) return 0.0
     // "WAVE" magic
-    if (wavBytes[8] != 0x57.toByte() || wavBytes[9] != 0x41.toByte()) return 0.0
-    if (wavBytes[10] != 0x56.toByte() || wavBytes[11] != 0x45.toByte()) return 0.0
+    if (wavBytes[8] != 0x57.toByte() || wavBytes[9] != 0x41.toByte() ||
+        wavBytes[10] != 0x56.toByte() || wavBytes[11] != 0x45.toByte()) return 0.0
+
     var sampleRate = 0
-    for (i in 24 until 28) {
-        sampleRate = sampleRate or ((wavBytes[i].toInt() and 0xFF) shl (8 * (i - 24)))
-    }
-    if (sampleRate <= 0) return 0.0
+    var channels = 0
+    var bitsPerSample = 0
     var byteRate = 0L
-    for (i in 28 until 32) {
-        byteRate = byteRate or ((wavBytes[i].toInt() and 0xFF).toLong() shl (8 * (i - 28)))
-    }
     var dataSizeLong = 0L
-    for (i in 40 until 44) {
-        dataSizeLong = dataSizeLong or (((wavBytes[i].toInt() and 0xFF).toLong()) shl (8 * (i - 40)))
+
+    var offset = 12
+    while (offset + 8 <= wavBytes.size) {
+        val chunkId = String(wavBytes, offset, 4, Charsets.US_ASCII)
+        var chunkSize = 0L
+        for (i in 0 until 4) {
+            chunkSize = chunkSize or (((wavBytes[offset + 4 + i].toInt() and 0xFF).toLong()) shl (8 * i))
+        }
+        val chunkDataOffset = offset + 8
+        if (chunkSize < 0 || chunkDataOffset + chunkSize > wavBytes.size && chunkId != "data") {
+            // Malformed chunk
+            break
+        }
+
+        when (chunkId) {
+            "fmt " -> {
+                if (chunkSize >= 16 && chunkDataOffset + 16 <= wavBytes.size) {
+                    channels = (wavBytes[chunkDataOffset + 2].toInt() and 0xFF) or
+                        ((wavBytes[chunkDataOffset + 3].toInt() and 0xFF) shl 8)
+                    sampleRate = 0
+                    for (i in 0 until 4) {
+                        sampleRate = sampleRate or ((wavBytes[chunkDataOffset + 4 + i].toInt() and 0xFF) shl (8 * i))
+                    }
+                    byteRate = 0L
+                    for (i in 0 until 4) {
+                        byteRate = byteRate or (((wavBytes[chunkDataOffset + 8 + i].toInt() and 0xFF).toLong()) shl (8 * i))
+                    }
+                    bitsPerSample = (wavBytes[chunkDataOffset + 14].toInt() and 0xFF) or
+                        ((wavBytes[chunkDataOffset + 15].toInt() and 0xFF) shl 8)
+                }
+            }
+            "data" -> {
+                val availableData = (wavBytes.size - chunkDataOffset).coerceAtLeast(0).toLong()
+                dataSizeLong = if (chunkSize in 1..availableData) chunkSize else availableData
+                break
+            }
+        }
+        offset = chunkDataOffset + chunkSize.toInt() + (if (chunkSize % 2L != 0L) 1 else 0)
     }
-    if (dataSizeLong <= 0) return 0.0
-    // dataSize is in BYTES. Prefer the header's byteRate (bytes/sec); fall back
-    // to channels*bitsPerSample/8 when byteRate is absent.
+
+    if (dataSizeLong <= 0 || sampleRate <= 0) return 0.0
+
     val bytesPerSec = if (byteRate > 0) byteRate.toDouble()
-        else 1.0 * (wavBytes[22].toInt() and 0xFF) * ((wavBytes[34].toInt() and 0xFF) or ((wavBytes[35].toInt() and 0xFF) shl 8)) / 8.0
-    if (bytesPerSec <= 0) return 0.0
+        else (sampleRate.toDouble() * channels.coerceAtLeast(1) * bitsPerSample.coerceAtLeast(8) / 8.0)
+    if (bytesPerSec <= 0.0) return 0.0
+
     return dataSizeLong.toDouble() / bytesPerSec
 }
 

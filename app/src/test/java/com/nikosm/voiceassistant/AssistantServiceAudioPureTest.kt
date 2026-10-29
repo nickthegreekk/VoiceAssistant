@@ -61,4 +61,76 @@ class AssistantServiceAudioPureTest {
         assertEquals(1, parsed.length())
         assertEquals("""said, "hello"""", parsed.getJSONObject(0).getString("word"))
     }
+
+    // (1) J: WAV duration with LIST chunk and byteRate fallback
+    @Test
+    fun testWavDurationWithListChunkBeforeData() {
+        // Construct a WAV with a LIST chunk placed before the data chunk:
+        // sampleRate = 16000, 1 ch, 16-bit (2 bytes/sample) -> 32000 bytes/sec
+        // data size = 16000 bytes -> duration = 0.5s
+        val listChunk = "LIST".toByteArray() + byteArrayOf(4, 0, 0, 0) + "INFO".toByteArray()
+        val dataChunk = "data".toByteArray() + byteArrayOf(
+            (16000 and 0xFF).toByte(),
+            ((16000 shr 8) and 0xFF).toByte(),
+            ((16000 shr 16) and 0xFF).toByte(),
+            ((16000 shr 24) and 0xFF).toByte()
+        ) + ByteArray(16000)
+
+        val fmtChunk = "fmt ".toByteArray() + byteArrayOf(
+            16, 0, 0, 0, // fmt chunk size = 16
+            1, 0,        // PCM = 1
+            1, 0,        // 1 channel
+            (16000 and 0xFF).toByte(), ((16000 shr 8) and 0xFF).toByte(), 0, 0, // sampleRate = 16000
+            (32000 and 0xFF).toByte(), ((32000 shr 8) and 0xFF).toByte(), 0, 0, // byteRate = 32000
+            2, 0,        // blockAlign = 2
+            16, 0        // bitsPerSample = 16
+        )
+
+        val totalSize = 4 + fmtChunk.size + listChunk.size + dataChunk.size
+        val riffHeader = "RIFF".toByteArray() + byteArrayOf(
+            (totalSize and 0xFF).toByte(),
+            ((totalSize shr 8) and 0xFF).toByte(),
+            ((totalSize shr 16) and 0xFF).toByte(),
+            ((totalSize shr 24) and 0xFF).toByte()
+        ) + "WAVE".toByteArray()
+
+        val wavBytes = riffHeader + fmtChunk + listChunk + dataChunk
+        val duration = wavDurationSeconds(wavBytes)
+        // Fixed offset 40 in old code reads the size of LIST chunk (4) instead of data (16000), giving ~0.000125
+        assertEquals(0.5, duration, 0.001)
+    }
+
+    @Test
+    fun testWavDurationFallbackWhenByteRateIsZero() {
+        // sampleRate = 16000, 1 ch, 16-bit, byteRate = 0
+        // data size = 16000 bytes -> duration = 0.5s
+        val fmtChunk = "fmt ".toByteArray() + byteArrayOf(
+            16, 0, 0, 0, // fmt chunk size = 16
+            1, 0,        // PCM = 1
+            1, 0,        // 1 channel
+            (16000 and 0xFF).toByte(), ((16000 shr 8) and 0xFF).toByte(), 0, 0, // sampleRate = 16000
+            0, 0, 0, 0,  // byteRate = 0 (triggers fallback)
+            2, 0,        // blockAlign = 2
+            16, 0        // bitsPerSample = 16
+        )
+        val dataChunk = "data".toByteArray() + byteArrayOf(
+            (16000 and 0xFF).toByte(),
+            ((16000 shr 8) and 0xFF).toByte(),
+            ((16000 shr 16) and 0xFF).toByte(),
+            ((16000 shr 24) and 0xFF).toByte()
+        ) + ByteArray(16000)
+
+        val totalSize = 4 + fmtChunk.size + dataChunk.size
+        val riffHeader = "RIFF".toByteArray() + byteArrayOf(
+            (totalSize and 0xFF).toByte(),
+            ((totalSize shr 8) and 0xFF).toByte(),
+            ((totalSize shr 16) and 0xFF).toByte(),
+            ((totalSize shr 24) and 0xFF).toByte()
+        ) + "WAVE".toByteArray()
+
+        val wavBytes = riffHeader + fmtChunk + dataChunk
+        val duration = wavDurationSeconds(wavBytes)
+        // Old code fallback missed sampleRate: (1 * 16 / 8 = 2 bytes/sec), resulting in 8000.0s
+        assertEquals(0.5, duration, 0.001)
+    }
 }
