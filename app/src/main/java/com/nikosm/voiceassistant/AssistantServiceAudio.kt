@@ -747,7 +747,7 @@ internal fun splitIntoTtsChunks(text: String, minChunkChars: Int = 80): List<Str
     for (i in 1 until rawSentences.size) {
         val lastWord = pending.substringAfterLast(" ").substringBeforeLast(".")
         val isAbbrev = lastWord.lowercase() in abbreviations ||
-            pending.endsWith(".") && pending.lastOrNull()?.isDigit() == true
+            (pending.endsWith(".") && pending.dropLast(1).lastOrNull()?.isDigit() == true)
         if (isAbbrev) {
             pending = pending + " " + rawSentences[i]
         } else {
