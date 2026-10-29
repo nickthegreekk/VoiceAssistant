@@ -49,4 +49,16 @@ class AssistantServiceAudioPureTest {
         val chunks = splitIntoTtsChunks(input, minChunkChars = 20)
         assertEquals(listOf(input), chunks)
     }
+
+    // (1) K: Timestamp JSON escaping
+    @Test
+    fun testWordTimestampsJsonEscapesQuotes() {
+        val timestamps = listOf(
+            mapOf("word" to """said, "hello"""", "start" to 0.0, "end" to 0.5)
+        )
+        val json = formatWordTimestampsJson(timestamps)
+        val parsed = org.json.JSONArray(json)
+        assertEquals(1, parsed.length())
+        assertEquals("""said, "hello"""", parsed.getJSONObject(0).getString("word"))
+    }
 }

@@ -776,6 +776,18 @@ internal fun splitIntoTtsChunks(text: String, minChunkChars: Int = 80): List<Str
     return chunks.ifEmpty { listOf(text.trim()) }
 }
 
+internal fun formatWordTimestampsJson(timestamps: List<Map<String, Any>>): String {
+    val arr = org.json.JSONArray()
+    for (m in timestamps) {
+        val obj = org.json.JSONObject()
+        obj.put("word", m["word"]?.toString() ?: "")
+        obj.put("start", m["start"] ?: 0.0)
+        obj.put("end", m["end"] ?: 0.0)
+        arr.put(obj)
+    }
+    return arr.toString()
+}
+
 fun AssistantService.playResponse(persona: Persona, file: File? = null, deviceText: String? = null) {
     // deviceText arrives PRE-CLEANED: cleanTextForTts() now runs in the background
     // parse blocks (Dispatchers.IO) right after the LLM response is received, so the
@@ -911,7 +923,7 @@ internal suspend fun AssistantService.playChunkedTtsGateway(
     _ttsWordTimestamps.value = null
 
     val chunkFiles = mutableListOf<String>()
-    var accumulatedTimestamps = mutableListOf<Map<String, Any>>()  // [{word, start, end}] absolute
+    val accumulatedTimestamps = mutableListOf<Map<String, Any>>()  // [{word, start, end}] absolute
     var cumulativeAudioS = 0.0  // full AUDIO duration of prior chunks (matches mp.duration timeline)
 
     for ((idx, chunkText) in chunks.withIndex()) {
@@ -950,9 +962,7 @@ internal suspend fun AssistantService.playChunkedTtsGateway(
                     ))
                 }
                 // Publish the accumulated timestamps to the service StateFlow
-                _ttsWordTimestamps.value = accumulatedTimestamps.joinToString(",", "[", "]") { m ->
-                    """{"word":"${m["word"]}","start":${m["start"]},"end":${m["end"]}}"""
-                }
+                _ttsWordTimestamps.value = formatWordTimestampsJson(accumulatedTimestamps)
             } catch (e: Exception) {
                 android.util.Log.w("AssistantService", "Failed to parse word timestamps: ${e.message}")
             }
