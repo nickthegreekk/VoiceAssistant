@@ -728,10 +728,11 @@ internal fun splitIntoTtsChunks(text: String, minChunkChars: Int = 80): List<Str
     )
 
     // Sentence-ending punctuation followed by whitespace and a capital letter
-    // or digit (heuristic for "actually the next sentence"). The lookbehind
-    // allows . ! ? … and the lookahead checks it's a real boundary.
+    // or digit (heuristic for "actually the next sentence"). Includes Unicode uppercase
+    // (\p{Lu}) for non-Latin alphabets (Greek, Cyrillic, accented Latin) and non-Latin/CJK
+    // terminators (; 。 ！ ？).
     val sentenceEnd = Regex(
-        """(?<=[.!?…])\s+(?=[A-Z0-9"'(])""",
+        """(?<=[.!?…;。！？])\s+(?=[\p{Lu}0-9"'(])|(?<=[。！？])(?=\S)""",
         setOf(RegexOption.MULTILINE)
     )
 
