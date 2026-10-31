@@ -442,6 +442,15 @@ internal suspend fun AssistantService.transcribeWithGateway(file: File, persona:
 
     var lastEx: Exception? = null
     for (gw in gwsToTry.distinct()) {
+        val credentialProblem = gatewayCredentialProblem(gw)
+        if (credentialProblem != null) {
+            android.util.Log.e(
+                "AssistantService",
+                "Gateway transcription refused — $credentialProblem. No request was sent."
+            )
+            lastEx = Exception(credentialProblem)
+            continue
+        }
         val url = gw.url
         try {
             val result = withContext(Dispatchers.IO) {

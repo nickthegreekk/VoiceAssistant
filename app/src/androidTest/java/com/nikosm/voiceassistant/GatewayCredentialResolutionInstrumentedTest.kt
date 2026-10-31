@@ -254,6 +254,52 @@ class GatewayCredentialResolutionInstrumentedTest {
     }
 
     @Test
+    fun aMissingBasicPasswordNeverSendsATranscriptionRequest() {
+        CredentialProbeServer().use { gateway ->
+            ProbeNoOpServer().use { cloud ->
+                val instrumentation = InstrumentationRegistry.getInstrumentation()
+                instrumentation.runOnMainSync {
+                    service._serverBases.value = listOf(
+                        ServerConfig(
+                            name = PROBE_GATEWAY,
+                            url = gateway.url,
+                            username = PROBE_USER,
+                            // No password: effectiveAuthType is BASIC, and the old code
+                            // would send `Basic user:` and surface a bare 401.
+                            authType = AuthType.BASIC
+                        )
+                    )
+                }
+                registerCloudProvider(cloud)
+                val persona = cloudPersona(backendUrl = gateway.url)
+                instrumentation.runOnMainSync {
+                    service.currentPersonaName = persona.name
+                    service.messagesOwnerName = persona.name
+                    service._messages.value = emptyList()
+                }
+                val file = File(context.cacheDir, "missing_password_${System.currentTimeMillis()}.wav")
+                file.writeBytes(ByteArray(64))
+                scratchFiles += file
+                instrumentation.runOnMainSync { service.sendAudioToServer(file, persona) }
+
+                awaitService(25_000, "the voice turn never reported the missing credential") {
+                    service.messages.value.any { it.isError }
+                }
+                assertEquals(
+                    "no unauthenticated transcription request may be sent",
+                    0,
+                    gateway.requests.count { it.path.startsWith("/transcribe") }
+                )
+                assertTrue(
+                    "the failure must name the empty field: " +
+                        service.messages.value.filter { it.isError }.map { it.text },
+                    service.messages.value.any { it.isError && it.text.contains("no password") }
+                )
+            }
+        }
+    }
+
+    @Test
     fun voiceTestRefusesAnUnresolvableGatewayInsteadOfSendingAnUnauthenticatedRequest() {
         StrayGatewayServer().use { strayGateway ->
             val instrumentation = InstrumentationRegistry.getInstrumentation()
