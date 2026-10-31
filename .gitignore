@@ -18,4 +18,6 @@ build/
 app/.cxx/
 .idea/
 app/release/baselineProfiles/
+app/release/*.aab
+app/release/native-debug-symbols.zip
 .kotlin/
