@@ -1555,6 +1555,11 @@ internal suspend fun AssistantService.performDirectOllamaChat(baseUrl: String, m
     // is generated. Each line carries message.content (and message.thinking
     // for reasoning models); the final line carries done=true plus usage stats.
     json.put("stream", true)
+    // Ollama reads `think` from the REQUEST, not from `options` (0.40 ignores the
+    // options-level flag). In `options` a thinking-capable model stayed in thinking mode,
+    // where hidden reasoning consumes `num_predict` and the turn can end with an empty
+    // message.content — a blank reply.
+    json.put("think", persona.enableThinking && isKnownThinkingModel(model))
 
     // A-attachments: the model-facing prompt includes extracted file content. The
     // original `text` is still used for search/news below.
@@ -1702,7 +1707,6 @@ internal suspend fun AssistantService.performDirectOllamaChat(baseUrl: String, m
     // Debug-only: per-request reasoning trace (fires once per direct-Ollama completion).
     // Kept gated — useful with the thinking-aware read-timeout multiplier in getDynamicClient.
     if (BuildConfig.DEBUG) android.util.Log.d("AssistantService", "DEBUG: persona.name=${persona.name} enableThinking=${persona.enableThinking} isKnownThinking=${isKnownThinkingModel(model)}")
-    options.put("think", persona.enableThinking && isKnownThinkingModel(model))
     options.put("num_predict", persona.maxTokens)
 
     json.put("options", options)
@@ -2758,7 +2762,9 @@ Do you want a summary?
                     val json = JSONObject().apply {
                         put("model", actualModel)
                         put("stream", false)
-                        put("options", JSONObject().put("num_predict", 300).put("temperature", 0.7).put("think", false))
+                        // Top level, not inside options: Ollama ignores options.think.
+                        put("think", false)
+                        put("options", JSONObject().put("num_predict", 300).put("temperature", 0.7))
                         put("messages", JSONArray().apply {
                             put(JSONObject().put("role", "system").put("content", systemInstruction))
                             put(JSONObject().put("role", "user").put("content", promptText))
@@ -2889,7 +2895,12 @@ internal fun AssistantService.resolveHistoryBudget(contextWindow: Int, reservedO
                 "Try a shorter message, a smaller attachment, or increase Context Window Size in this persona's settings."
         )
     }
-    return rawBudget
+    // Tokenizer headroom: estimateTokens is chars/4, not the server's tokenizer. Measured
+    // against the 5800x, a 32k persona filled the window to 32,672 prompt + 96 output tokens,
+    // then 32,724 + 44; replies stopped mid-sentence at the 32,768 ceiling. Hold back an
+    // eighth of the window from history so the prompt cannot reach the ceiling.
+    val headroom = (contextWindow / 8).coerceAtLeast(1)
+    return (rawBudget - headroom).coerceAtLeast(0)
 }
 
 internal fun AssistantService.estimateTokens(text: String): Int = (text.length / 4.0).toInt().coerceAtLeast(1)

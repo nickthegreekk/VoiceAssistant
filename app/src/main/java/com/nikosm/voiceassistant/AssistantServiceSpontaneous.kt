@@ -313,12 +313,12 @@ private suspend fun AssistantService.performSpontaneousOllamaCall(
         .put("top_k", persona.topK)
         .put("repeat_penalty", persona.repeatPenalty)
         .put("num_ctx", persona.numCtx)
-        .put("think", persona.enableThinking && isKnownThinkingModel(model))
         .put("num_predict", persona.maxTokens)
 
     val json = JSONObject()
         .put("model", model)
         .put("stream", false)
+        .put("think", persona.enableThinking && isKnownThinkingModel(model))
         .put("messages", messages)
         .put("options", options)
 
