@@ -1410,7 +1410,13 @@ internal fun AssistantService.performCloudChat(text: String, persona: Persona, u
                 // no audio and no explanation. The text still lands in the transcript
                 // (nothing is thrown here), followed by an error bubble naming the
                 // misconfiguration.
-                val ttsGatewayResolved = findGatewayConfig(persona.backendUrl) != null
+                val ttsGateway = findGatewayConfig(persona.backendUrl)
+                val ttsGatewayResolved = ttsGateway != null
+                // A resolved entry can still be unauthenticated (BASIC with no password,
+                // API-key with no key). synthesizeWithGateway refuses before sending, but
+                // ttsGatewayResolved is true, so the old error-bubble branch never ran and
+                // the reply landed with no audio and no explanation.
+                val ttsCredentialProblem = ttsGateway?.let { gatewayCredentialProblem(it) }
                 val (audioBytes, _) = synthesizeWithGateway(responseData.first, persona)
                 val audioPath = if (audioBytes != null) {
                     val outFile = File(cacheDir, "response_${System.currentTimeMillis()}.wav")
@@ -1424,6 +1430,15 @@ internal fun AssistantService.performCloudChat(text: String, persona: Persona, u
                 if (audioPath != null) {
                     playbackRequested = true
                     playResponse(persona, file = File(audioPath))
+                } else if (ttsCredentialProblem != null) {
+                    // The request was refused before it was sent: name the empty field.
+                    sink.append(ChatMessage(
+                        "assistant",
+                        "Error: $ttsCredentialProblem The reply could not be spoken. " +
+                            "Fix it in Servers settings, then resend.",
+                        isError = true
+                    ))
+                    saveSettings()
                 } else if (!ttsGatewayResolved) {
                     // No synthesis request was sent at all — say why, at the point of use.
                     sink.append(ChatMessage(
@@ -1559,7 +1574,7 @@ internal suspend fun AssistantService.performDirectOllamaChat(baseUrl: String, m
     // options-level flag). In `options` a thinking-capable model stayed in thinking mode,
     // where hidden reasoning consumes `num_predict` and the turn can end with an empty
     // message.content — a blank reply.
-    json.put("think", persona.enableThinking && isKnownThinkingModel(model))
+    json.put("think", persona.enableThinking && isThinkingModel(resolvedBackend, model))
 
     // A-attachments: the model-facing prompt includes extracted file content. The
     // original `text` is still used for search/news below.
@@ -2232,7 +2247,11 @@ private fun AssistantService.parseCloudResponse(api: CloudApiSetting, persona: P
     return Triple(text, reasoning, UsageInfo(pTokens, cTokens, pTokens + cTokens, cost))
 }
 
-internal fun AssistantService.isKnownThinkingModel(modelName: String): Boolean {
+internal fun AssistantService.isKnownThinkingModel(modelName: String): Boolean =
+    isKnownThinkingModelName(modelName)
+
+/** The pure name half of [isKnownThinkingModel]; the receiver only kept call sites short. */
+internal fun isKnownThinkingModelName(modelName: String): Boolean {
     val name = modelName.lowercase()
     // "v4-pro": DeepSeek's R1 line is being delisted (completes 2026-10-10 per
     // DeepSeek's announcement) and V4-Pro's built-in Thinking mode is the official
@@ -2240,7 +2259,27 @@ internal fun AssistantService.isKnownThinkingModel(modelName: String): Boolean {
     // (deepseek-v4-flash, deepseek-v4-flash-vision-exp) — they are the fast/
     // non-reasoning tier and Ollama rejects think:true for them.
     return name.contains("deepseek-r1") || name.contains("deepseek-reasoner") || name.contains("-r1") ||
-        name.contains("v4-pro")
+        name.contains("v4-pro") || name.contains("qwq") || name.contains("ornith")
+}
+
+/**
+ * Thinking capability for a model on [serverUrl]: the name heuristic above, or the live
+ * Ollama catalog's `thinking` capability when the model picker has fetched it.
+ *
+ * The name list alone silently sent `think: false` to valid reasoning models it did not
+ * know (QwQ, Ornith), disabling reasoning even when the user enabled Thinking. The catalog
+ * is keyed by the server URL; a model whose capabilities were never fetched (`null`) is
+ * still handled by the name fallback.
+ */
+internal fun AssistantService.isThinkingModel(serverUrl: String, modelName: String): Boolean {
+    if (isKnownThinkingModel(modelName)) return true
+    val key = serverUrl.trimEnd('/')
+    val loaded = _modelCatalog.value.entries
+        .firstOrNull { it.key.trimEnd('/') == key }?.value as? ModelCatalogState.Loaded
+        ?: return false
+    return loaded.entries.any {
+        it.name == modelName && it.capabilities?.contains(ModelCapability.THINKING) == true
+    }
 }
 
 // L6: the OpenRouter pricing table is keyed by the provider's own model ids

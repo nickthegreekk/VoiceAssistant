@@ -398,11 +398,26 @@ internal fun AssistantService.speakWithEspeak(text: String, persona: Persona) {
             // A7: genuine-completion detection via the playback-position marker.
             // In PCM16 mono, 1 Short = 1 frame.
             val totalFrames = espeakMarkerFrames(samples.size)
+            // The karaoke gate is `ttsPlaybackFraction != null`. This route owns the
+            // AudioTrack, so it can report the real position — the same clock the Linux
+            // fix (66ebf9f) publishes from its PlaybackHandle. Word positions are then
+            // estimated by ttsActiveWordRange from the text and this duration.
+            _ttsPlaybackFraction.value = 0f
+            val fractionTrack = audioTrack
+            serviceScope.launch {
+                while (currentAudioTrack === fractionTrack && fractionTrack.state == AudioTrack.STATE_INITIALIZED) {
+                    val played = fractionTrack.playbackHeadPosition
+                    _ttsPlaybackFraction.value = (played.toFloat() / totalFrames).coerceIn(0f, 1f)
+                    if (played >= totalFrames) break
+                    delay(100)
+                }
+            }
             audioTrack.setNotificationMarkerPosition(totalFrames)
             audioTrack.setPlaybackPositionUpdateListener(object : AudioTrack.OnPlaybackPositionUpdateListener {
                 override fun onMarkerReached(track: AudioTrack) {
                     serviceScope.launch {
                         if (currentAudioTrack == audioTrack && audioTrack.state == AudioTrack.STATE_INITIALIZED) {
+                            _ttsPlaybackFraction.value = 1f
                             if (assistantState.value == AssistantState.SPEAKING) {
                                 _state.value = AssistantState.IDLE
                                 updateNotification("Ready to help")
@@ -1048,7 +1063,11 @@ internal suspend fun AssistantService.playChunkedTtsGateway(
     if (chunkFiles.isEmpty()) {
         abandonAssistantFocus()
         _state.value = AssistantState.IDLE
-        updateNotification("Ready to help")
+        // A credential-refused synthesis set the notification in synthesizeWithGateway,
+        // and this guard used to overwrite it with "Ready to help" within milliseconds.
+        // Keep the actionable message when the gateway entry still has no credential.
+        val credentialProblem = findGatewayConfig(persona.backendUrl)?.let { gatewayCredentialProblem(it) }
+        updateNotification(credentialProblem ?: "Ready to help")
     }
 
     // Housekeeping (see sweepCompletedTtsChunkFiles): this sequence completed, so its

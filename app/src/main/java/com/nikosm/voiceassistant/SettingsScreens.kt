@@ -70,6 +70,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.ImeAction
@@ -853,7 +854,13 @@ internal fun adaptiveThemeDescription(sdkInt: Int): String =
  */
 @Composable
 private fun QuickSettingsTileRow() {
+    // `StatusBarManager.requestAddTileService` is API 33. The KDoc above already says the
+    // row is absent below that; this is the guard that makes it true (and clears lint's NewApi).
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
     val context = LocalContext.current
+    // Resolved in composition, not inside the click: the Compose lint rejects querying
+    // resources through LocalContext.current in a non-composable callback.
+    val tileLabel = stringResource(R.string.tile_celeste_label)
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
@@ -872,7 +879,7 @@ private fun QuickSettingsTileRow() {
             runCatching {
                 manager.requestAddTileService(
                     ComponentName(context, CelesteTileService::class.java),
-                    context.getString(R.string.tile_celeste_label),
+                    tileLabel,
                     Icon.createWithResource(context, R.drawable.ic_tile_celeste),
                     context.mainExecutor
                 ) { /* result ignored: the panel is the source of truth */ }
