@@ -23,7 +23,7 @@ class ImageGenResolutionTest {
 
     private val local = ServerConfig(
         name = "Local A1111",
-        url = "http://192.168.1.50:7860",
+        url = "http://192.0.2.50:7860",
         username = "nikos",
         password = "s3cret",
         authType = AuthType.BASIC
@@ -31,7 +31,7 @@ class ImageGenResolutionTest {
 
     private val remote = ServerConfig(
         name = "Attic A1111",
-        url = "http://192.168.1.9:7860/",
+        url = "http://192.0.2.9:7860/",
         apiKey = "attic-key",
         authType = AuthType.API_KEY
     )
@@ -40,7 +40,7 @@ class ImageGenResolutionTest {
 
     private val comfy = ServerConfig(
         name = "Attic Comfy",
-        url = "http://192.168.1.9:8188",
+        url = "http://192.0.2.9:8188",
         backendType = ImageGenBackend.COMFYUI
     )
 
@@ -58,16 +58,16 @@ class ImageGenResolutionTest {
     @Test
     fun aPinThatMatchesByUrlOrNameWinsOverTheActiveGenerator() {
         // Trailing slashes and surrounding whitespace are normalized, exactly as before.
-        assertSame(local, resolved(servers, pin = "http://192.168.1.50:7860/"))
-        assertSame(local, resolved(servers, pin = "  http://192.168.1.50:7860//  "))
-        assertSame(remote, resolved(servers, pin = "http://192.168.1.9:7860"))
+        assertSame(local, resolved(servers, pin = "http://192.0.2.50:7860/"))
+        assertSame(local, resolved(servers, pin = "  http://192.0.2.50:7860//  "))
+        assertSame(remote, resolved(servers, pin = "http://192.0.2.9:7860"))
         assertSame(local, resolved(servers, pin = "Local A1111"))
         assertSame(local, resolved(servers, pin = "  Local A1111  "))
     }
 
     @Test
     fun aMatchingPinIsNotReportedAsStale() {
-        val resolution = resolveImageGenConfig(servers, ImageGenBackend.A1111, "http://192.168.1.50:7860")
+        val resolution = resolveImageGenConfig(servers, ImageGenBackend.A1111, "http://192.0.2.50:7860")
         assertNull((resolution as ImageGenResolution.Resolved).stalePinnedUrl)
     }
 
@@ -80,7 +80,7 @@ class ImageGenResolutionTest {
 
         // Two entries of the active type: the user's own ordering decides, which is what the
         // move-up/move-down buttons on the Image Gen screen are for.
-        val second = local.copy(name = "Second A1111", url = "http://192.168.1.60:7860")
+        val second = local.copy(name = "Second A1111", url = "http://192.0.2.60:7860")
         assertSame(local, resolved(listOf(local, second, comfy), active = ImageGenBackend.A1111))
         assertSame(second, resolved(listOf(second, local, comfy), active = ImageGenBackend.A1111))
     }
@@ -96,17 +96,17 @@ class ImageGenResolutionTest {
 
     @Test
     fun aStalePinFallsBackToTheActiveGeneratorInsteadOfFailingTheRequest() {
-        // THE REPORTED BUG. The persona pinned http://192.168.1.50:7860; that entry was edited to
+        // THE REPORTED BUG. The persona pinned http://192.0.2.50:7860; that entry was edited to
         // the ComfyUI address (or replaced), so the pin matches nothing. If an entry of the active
         // type exists, the request must still go out through it — and say the pin is stale.
         val fallback = resolveImageGenConfig(
             listOf(local, comfy),
             ImageGenBackend.A1111,
-            "http://192.168.1.50:9999"
+            "http://192.0.2.50:9999"
         ) as ImageGenResolution.Resolved
 
         assertSame(local, fallback.config)
-        assertEquals("http://192.168.1.50:9999", fallback.stalePinnedUrl)
+        assertEquals("http://192.0.2.50:9999", fallback.stalePinnedUrl)
     }
 
     @Test
@@ -115,7 +115,7 @@ class ImageGenResolutionTest {
         // their only entry to it, or with no ComfyUI entry at all) and the persona's pin no longer
         // matches anything, so there is nothing to fall back TO. The error must name ComfyUI rather
         // than the persona.
-        val resolution = resolveImageGenConfig(listOf(local), ImageGenBackend.COMFYUI, "http://192.168.1.50:9999")
+        val resolution = resolveImageGenConfig(listOf(local), ImageGenBackend.COMFYUI, "http://192.0.2.50:9999")
         assertEquals(ImageGenResolution.NoEntryForActiveBackend(ImageGenBackend.COMFYUI), resolution)
     }
 
@@ -143,14 +143,14 @@ class ImageGenResolutionTest {
     fun onlyAnImageGeneratorPersonaMayPinAServer() {
         val generator = Persona(
             name = "Painter", themeColor = Color(0xFF4ADE80), model = "", systemPrompt = "",
-            isImageGenerator = true, backendUrl = "http://192.168.1.9:8188"
+            isImageGenerator = true, backendUrl = "http://192.0.2.9:8188"
         )
         val chatter = Persona(
             name = "Chatty", themeColor = Color(0xFF4ADE80), model = "[Home] llama3", systemPrompt = "",
-            isImageGenerator = false, backendUrl = "http://192.168.1.44:11434"
+            isImageGenerator = false, backendUrl = "http://192.0.2.44:11434"
         )
 
-        assertEquals("http://192.168.1.9:8188", imageGenPinnedUrl(generator))
+        assertEquals("http://192.0.2.9:8188", imageGenPinnedUrl(generator))
         assertNull("a chat persona's Backend URL is where its CHAT goes", imageGenPinnedUrl(chatter))
     }
 
@@ -160,7 +160,7 @@ class ImageGenResolutionTest {
         // no Image Gen entry, so honouring it failed with "not configured for this persona".
         val chatter = Persona(
             name = "Chatty", themeColor = Color(0xFF4ADE80), model = "[Home] llama3", systemPrompt = "",
-            isImageGenerator = false, backendUrl = "http://192.168.1.44:11434"
+            isImageGenerator = false, backendUrl = "http://192.0.2.44:11434"
         )
 
         val resolution = resolveImageGenConfig(servers, ImageGenBackend.A1111, imageGenPinnedUrl(chatter))
@@ -177,7 +177,7 @@ class ImageGenResolutionTest {
     fun theSharedBuilderAttachesBasicAuthAndNormalizesTheUrl() {
         val request = imageGenRequestBuilder(local, IMAGE_GEN_TXT2IMG_PATH).build()
 
-        assertEquals("http://192.168.1.50:7860/sdapi/v1/txt2img", request.url.toString())
+        assertEquals("http://192.0.2.50:7860/sdapi/v1/txt2img", request.url.toString())
         assertEquals(
             "a generation must send the configured entry's Basic credentials",
             Credentials.basic("nikos", "s3cret"),
@@ -189,13 +189,13 @@ class ImageGenResolutionTest {
     fun theSharedBuilderAttachesApiKeyAuthAndStripsTheSavedTrailingSlash() {
         val request = imageGenRequestBuilder(remote, IMAGE_GEN_SD_MODELS_PATH).build()
 
-        assertEquals("http://192.168.1.9:7860/sdapi/v1/sd-models", request.url.toString())
+        assertEquals("http://192.0.2.9:7860/sdapi/v1/sd-models", request.url.toString())
         assertEquals("Bearer attic-key", request.header("Authorization"))
     }
 
     @Test
     fun theSharedBuilderSendsNoHeaderWhenAuthIsNone() {
-        val open = ServerConfig(name = "Open A1111", url = "http://192.168.1.20:7860")
+        val open = ServerConfig(name = "Open A1111", url = "http://192.0.2.20:7860")
         val request = imageGenRequestBuilder(open, IMAGE_GEN_TXT2IMG_PATH).build()
 
         assertNull(request.header("Authorization"))
@@ -208,16 +208,16 @@ class ImageGenResolutionTest {
         // stale address that no entry matches — the 401 this fix removes.
         val generator = Persona(
             name = "Painter", themeColor = Color(0xFF4ADE80), model = "", systemPrompt = "",
-            isImageGenerator = true, backendUrl = "http://192.168.1.50:7860/"
+            isImageGenerator = true, backendUrl = "http://192.0.2.50:7860/"
         )
         val chatter = Persona(
             name = "Chatty", themeColor = Color(0xFF4ADE80), model = "[Home] llama3", systemPrompt = "",
-            isImageGenerator = false, backendUrl = "http://192.168.1.50:7860" // a gateway on the same host
+            isImageGenerator = false, backendUrl = "http://192.0.2.50:7860" // a gateway on the same host
         )
 
         val after = rewritePersonasBackendUrl(
             listOf(generator, chatter),
-            "http://192.168.1.50:7860",
+            "http://192.0.2.50:7860",
             "http://100.64.0.7:7860",
             forImageGenerators = true
         )
@@ -225,7 +225,7 @@ class ImageGenResolutionTest {
         assertEquals("http://100.64.0.7:7860", after[0].backendUrl)
         assertEquals(
             "a non-generator persona's gateway URL must NOT be rewritten",
-            "http://192.168.1.50:7860",
+            "http://192.0.2.50:7860",
             after[1].backendUrl
         )
     }
@@ -234,18 +234,18 @@ class ImageGenResolutionTest {
     fun editingAGatewayUrlRepointsGatewayPersonasButNeverImageGenerators() {
         val gatewayPersona = Persona(
             name = "Chatty", themeColor = Color(0xFF4ADE80), model = "[Home] llama3", systemPrompt = "",
-            isImageGenerator = false, backendUrl = "http://192.168.1.9:8880"
+            isImageGenerator = false, backendUrl = "http://192.0.2.9:8880"
         )
         // An image generator whose backendUrl is the SAME string as the gateway's: independent
         // registries, same host, must NOT be carried across by a gateway URL edit.
         val imagePersona = Persona(
             name = "Painter", themeColor = Color(0xFF4ADE80), model = "", systemPrompt = "",
-            isImageGenerator = true, backendUrl = "http://192.168.1.9:8880"
+            isImageGenerator = true, backendUrl = "http://192.0.2.9:8880"
         )
 
         val after = rewritePersonasBackendUrl(
             listOf(gatewayPersona, imagePersona),
-            "http://192.168.1.9:8880",
+            "http://192.0.2.9:8880",
             "http://100.64.0.9:8880",
             forImageGenerators = false
         )
@@ -253,7 +253,7 @@ class ImageGenResolutionTest {
         assertEquals("http://100.64.0.9:8880", after[0].backendUrl)
         assertEquals(
             "an image-generator persona must NOT be rewritten by a gateway URL edit",
-            "http://192.168.1.9:8880",
+            "http://192.0.2.9:8880",
             after[1].backendUrl
         )
     }
@@ -262,17 +262,17 @@ class ImageGenResolutionTest {
     fun onlyExactNormalizedUrlsAreRewrittenNeverPrefixes() {
         val other = Persona(
             name = "Other", themeColor = Color(0xFF4ADE80), model = "", systemPrompt = "",
-            isImageGenerator = true, backendUrl = "http://192.168.1.50:7860/v1"
+            isImageGenerator = true, backendUrl = "http://192.0.2.50:7860/v1"
         )
 
         val after = rewritePersonasBackendUrl(
             listOf(other),
-            "http://192.168.1.50:7860",
+            "http://192.0.2.50:7860",
             "http://100.64.0.7:7860",
             forImageGenerators = true
         )
 
-        assertEquals("http://192.168.1.50:7860/v1", after[0].backendUrl)
+        assertEquals("http://192.0.2.50:7860/v1", after[0].backendUrl)
     }
 
     @Test
@@ -288,10 +288,10 @@ class ImageGenResolutionTest {
             listOf(
                 Persona(
                     name = "Painter", themeColor = Color(0xFF4ADE80), model = "", systemPrompt = "",
-                    isImageGenerator = true, backendUrl = "  http://192.168.1.50:7860/  "
+                    isImageGenerator = true, backendUrl = "  http://192.0.2.50:7860/  "
                 )
             ),
-            "http://192.168.1.50:7860",
+            "http://192.0.2.50:7860",
             "http://100.64.0.7:7860",
             forImageGenerators = true
         ).first()

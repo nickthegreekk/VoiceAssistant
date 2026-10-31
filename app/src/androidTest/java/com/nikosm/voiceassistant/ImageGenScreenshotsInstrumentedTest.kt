@@ -89,9 +89,9 @@ class ImageGenScreenshotsInstrumentedTest {
 
     /** A representative list: two A1111 entries and one ComfyUI entry. */
     private fun entries() = listOf(
-        ServerConfig("Local A1111", "http://192.168.1.50:7860"),
-        ServerConfig("Backup A1111", "http://192.168.1.51:7860"),
-        ServerConfig("Attic Comfy", "http://192.168.1.9:8188", backendType = ImageGenBackend.COMFYUI)
+        ServerConfig("Local A1111", "http://192.0.2.50:7860"),
+        ServerConfig("Backup A1111", "http://192.0.2.51:7860"),
+        ServerConfig("Attic Comfy", "http://192.0.2.9:8188", backendType = ImageGenBackend.COMFYUI)
     )
 
     private fun capture(name: String) {
@@ -139,7 +139,7 @@ class ImageGenScreenshotsInstrumentedTest {
     fun personaEditorShowsTheStalePinNote() {
         // The reported bug's state: the persona still pins an address no entry has. It now says so
         // and names the server that will be used instead.
-        capturePersonaEditor("persona-editor-stale-pin.png", backendUrl = "http://192.168.1.50:9999")
+        capturePersonaEditor("persona-editor-stale-pin.png", backendUrl = "http://192.0.2.50:9999")
     }
 
     private fun capturePersonaEditor(name: String, backendUrl: String) {

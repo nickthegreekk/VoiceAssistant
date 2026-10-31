@@ -87,9 +87,9 @@ class ImageGenSettingsComposeTest {
 
     /** Two A1111 entries and one ComfyUI entry, with distinct names so each row is findable. */
     private fun entries() = listOf(
-        ServerConfig("Local A1111", "http://192.168.1.50:7860"),
-        ServerConfig("Backup A1111", "http://192.168.1.51:7860"),
-        ServerConfig("Attic Comfy", "http://192.168.1.9:8188", backendType = ImageGenBackend.COMFYUI)
+        ServerConfig("Local A1111", "http://192.0.2.50:7860"),
+        ServerConfig("Backup A1111", "http://192.0.2.51:7860"),
+        ServerConfig("Attic Comfy", "http://192.0.2.9:8188", backendType = ImageGenBackend.COMFYUI)
     )
 
     private fun render(restoration: StateRestorationTester) {

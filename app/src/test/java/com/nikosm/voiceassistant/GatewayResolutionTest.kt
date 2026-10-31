@@ -24,7 +24,7 @@ class GatewayResolutionTest {
 
     private val homeGateway = ServerConfig(
         name = "Home Gateway",
-        url = "http://192.168.1.42:8880",
+        url = "http://192.0.2.42:8880",
         username = "nikos",
         password = "s3cret",
         authType = AuthType.BASIC
@@ -32,7 +32,7 @@ class GatewayResolutionTest {
 
     private val atticGateway = ServerConfig(
         name = "Attic",
-        url = "http://192.168.1.9:8880",
+        url = "http://192.0.2.9:8880",
         apiKey = "attic-key",
         authType = AuthType.API_KEY
     )
@@ -41,7 +41,7 @@ class GatewayResolutionTest {
 
     @Test
     fun byteIdenticalUrlResolvesTheConfiguredEntryWithItsCredentials() {
-        val resolved = resolveGatewayConfig(gateways, "http://192.168.1.42:8880")
+        val resolved = resolveGatewayConfig(gateways, "http://192.0.2.42:8880")
 
         assertSame(
             "an exact URL must resolve to the saved entry itself (credentials included), " +
@@ -53,14 +53,14 @@ class GatewayResolutionTest {
 
     @Test
     fun trailingSlashAndSurroundingWhitespaceStillResolveTheSameEntry() {
-        assertSame(homeGateway, resolveGatewayConfig(gateways, "http://192.168.1.42:8880/"))
-        assertSame(homeGateway, resolveGatewayConfig(gateways, "  http://192.168.1.42:8880//  "))
+        assertSame(homeGateway, resolveGatewayConfig(gateways, "http://192.0.2.42:8880/"))
+        assertSame(homeGateway, resolveGatewayConfig(gateways, "  http://192.0.2.42:8880//  "))
     }
 
     @Test
     fun aSavedEntryWithATrailingSlashIsMatchedByAPlainUrl() {
-        val slashed = ServerConfig(name = "Slashed", url = "http://192.168.1.7:8880/")
-        val resolved = resolveGatewayConfig(listOf(slashed), "http://192.168.1.7:8880")
+        val slashed = ServerConfig(name = "Slashed", url = "http://192.0.2.7:8880/")
+        val resolved = resolveGatewayConfig(listOf(slashed), "http://192.0.2.7:8880")
 
         assertSame(slashed, resolved)
     }
@@ -91,15 +91,15 @@ class GatewayResolutionTest {
         )
         assertNull(resolveGatewayConfig(gateways, ""))
         assertNull(resolveGatewayConfig(gateways, "   "))
-        assertNull(resolveGatewayConfig(emptyList(), "http://192.168.1.42:8880"))
+        assertNull(resolveGatewayConfig(emptyList(), "http://192.0.2.42:8880"))
     }
 
     @Test
     fun urlMatchStillWinsWhenTheBackendUrlLooksLikeAName() {
         // Guard the ordering: a Backend URL equal to a configured URL is resolved by URL,
         // and a name that happens to equal another entry's URL is not mistranslated.
-        val named = ServerConfig(name = "http://192.168.1.9:8880", url = "http://192.168.1.99:8880")
-        assertSame(named, resolveGatewayConfig(listOf(named), "http://192.168.1.9:8880"))
+        val named = ServerConfig(name = "http://192.0.2.9:8880", url = "http://192.0.2.99:8880")
+        assertSame(named, resolveGatewayConfig(listOf(named), "http://192.0.2.9:8880"))
     }
 
     @Test

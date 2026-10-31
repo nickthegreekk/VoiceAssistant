@@ -147,6 +147,37 @@ internal fun resolveGatewayConfig(
 internal fun AssistantService.findGatewayConfig(backendUrl: String, displayName: String? = null): ServerConfig? =
     resolveGatewayConfig(_serverBases.value, backendUrl, displayName)
 
+/**
+ * Why [gw] cannot authenticate a request, or null when it can.
+ *
+ * A BASIC entry with a username and no password used to be sent as `Basic Celeste:` and the
+ * server's answer arrived as "Server error: 401" — a sentence that points at the server's user
+ * database, while the actual repair is the empty field in Servers settings. The same shape
+ * applies to a missing username or API key.
+ *
+ * Callers refuse *before* building the request: an unauthenticated request cannot succeed, and
+ * the 401 it earns is the silent failure this check exists to remove.
+ * [ServerConfig.effectiveAuthType] is used rather than the raw field, because a legacy entry
+ * with a username and authType NONE has always been sent as BASIC.
+ */
+internal fun gatewayCredentialProblem(gw: ServerConfig): String? = when (gw.effectiveAuthType) {
+    AuthType.NONE -> null
+    AuthType.BASIC -> when {
+        gw.username.isNullOrBlank() && gw.password.isNullOrBlank() ->
+            "gateway '${gw.name}' uses BASIC auth but has no username or password — set them in Servers settings"
+        gw.username.isNullOrBlank() ->
+            "gateway '${gw.name}' uses BASIC auth but has no username — set it in Servers settings"
+        gw.password.isNullOrBlank() ->
+            "gateway '${gw.name}' uses BASIC auth but has no password — set it in Servers settings"
+        else -> null
+    }
+    AuthType.API_KEY -> if (gw.apiKey.isNullOrBlank()) {
+        "gateway '${gw.name}' uses API-key auth but has no API key — set it in Servers settings"
+    } else {
+        null
+    }
+}
+
 internal fun AssistantService.testGatewayVoice(text: String, url: String, language: String, engine: String, kokoroVoice: String) {
     // M1: resolve through the shared resolver (trim + trailing-slash normalization +
     // name match) instead of the old credential-less `?: ServerConfig("Test", url)`
@@ -163,6 +194,13 @@ internal fun AssistantService.testGatewayVoice(text: String, url: String, langua
         // Visible, non-silent failure. Deliberately does NOT touch assistantState:
         // a refused test must not disturb whatever turn owns the state machine.
         updateNotification("Gateway not found: $url")
+        return
+    }
+    gatewayCredentialProblem(gw)?.let { problem ->
+        android.util.Log.e("AssistantService", "Gateway voice test refused — $problem. No request was sent.")
+        // Visible, non-silent refusal: name the empty field in Servers settings instead of
+        // letting the server answer with a bare 401 the user never sees.
+        updateNotification(problem)
         return
     }
     serviceScope.launch {
@@ -282,6 +320,15 @@ internal suspend fun AssistantService.synthesizeWithGateway(text: String, person
         )
         return Pair(null, null)
     }
+    gatewayCredentialProblem(gw)?.let { problem ->
+        android.util.Log.e(
+            "AssistantService",
+            "Gateway synthesis refused — $problem. No request was sent, so persona " +
+                "'${persona.name}' cannot speak the reply until the credential is set."
+        )
+        updateNotification(problem)
+        return Pair(null, null)
+    }
     val baseUrl = gw.url.trimEnd('/')
     // Non-Translator personas keep targetLanguage at its "English" default no matter
     // what language the model actually replied in, so the gateway would apply an
@@ -395,6 +442,15 @@ internal suspend fun AssistantService.transcribeWithGateway(file: File, persona:
 
     var lastEx: Exception? = null
     for (gw in gwsToTry.distinct()) {
+        val credentialProblem = gatewayCredentialProblem(gw)
+        if (credentialProblem != null) {
+            android.util.Log.e(
+                "AssistantService",
+                "Gateway transcription refused — $credentialProblem. No request was sent."
+            )
+            lastEx = Exception(credentialProblem)
+            continue
+        }
         val url = gw.url
         try {
             val result = withContext(Dispatchers.IO) {

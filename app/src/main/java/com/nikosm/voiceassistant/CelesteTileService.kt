@@ -1,5 +1,6 @@
 package com.nikosm.voiceassistant
 
+import android.annotation.SuppressLint
 import android.app.PendingIntent
 import android.content.Intent
 import android.os.Build
@@ -62,6 +63,9 @@ class CelesteTileService : TileService() {
         }
     }
 
+    // The deprecated Intent overload is only reached below API 34; the 34+ branch above uses
+    // the PendingIntent overload. Lint cannot see through the runtime guard.
+    @SuppressLint("StartActivityAndCollapseDeprecated")
     private fun launchCeleste() {
         val intent = Intent(this, MainActivity::class.java).apply {
             flags = celesteTileLaunchFlags()

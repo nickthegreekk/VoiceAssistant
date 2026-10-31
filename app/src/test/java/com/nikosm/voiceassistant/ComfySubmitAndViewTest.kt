@@ -105,7 +105,7 @@ class ComfySubmitAndViewTest {
     fun theViewUrlEncodesEveryParameterAndCarriesTheEntrysCredentials() {
         val entry = ServerConfig(
             name = "Attic Comfy",
-            url = "http://192.168.1.9:8188/",
+            url = "http://192.0.2.9:8188/",
             username = "nikos",
             password = "s3cret",
             authType = AuthType.BASIC,
@@ -121,7 +121,7 @@ class ComfySubmitAndViewTest {
 
         assertEquals("GET", request.method)
         val url = request.url
-        assertEquals("http://192.168.1.9:8188/view", "${url.scheme}://${url.host}:${url.port}${url.encodedPath}")
+        assertEquals("http://192.0.2.9:8188/view", "${url.scheme}://${url.host}:${url.port}${url.encodedPath}")
         // Every parameter survives the round trip...
         assertEquals("my image #2 100%.png", url.queryParameter("filename"))
         assertEquals("sub/dir", url.queryParameter("subfolder"))
