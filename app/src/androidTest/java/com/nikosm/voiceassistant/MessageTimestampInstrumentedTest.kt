@@ -523,9 +523,11 @@ class MessageTimestampInstrumentedTest {
             // The stamped Direct-Ollama prompt also carries MODEL_STAMP_INSTRUCTION as a
             // suffix, so it is part of the fixed cost this budget subtracts — pulled in from
             // the production constant, not pasted as a literal.
+            // The production budget also holds back an eighth of the window for tokenizer
+            // drift (measured 32,672 prompt + 96 output at 32k); this recomputation mirrors it.
             val budget = SMALL_NUM_CTX - RESERVED_OUTPUT_TOKENS -
                 estimateTokens(LOCAL_SYSTEM_PROMPT) - estimateTokens(MODEL_STAMP_INSTRUCTION) -
-                estimateTokens(CURRENT_MESSAGE) + BUDGET_SLACK
+                estimateTokens(CURRENT_MESSAGE) - (SMALL_NUM_CTX / 8) + BUDGET_SLACK
 
             // budgetedHistory's own rule, recomputed: newest-first, stop at the first that
             // does not fit, never skip past it.

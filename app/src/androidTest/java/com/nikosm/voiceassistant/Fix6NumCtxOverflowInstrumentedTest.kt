@@ -316,6 +316,39 @@ class Fix6NumCtxOverflowInstrumentedTest {
         scratchFiles += file
         return Uri.fromFile(file)
     }
+
+    // ---- the tokenizer headroom ---------------------------------------------------------------
+
+    @Test
+    fun historyBudgetHoldsBackAnEighthOfTheWindow() {
+        val budget = service.resolveHistoryBudget(
+            contextWindow = 32_768,
+            reservedOutput = 4_091,
+            systemPrompt = "s".repeat(1_981 * 4),
+            modelText = "m".repeat(39 * 4),
+            extraFixed = "t".repeat(3_591 * 4),
+        )
+        // promptTokens = 1_981 + 39 + 3_591 = 5_611
+        // raw = 32_768 - 4_091 - 5_611 = 23_066; headroom = 32_768 / 8 = 4_096
+        assertEquals(
+            "the prompt must not be allowed to fill the window: measured 32,672 + 96 at 32k",
+            18_970,
+            budget,
+        )
+    }
+
+    @Test
+    fun historyBudgetNeverGoesNegativeWhenTheHeadroomExceedsWhatIsLeft() {
+        val budget = service.resolveHistoryBudget(
+            contextWindow = 1_024,
+            reservedOutput = 100,
+            systemPrompt = "s".repeat(3_600), // 900 tokens
+            modelText = "m".repeat(4), // 1 token
+        )
+        // raw = 1_024 - 100 - 901 = 23; headroom = 128 -> clamped to zero
+        assertEquals(0, budget)
+    }
+
     // ---- driving a turn through the production entry point -----------------------------------
 
     /** Registers [stub] under the exact name the probe persona's `[Name] model` tag points at. */

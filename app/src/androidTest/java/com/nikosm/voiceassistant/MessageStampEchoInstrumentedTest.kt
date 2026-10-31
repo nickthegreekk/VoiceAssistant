@@ -11,6 +11,7 @@ import java.net.Socket
 import kotlin.concurrent.thread
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
@@ -69,6 +70,11 @@ class MessageStampEchoInstrumentedTest {
             android.content.Context.BIND_AUTO_CREATE))
         assertTrue(bound.await(30, java.util.concurrent.TimeUnit.SECONDS))
         service = s!!
+        // Join the service's startup history load before the test seeds _messages: onCreate ->
+        // loadSettings -> switchPersona publishes asynchronously, and a late publish overwrites
+        // the seeded turns underneath the test (the first turn then waits on an index that no
+        // longer exists). Same guard as Fix6NumCtxOverflowInstrumentedTest.
+        kotlinx.coroutines.runBlocking { service.awaitPersonaHistoryIo() }
         // Snapshotted HERE rather than in a second @Before: JUnit does not order them, and
         // this one needs the bound service.
         personasBefore = service.personas.value
@@ -162,6 +168,56 @@ class MessageStampEchoInstrumentedTest {
             assertTrue(
                 "a stamped Direct-Ollama request must tell the model who owns the brackets",
                 systemPrompt.contains("Never write a stamp")
+            )
+
+            // Ollama reads `think` from the request, not from `options`; this persona's
+            // model is not a known thinking model, so the value is false.
+            // The stub records one entry per accepted connection; the first can be a bodiless
+            // probe. Parse the first request that actually carries JSON.
+            val firstRequest = JSONObject(bodies.first { it.isNotBlank() })
+            assertFalse(
+                "options must not carry think: Ollama ignores it there",
+                firstRequest.optJSONObject("options")?.has("think") == true
+            )
+            assertEquals(
+                "think must be a top-level request field, false for this model",
+                false,
+                firstRequest.optBoolean("think", true)
+            )
+        }
+    }
+
+    @Test
+    fun aThinkingPersonaSendsThinkAtTheTopLevel() {
+        val bodies = mutableListOf<String>()
+        Stub(reply = REPLY) { bodies += it }.use { stub ->
+            val persona = Persona(
+                name = "StampThinkProbe", themeColor = Color(0xFF4ADE80),
+                model = "[$PROBE_SERVER] deepseek-r1:8b", systemPrompt = "You are terse.",
+                numCtx = 4096, maxTokens = 256, enableThinking = true
+            )
+            onMain {
+                service._ollamaBaseUrls.value =
+                    service._ollamaBaseUrls.value.filterNot { it.name == PROBE_SERVER }
+                service.addOllamaBase(PROBE_SERVER, stub.url)
+                service.addPersona(persona)
+                service.currentPersonaName = persona.name
+                service.messagesOwnerName = persona.name
+                service._messages.value = emptyList()
+            }
+            val before = service._messages.value.size
+            onMain { service.sendTextMessageToServer("hello", persona) }
+            awaitAnswer(before)
+
+            val body = JSONObject(bodies.first { it.isNotBlank() })
+            assertEquals(
+                "a thinking persona must send think=true at the top level",
+                true,
+                body.optBoolean("think", false)
+            )
+            assertFalse(
+                "options must not carry think, even when it is true",
+                body.optJSONObject("options")?.has("think") == true
             )
         }
     }
